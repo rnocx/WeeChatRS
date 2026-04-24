@@ -5,3 +5,4 @@ pub mod theme;
 mod settings;
 mod input;
 mod event_handler;
+mod emoji;
