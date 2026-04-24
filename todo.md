@@ -18,8 +18,11 @@
 - [x] Merged server headers — `irc.server.*` buffer entry acts as the group header (uppercase, accent color, gap above) instead of a separate label row
 - [x] Global shortcuts — `Meta+↑/↓` cycle buffers, `Meta+B/N` toggle panels
 - [x] Buffer reordering — drag and drop buffers and server group headers; moving a server header moves its entire channel tree; order persists across restarts and reconnects
+- [ ] Spell checking — client-side via `symspell` (pure Rust, no system deps); check words as the user types and show a suggestions popup above the input bar when the cursor is on a misspelled word; stretch goal: paint red underlines over the `TextEdit` using `ui.painter()` and galley word positions
 - [ ] `Ctrl+K` quick buffer switcher — fuzzy find across all buffers
 - [ ] `Alt+1-9` jump to buffer by number
+- [ ] Keybinding editor — a window listing all keyboard shortcuts with the ability to rebind them; shortcuts stored in `AppSettings` and read at runtime instead of being hardcoded; accessible from the Settings window
+- [ ] `/set` and `/fset` UX — currently users must type the full option path (e.g. `/set irc.look.highlight_pv " "`); add Tab completion for option names and, for `/fset`, a browsable settings panel similar to the WeeChat TUI `fset` buffer
 
 ## 🎨 Styling & Polishing
 - [x] Modern UI redesign — card-style login, layered surfaces, rounded aesthetic
