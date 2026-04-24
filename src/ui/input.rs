@@ -1,75 +1,71 @@
 use egui::text_edit::TextEditState;
 use egui::text::{CCursorRange, CCursor};
-use crate::ui::app::WeeChatApp;
-
-pub(crate) struct CompletionState {
-    #[allow(dead_code)]
-    pub(crate) original_word: String,
-    pub(crate) matches: Vec<String>,
-    pub(crate) index: usize,
-    pub(crate) word_start_idx: usize,
-}
+use crate::ui::app::{WeeChatApp, CompletionState};
+use crate::ui::emoji;
 
 impl WeeChatApp {
     pub(crate) fn perform_completion(&mut self, ctx: &egui::Context, id: egui::Id) {
-        let nicks = match self.selected_buffer_id.as_ref()
-            .and_then(|id| self.buffers.iter().find(|b| &b.id == id))
-            .map(|b| b.nicks.clone())
-        {
-            Some(n) => n,
-            None => return,
-        };
-
-        let mut new_cursor_pos = 0;
+        let mut new_cursor_char = 0usize;
 
         if let Some(state) = &mut self.completion {
+            // Cycle to next match
             if state.matches.is_empty() { return; }
             state.index = (state.index + 1) % state.matches.len();
-            let matched_nick = &state.matches[state.index];
+            let matched = state.matches[state.index].clone();
 
             let mut new_text = self.input_text[..state.word_start_idx].to_string();
-            new_text.push_str(matched_nick);
-            if state.word_start_idx == 0 {
+            new_text.push_str(&matched);
+            // Nick at line start gets ": ", emoji and mid-line nicks get " "
+            if !state.original_word.starts_with(':') && state.word_start_idx == 0 {
                 new_text.push_str(": ");
             } else {
                 new_text.push(' ');
             }
-            new_cursor_pos = new_text.len();
+            new_cursor_char = new_text.chars().count();
             self.input_text = new_text;
         } else {
-            let last_word_start = self.input_text.rfind(' ').map(|i| i + 1).unwrap_or(0);
-            let word_to_complete = self.input_text[last_word_start..].to_string();
-            if word_to_complete.is_empty() { return; }
+            // Start new completion
+            let word_start = self.input_text.rfind(' ').map(|i| i + 1).unwrap_or(0);
+            let word = self.input_text[word_start..].to_string();
+            if word.is_empty() { return; }
 
-            let matches: Vec<String> = nicks.iter()
-                .filter(|n| n.name.to_lowercase().starts_with(&word_to_complete.to_lowercase()))
-                .map(|n| n.name.clone())
-                .collect();
+            let matches: Vec<String> = if word.starts_with(':') && word.len() >= 2 {
+                emoji::find_matches(&word[1..])
+            } else {
+                match self.selected_buffer_id.as_ref()
+                    .and_then(|bid| self.buffers.iter().find(|b| &b.id == bid))
+                {
+                    Some(buf) => buf.nicks.iter()
+                        .filter(|n| n.name.to_lowercase().starts_with(&word.to_lowercase()))
+                        .map(|n| n.name.clone())
+                        .collect(),
+                    None => return,
+                }
+            };
 
             if !matches.is_empty() {
-                let matched_nick = &matches[0];
-                let mut new_text = self.input_text[..last_word_start].to_string();
-                new_text.push_str(matched_nick);
-                if last_word_start == 0 {
+                let matched = matches[0].clone();
+                let mut new_text = self.input_text[..word_start].to_string();
+                new_text.push_str(&matched);
+                if !word.starts_with(':') && word_start == 0 {
                     new_text.push_str(": ");
                 } else {
                     new_text.push(' ');
                 }
-
-                new_cursor_pos = new_text.len();
+                new_cursor_char = new_text.chars().count();
                 self.input_text = new_text;
                 self.completion = Some(CompletionState {
-                    original_word: word_to_complete,
+                    original_word: word,
                     matches,
                     index: 0,
-                    word_start_idx: last_word_start,
+                    word_start_idx: word_start,
                 });
             }
         }
 
-        if new_cursor_pos > 0 {
+        if new_cursor_char > 0 {
             if let Some(mut state) = TextEditState::load(ctx, id) {
-                state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(new_cursor_pos))));
+                state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(new_cursor_char))));
                 state.store(ctx, id);
             }
         }
@@ -186,6 +182,18 @@ impl WeeChatApp {
                         "command": command
                     })));
                 }
+            }
+            client.send_api("GET /api/buffers", Some("_list_buffers"), None);
+        }
+    }
+
+    pub(crate) fn send_command_to_buffer(&mut self, buffer_id: &str, command: &str) {
+        if let Some(client) = &self.client {
+            if let Ok(numeric_id) = buffer_id.parse::<i64>() {
+                client.send_api("POST /api/input", None, Some(serde_json::json!({
+                    "buffer_id": numeric_id,
+                    "command": command
+                })));
             }
             client.send_api("GET /api/buffers", Some("_list_buffers"), None);
         }

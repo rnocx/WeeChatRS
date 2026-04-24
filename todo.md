@@ -1,34 +1,60 @@
-# WeeChatRS (Rust) - Development TODO
+# WeeChatRS — Development TODO
 
 ## 🛠 Core Protocol & Connectivity
-- [x] **Read Synchronization:** Sync read markers with the server when buffers are selected.
-- [x] **Sync Markers:** Visual indicator in chat for where you last left off.
-- [x] **Auto-Reconnection:** Implement exponential backoff for dropped connections.
-- [ ] **Server Lag Indicator:** Show real-time relay latency in the UI.
+- [x] Read synchronization — sync read markers with the server on buffer select
+- [x] Sync markers — unread divider line in chat
+- [x] Auto-reconnection — exponential backoff on dropped connections
+- [x] Float ID parsing — relay sends buffer IDs as JSON floats; `parse_id()` handles i64/f64/str
+- [ ] Server lag indicator — show real-time relay latency in the toolbar
+- [ ] Auth error feedback — authentication failures are swallowed as plain disconnects; surface as a distinct error state
 
 ## ⌨️ UX & Productivity
-- [x] **Command History:** Cycle through sent messages with Arrow Up/Down in the input bar.
-- [x] **Buffer Search:** Local search (`Ctrl+F`) for the current buffer scrollback.
-- [x] **Context Menus:** Right-click nicks for `/query` and `/whois`.
-- [x] **Tab Completion:** Nickname completion in the input bar with cycling.
-- [x] **Global Shortcuts:**
-    - [x] `Meta + Arrow Up/Down` to jump between buffers.
-    - [ ] `Ctrl+K` for quick buffer switcher (fuzzy find).
-    - [ ] `Alt+1-9` to jump to specific buffers.
-- [ ] **Emoji Support:** colon-completion (e.g., `:smile:`) or a dedicated picker.
+- [x] Command history — Arrow Up/Down cycles sent messages in the input bar
+- [x] Buffer search — `Ctrl+F` filters current buffer scrollback
+- [x] Context menus — right-click nicks (query, whois); right-click buffers (leave, close)
+- [x] Tab completion — nick completion with cycling
+- [x] Emoji completion — `:name` + Tab inserts emoji (e.g. `:fire` → 🔥), cycles through matches
+- [x] Server group headers — labeled dividers between networks in buffer list, toggleable in Settings
+- [x] Merged server headers — `irc.server.*` buffer entry acts as the group header (uppercase, accent color, gap above) instead of a separate label row
+- [x] Global shortcuts — `Meta+↑/↓` cycle buffers, `Meta+B/N` toggle panels
+- [x] Buffer reordering — drag and drop buffers and server group headers; moving a server header moves its entire channel tree; order persists across restarts and reconnects
+- [ ] `Ctrl+K` quick buffer switcher — fuzzy find across all buffers
+- [ ] `Alt+1-9` jump to buffer by number
 
 ## 🎨 Styling & Polishing
-- [x] **Modern UI Redesign:** Card-style login, layered surfaces, and rounded aesthetic.
-- [x] **Status Bar:** Added top toolbar with toggles and connection status.
-- [ ] **User Icons:** Subtle icons or avatars next to nicks in the list.
-- [ ] **Dynamic Layout:** Option to move the buffer list to the right or top.
+- [x] Modern UI redesign — card-style login, layered surfaces, rounded aesthetic
+- [x] Top toolbar — connection status, sidebar toggles, settings button
+- [ ] Unread count badge — show message count next to buffer name, not just the highlight dot
+- [ ] User icons — subtle avatars next to nicks in the list
+- [ ] Dynamic layout — option to move buffer list to the right or top
 
 ## 💾 Persistence & Security
-- [x] **Session Persistence:** Save Host, Port, and SSL settings locally.
-- [x] **Theming Persistence:** Save the currently selected `.itermcolors` theme.
-- [ ] **Secure Storage:** Store relay password in the system keyring (macOS Keychain, etc.).
+- [x] Session persistence — host, port, SSL, UI preferences saved across restarts
+- [x] Theme persistence — selected `.itermcolors` theme saved
+- [ ] Secure storage — relay password in system keyring (macOS Keychain, libsecret, etc.)
+- [ ] Scroll position memory — remember per-buffer scroll position when switching back
 
 ## 📷 Media & Attachments
-- [ ] **Inline Images:** Detect image URLs and render small previews in chat.
-- [ ] **File Drag & Drop:** Support for uploading files via common services.
-- [ ] **Code Syntax Highlighting:** Use a lighter version of `syntect` for code blocks in chat.
+- [x] Inline images — `🖼 preview` button on image URLs (.png/.jpg/.gif/.webp); click to load and display inline, toggleable in Settings
+- [x] Link previews — `🔗 preview` button on non-image URLs; fetches OG tags (title, description, og:image), renders card with left accent bar, toggleable in Settings
+- [ ] File drag & drop — upload via common paste services
+- [ ] Code syntax highlighting — `syntect` for fenced code blocks in chat
+
+---
+
+## 🔧 Code Quality & Performance
+
+- [ ] **Cache compiled regexes** — two regexes compiled on every call:
+    - `strip_ansi()` in `event_handler.rs:361` — once per highlight notification
+    - `ANSIParser::parse()` in `ansi.rs:82` — once per rendered message line
+    - Fix: `std::sync::OnceLock` for both
+
+- [ ] **Single buffer lookup per frame** — `app.rs:428-434` runs 7 separate `buffers.iter().find()` calls for the same selected buffer every frame. Extract once into a local `Option<&Buffer>` and derive all fields from it.
+
+- [ ] **Unsafe `unwrap()` in render loop** — `app.rs:636` calls `.as_ref().unwrap()` on `current_buffer_last_read_id` inside an `is_some()` guard. Replace with `if let Some(last_read) = &current_buffer_last_read_id`.
+
+- [ ] **VecDeque for command history** — `input.rs:159` uses `Vec::remove(0)` to trim to 100 items (O(n) shift). Replace with `VecDeque` + `pop_front`.
+
+- [ ] **VecDeque for message buffer** — `event_handler.rs:395,457` use `buffer.messages.remove(0)` when over `MAX_MESSAGES` (O(n)). Use `VecDeque` in `Buffer::messages` for O(1) front removal.
+
+- [ ] **Tests** — `ANSIParser::parse`, `extract_metadata`, `sort_buffers`, and `parse_id` are pure/near-pure functions; good first targets for unit tests.

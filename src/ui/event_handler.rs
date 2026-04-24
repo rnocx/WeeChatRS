@@ -14,6 +14,7 @@ impl WeeChatApp {
             RelayEvent::Connected => {
                 self.is_connecting = false;
                 self.connection_status = "Connected".to_string();
+                self.buffers.clear(); 
                 if let Some(client) = &self.client {
                     client.send_api("GET /api/buffers", Some("_list_buffers"), None);
                     client.send_api("POST /api/sync", None, Some(serde_json::json!({"colors": "ansi", "buffers": "all"})));
@@ -25,12 +26,15 @@ impl WeeChatApp {
                 if !self.auto_reconnect {
                     self.client = None;
                 }
+                self.buffers.clear();
+                self.selected_buffer_id = None;
                 self.connection_status = "Disconnected".to_string();
             }
             RelayEvent::Error(e) => {
                 self.connection_status = format!("Error: {}", e);
                 if !self.auto_reconnect {
                     self.client = None;
+                    self.buffers.clear();
                 }
             }
             RelayEvent::Message(resp) => {
@@ -39,7 +43,7 @@ impl WeeChatApp {
         }
     }
 
-    fn process_response(&mut self, resp: WeeChatResponse) {
+    pub(crate) fn process_response(&mut self, resp: WeeChatResponse) {
         if let Some(id) = &resp.request_id {
             if id == "_list_buffers" {
                 self.handle_buffer_list(resp);
@@ -78,6 +82,12 @@ impl WeeChatApp {
         }
     }
 
+    fn parse_id(v: &Value) -> Option<String> {
+        v.as_i64().map(|i| i.to_string())
+            .or_else(|| v.as_f64().map(|f| (f as i64).to_string()))
+            .or_else(|| v.as_str().map(|s| s.to_string()))
+    }
+
     fn body_as_vec(resp: &WeeChatResponse) -> Vec<&Value> {
         match &resp.body {
             Some(Value::Array(a)) => a.iter().collect(),
@@ -107,9 +117,12 @@ impl WeeChatApp {
         full_name: &str,
         plugin: &str,
     ) {
-        if full_name == "weechat" || plugin == "core" {
+        *kind = "unknown".to_string();
+        *server = "orphans".to_string();
+
+        if full_name == "weechat" || plugin == "core" || full_name == "core.weechat" {
             *kind = "core".to_string();
-            *server = "00_core".to_string();
+            *server = "!00_core".to_string(); // Forced to top
             return;
         }
 
@@ -117,37 +130,51 @@ impl WeeChatApp {
             if let Some(t) = vars.get("topic").and_then(|v| v.as_str()) { *topic = t.to_string(); }
             if let Some(m) = vars.get("modes").and_then(|v| v.as_str()) { *modes = m.to_string(); }
             if let Some(k) = vars.get("type").and_then(|v| v.as_str()) { *kind = k.to_string(); }
-            if let Some(s) = vars.get("server").and_then(|v| v.as_str()) { *server = s.to_lowercase(); }
+            if let Some(s) = vars.get("server").and_then(|v| v.as_str()) { *server = s.to_string().to_lowercase(); }
         }
-
+        
         if topic.is_empty() {
             if let Some(t) = obj.get("title").and_then(|v| v.as_str()) { *topic = t.to_string(); }
             else if let Some(t) = obj.get("topic").and_then(|v| v.as_str()) { *topic = t.to_string(); }
             else if let Some(t) = obj.get("topic_string").and_then(|v| v.as_str()) { *topic = t.to_string(); }
         }
 
-        if server.is_empty() {
+        if plugin == "irc" {
             let parts: Vec<&str> = full_name.split('.').collect();
             if parts.len() >= 2 {
-                if parts[0] == "irc" { *server = parts[1].to_lowercase(); }
-                else { *server = parts[0].to_lowercase(); }
-            } else {
-                *server = if !plugin.is_empty() { plugin.to_lowercase() } else { "z_orphans".to_string() };
+                let net_candidate = if parts[1] == "server" && parts.len() >= 3 {
+                    if *kind == "unknown" { *kind = "server".to_string(); }
+                    parts[2]
+                } else {
+                    parts[1]
+                };
+                *server = net_candidate.to_string().to_lowercase();
             }
-        }
-
-        if kind.is_empty() {
-            let parts: Vec<&str> = full_name.split('.').collect();
-            if parts.len() <= 2 || parts.contains(&"server") { *kind = "server".to_string(); }
-            else { *kind = "channel".to_string(); }
+            if *kind == "unknown" {
+                if parts.len() <= 2 || (parts.len() == 3 && parts[1] == "server") { *kind = "server".to_string(); }
+                else { *kind = "channel".to_string(); }
+            }
+        } else if !plugin.is_empty() {
+             if *server == "orphans" { *server = plugin.to_lowercase(); }
+             if *kind == "unknown" { *kind = "server".to_string(); }
         }
     }
 
     fn sort_buffers(buffers: &mut Vec<Buffer>) {
         buffers.sort_by(|a, b| {
-            if a.server != b.server { return a.server.cmp(&b.server); }
-            if a.kind == "server" && b.kind != "server" { return std::cmp::Ordering::Less; }
-            if b.kind == "server" && a.kind != "server" { return std::cmp::Ordering::Greater; }
+            // Group by server key
+            if a.server != b.server {
+                return a.server.cmp(&b.server);
+            }
+            
+            // Inside group: Roots (core/server) always first
+            let a_is_root = a.kind == "core" || a.kind == "server";
+            let b_is_root = b.kind == "core" || b.kind == "server";
+            
+            if a_is_root && !b_is_root { return std::cmp::Ordering::Less; }
+            if b_is_root && !a_is_root { return std::cmp::Ordering::Greater; }
+
+            // Then by buffer number
             a.number.cmp(&b.number)
         });
     }
@@ -158,21 +185,13 @@ impl WeeChatApp {
 
         for val in body {
             if let Some(obj) = val.as_object() {
-                let id = obj.get("id")
-                    .and_then(|v| v.as_i64().map(|i| i.to_string())
-                        .or_else(|| v.as_str().map(|s| s.to_string())));
+                let id = obj.get("id").and_then(|v| Self::parse_id(v));
 
                 let number = obj.get("number").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-
                 let name = obj.get("short_name").and_then(|v| v.as_str())
                     .or_else(|| obj.get("name").and_then(|v| v.as_str()))
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                let full_name = obj.get("name").and_then(|v| v.as_str())
-                    .unwrap_or(&name)
-                    .to_string();
-
+                    .unwrap_or("unknown").to_string();
+                let full_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
                 let plugin = obj.get("plugin").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
                 if let Some(id) = id {
@@ -218,6 +237,13 @@ impl WeeChatApp {
             Self::sort_buffers(&mut new_buffers);
             self.buffers = new_buffers;
 
+            // Re-apply user's custom ordering; new buffers not in the order go to the end.
+            if !self.buffer_order.is_empty() {
+                self.buffers.sort_by_key(|b| {
+                    self.buffer_order.iter().position(|id| id == &b.id).unwrap_or(usize::MAX)
+                });
+            }
+
             if let Some(target) = self.pending_buffer_switch.take() {
                 if let Some(found) = self.buffers.iter().find(|b| b.name == target || b.full_name.ends_with(&target)) {
                     let id = found.id.clone();
@@ -240,10 +266,20 @@ impl WeeChatApp {
         let body = Self::body_as_vec(&resp);
         for val in body {
             if let Some(obj) = val.as_object() {
-                let buffer_id = obj.get("buffer_id").and_then(|v| v.as_i64()).map(|i| i.to_string());
+                let buffer_id = obj.get("buffer_id").and_then(|v| Self::parse_id(v));
                 let priority = obj.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
 
                 if let Some(buffer_id) = buffer_id {
+                    // Skip the buffer the user is currently viewing.
+                    if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
+                        continue;
+                    }
+                    // Skip buffers the user has explicitly read in this or a previous session.
+                    // This suppresses stale hotlist entries when the server-side read call is
+                    // unavailable (older WeeChat versions).
+                    if self.cleared_buffer_ids.contains(&buffer_id) {
+                        continue;
+                    }
                     if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
                         buffer.activity = match priority {
                             3 => BufferActivity::Highlight,
@@ -262,7 +298,7 @@ impl WeeChatApp {
         let lines: Vec<Line> = body.iter().filter_map(|val| {
             let obj = val.as_object()?;
             let displayed = obj.get("displayed").and_then(|v| v.as_bool()).unwrap_or(true);
-            let id = obj.get("id").and_then(|v| v.as_i64()).map(|i| i.to_string())
+            let id = obj.get("id").and_then(|v| Self::parse_id(v))
                 .unwrap_or_else(|| "unknown".to_string());
             let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -349,7 +385,7 @@ impl WeeChatApp {
             if let Some(obj) = val.as_object() {
                 let displayed = obj.get("displayed").and_then(|v| v.as_bool()).unwrap_or(true);
                 let buffer_id = resp.buffer_id.map(|i| i.to_string())
-                    .or_else(|| obj.get("buffer_id").and_then(|v| v.as_i64()).map(|i| i.to_string()));
+                    .or_else(|| obj.get("buffer_id").and_then(|v| Self::parse_id(v)));
 
                 let is_highlight = obj.get("highlight").and_then(|v| v.as_bool()).unwrap_or(false);
                 let notify_level = obj.get("notify_level").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -357,7 +393,7 @@ impl WeeChatApp {
                 if let Some(buffer_id) = buffer_id {
                     let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
                     let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                    let id = obj.get("id").and_then(|v| v.as_i64()).map(|i| i.to_string())
+                    let id = obj.get("id").and_then(|v| Self::parse_id(v))
                         .unwrap_or_else(|| Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string());
                     let timestamp = Self::parse_date(obj.get("date"));
 
@@ -391,6 +427,9 @@ impl WeeChatApp {
 
                                 if activity > buffer.activity {
                                     buffer.activity = activity;
+                                    // A real new message arrived while the user isn't watching —
+                                    // evict from cleared set so it shows as unread on next reconnect.
+                                    self.cleared_buffer_ids.remove(&buffer_id);
                                 }
 
                                 if is_highlight || notify_level == 3 {
@@ -415,8 +454,8 @@ impl WeeChatApp {
         for val in body {
             if let Some(obj) = val.as_object() {
                 let buffer_id = resp.buffer_id.map(|i| i.to_string())
-                    .or_else(|| obj.get("buffer_id").and_then(|v| v.as_i64()).map(|i| i.to_string()));
-                let line_id = obj.get("id").and_then(|v| v.as_i64()).map(|i| i.to_string());
+                    .or_else(|| obj.get("buffer_id").and_then(|v| Self::parse_id(v)));
+                let line_id = obj.get("id").and_then(|v| Self::parse_id(v));
                 let displayed = obj.get("displayed").and_then(|v| v.as_bool()).unwrap_or(true);
 
                 if let (Some(buffer_id), Some(line_id)) = (buffer_id, line_id) {
