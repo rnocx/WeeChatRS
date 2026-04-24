@@ -1,4 +1,5 @@
 use crate::relay::models::*;
+use egui::Context as EguiContext;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -31,6 +32,7 @@ impl RelayClient {
         password: String,
         use_ssl: bool,
         event_tx: mpsc::UnboundedSender<RelayEvent>,
+        ctx: EguiContext,
     ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<ClientCommand>();
         
@@ -43,6 +45,14 @@ impl RelayClient {
         let scheme = if use_ssl { "wss" } else { "ws" };
         let url_str = format!("{}://{}:{}/api", scheme, host_clone, port);
         
+        // Macro to send an event and immediately wake the egui render loop.
+        macro_rules! send {
+            ($tx:expr, $ctx:expr, $ev:expr) => {{
+                let _ = $tx.send($ev);
+                $ctx.request_repaint();
+            }};
+        }
+
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(30);
@@ -51,21 +61,21 @@ impl RelayClient {
                 let url = match Url::parse(&url_str) {
                     Ok(url) => url,
                     Err(e) => {
-                        let _ = event_tx.send(RelayEvent::Error(format!("Invalid URL: {}", e)));
+                        send!(event_tx, ctx, RelayEvent::Error(format!("Invalid URL: {}", e)));
                         return;
                     }
                 };
 
-                let _ = event_tx.send(RelayEvent::Connecting);
+                send!(event_tx, ctx, RelayEvent::Connecting);
 
                 let auth_string = format!("plain:{}", password);
                 let base64_auth = URL_SAFE_NO_PAD.encode(auth_string.as_bytes());
                 let auth_protocol = format!("api.weechat, base64url.bearer.authorization.weechat.{}", base64_auth);
-                
+
                 let mut request = match url.into_client_request() {
                     Ok(req) => req,
                     Err(e) => {
-                        let _ = event_tx.send(RelayEvent::Error(format!("Request error: {}", e)));
+                        send!(event_tx, ctx, RelayEvent::Error(format!("Request error: {}", e)));
                         return;
                     }
                 };
@@ -77,8 +87,8 @@ impl RelayClient {
 
                 match connect_async(request).await {
                     Ok((ws_stream, _)) => {
-                        let _ = event_tx.send(RelayEvent::Connected);
-                        backoff = Duration::from_secs(1); // Reset backoff on success
+                        send!(event_tx, ctx, RelayEvent::Connected);
+                        backoff = Duration::from_secs(1);
 
                         let (mut ws_tx, mut ws_rx) = ws_stream.split();
                         let mut disconnected_cleanly = false;
@@ -89,15 +99,15 @@ impl RelayClient {
                                     match msg {
                                         Ok(Message::Text(text)) => {
                                             if let Ok(resp) = serde_json::from_str::<WeeChatResponse>(&text) {
-                                                let _ = event_tx.send(RelayEvent::Message(resp));
+                                                send!(event_tx, ctx, RelayEvent::Message(resp));
                                             }
                                         }
                                         Ok(Message::Close(_)) => {
-                                            let _ = event_tx.send(RelayEvent::Disconnected);
+                                            send!(event_tx, ctx, RelayEvent::Disconnected);
                                             break;
                                         }
                                         Err(e) => {
-                                            let _ = event_tx.send(RelayEvent::Error(format!("Read error: {}", e)));
+                                            send!(event_tx, ctx, RelayEvent::Error(format!("Read error: {}", e)));
                                             break;
                                         }
                                         _ => {}
@@ -107,13 +117,13 @@ impl RelayClient {
                                     match cmd {
                                         ClientCommand::Text(text) => {
                                             if let Err(e) = ws_tx.send(Message::Text(text)).await {
-                                                let _ = event_tx.send(RelayEvent::Error(format!("Send error: {}", e)));
+                                                send!(event_tx, ctx, RelayEvent::Error(format!("Send error: {}", e)));
                                                 break;
                                             }
                                         }
                                         ClientCommand::Disconnect => {
                                             let _ = ws_tx.send(Message::Close(None)).await;
-                                            let _ = event_tx.send(RelayEvent::Disconnected);
+                                            send!(event_tx, ctx, RelayEvent::Disconnected);
                                             disconnected_cleanly = true;
                                             break;
                                         }
@@ -121,17 +131,16 @@ impl RelayClient {
                                 }
                             }
                         }
-                        
+
                         if disconnected_cleanly {
-                            return; // Stop the task
+                            return;
                         }
                     }
                     Err(e) => {
-                        let _ = event_tx.send(RelayEvent::Error(format!("Connection failed: {}", e)));
+                        send!(event_tx, ctx, RelayEvent::Error(format!("Connection failed: {}", e)));
                     }
                 }
 
-                // Reconnect loop: Wait before retry
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
             }
