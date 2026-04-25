@@ -173,3 +173,7 @@ See `todo.md` for planned features and known issues.
 ## License
 
 MIT License — Copyright (c) 2026
+
+---
+
+[Contact](CONTACT.md)
