@@ -199,6 +199,8 @@ pub struct AppSettings {
     /// reconnect when the server-side `POST /api/buffers/{id}/read` is unavailable.
     #[serde(default)]
     pub cleared_buffer_ids: HashSet<String>,
+    #[serde(default)]
+    pub save_password: bool,
 }
 
 impl Default for AppSettings {
@@ -224,6 +226,7 @@ impl Default for AppSettings {
             show_hidden_buffers: false,
             buffer_order: Vec::new(),
             cleared_buffer_ids: HashSet::new(),
+            save_password: false,
         }
     }
 }
@@ -232,6 +235,8 @@ pub struct WeeChatApp {
     pub(crate) host: String,
     pub(crate) port: String,
     pub(crate) password: String,
+    pub(crate) save_password: bool,
+    pub(crate) password_from_keyring: bool,
     pub(crate) use_ssl: bool,
     
     pub(crate) client: Option<RelayClient>,
@@ -320,10 +325,15 @@ impl WeeChatApp {
             AppSettings::default()
         };
 
+        let saved_password = crate::ui::secure_storage::load(&settings.host, &settings.port);
+        let password_from_keyring = saved_password.is_some();
+
         Self {
             host: settings.host,
             port: settings.port,
-            password: "".to_string(),
+            password: saved_password.unwrap_or_default(),
+            save_password: settings.save_password,
+            password_from_keyring,
             use_ssl: settings.use_ssl,
             client: None,
             event_rx,
@@ -439,6 +449,7 @@ impl eframe::App for WeeChatApp {
             show_hidden_buffers: self.show_hidden_buffers,
             buffer_order: self.buffer_order.clone(),
             cleared_buffer_ids: self.cleared_buffer_ids.clone(),
+            save_password: self.save_password,
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -946,7 +957,12 @@ impl eframe::App for WeeChatApp {
                                 ui.add(egui::TextEdit::singleline(&mut self.port).desired_width(240.0));
                                 ui.end_row();
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Password:"); });
-                                ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(240.0));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(200.0));
+                                    if self.password_from_keyring {
+                                        ui.label(egui::RichText::new("(keyring)").small().color(ui.visuals().weak_text_color()));
+                                    }
+                                });
                                 ui.end_row();
                             });
                             
@@ -956,16 +972,32 @@ impl eframe::App for WeeChatApp {
                                 ui.add_space(20.0);
                                 ui.checkbox(&mut self.auto_reconnect, "Auto-reconnect");
                             });
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut self.save_password, "Remember password").changed() && !self.save_password {
+                                    let _ = crate::ui::secure_storage::delete(&self.host, &self.port);
+                                    self.password_from_keyring = false;
+                                }
+                                if self.password_from_keyring {
+                                    ui.add_space(12.0);
+                                    if ui.small_button("Forget").clicked() {
+                                        let _ = crate::ui::secure_storage::delete(&self.host, &self.port);
+                                        self.password.clear();
+                                        self.password_from_keyring = false;
+                                        self.save_password = false;
+                                    }
+                                }
+                            });
                             ui.add_space(25.0);
-                            
+
                             ui.horizontal(|ui| {
                                 if ui.add(egui::Button::new(egui::RichText::new("Connect").strong().color(Color32::WHITE)).fill(accent_color).min_size(Vec2::new(120.0, 40.0))).clicked() {
+                                    if self.save_password && !self.password.is_empty() {
+                                        let _ = crate::ui::secure_storage::save(&self.host, &self.port, &self.password);
+                                        self.password_from_keyring = true;
+                                    }
                                     let port = self.port.parse().unwrap_or(9001);
                                     self.client = Some(RelayClient::connect(self.host.clone(), port, self.password.clone(), self.use_ssl, self.event_tx.clone(), ctx.clone()));
                                     self.connection_status = "Connecting...".to_string();
-                                }
-                                if ui.button("Save Profile").clicked() {
-                                    ctx.memory_mut(|m| m.data.insert_persisted(egui::Id::NULL, ())); 
                                 }
                             });
                             
