@@ -30,11 +30,13 @@
 - [ ] Unread count badge — show message count next to buffer name, not just the highlight dot
 - [ ] User icons — subtle avatars next to nicks in the list
 - [ ] Dynamic layout — option to move buffer list to the right or top
+- [ ] Detached settings window — open Settings as a separate OS window (movable to any monitor) using eframe's multi-viewport API (`ctx.show_viewport_deferred()`); requires extracting mutable settings fields into a shared `Arc<Mutex<SettingsState>>`
 
 ## 💾 Persistence & Security
 - [x] Session persistence — host, port, SSL, UI preferences saved across restarts
 - [x] Theme persistence — selected `.itermcolors` theme saved
-- [ ] Secure storage — relay password in system keyring (macOS Keychain, libsecret, etc.)
+- [x] Secure storage — relay password in system keyring (macOS Keychain, libsecret, Windows Credential Manager)
+- [ ] Android APK build — eframe supports Android via `android-activity`; blockers: feature-gate `notify-rust`, `plist`, `rfd` behind `#[cfg(not(target_os = "android"))]`, swap `native-tls` for `rustls`, add `android_main` entry point, wire up `cargo-apk`
 - [ ] Scroll position memory — remember per-buffer scroll position when switching back
 
 ## 📷 Media & Attachments
@@ -48,16 +50,22 @@
 ## 🔧 Code Quality & Performance
 
 - [ ] **Cache compiled regexes** — two regexes compiled on every call:
-    - `strip_ansi()` in `event_handler.rs:361` — once per highlight notification
+    - `strip_ansi()` in `event_handler.rs:430` — once per highlight notification
     - `ANSIParser::parse()` in `ansi.rs:82` — once per rendered message line
     - Fix: `std::sync::OnceLock` for both
 
-- [ ] **Single buffer lookup per frame** — `app.rs:428-434` runs 7 separate `buffers.iter().find()` calls for the same selected buffer every frame. Extract once into a local `Option<&Buffer>` and derive all fields from it.
+- [ ] **Single buffer lookup per frame** — `app.rs:841-848` runs 7 separate `buffers.iter().find()` calls for the same selected buffer every frame. Extract once into a local `Option<&Buffer>` and derive all fields from it.
 
-- [ ] **Unsafe `unwrap()` in render loop** — `app.rs:636` calls `.as_ref().unwrap()` on `current_buffer_last_read_id` inside an `is_some()` guard. Replace with `if let Some(last_read) = &current_buffer_last_read_id`.
+- [x] **Unsafe `unwrap()` in render loop** — fixed; code now uses `.and_then()` chaining with no unwrap on `current_buffer_last_read_id`.
 
 - [ ] **VecDeque for command history** — `input.rs:159` uses `Vec::remove(0)` to trim to 100 items (O(n) shift). Replace with `VecDeque` + `pop_front`.
 
-- [ ] **VecDeque for message buffer** — `event_handler.rs:395,457` use `buffer.messages.remove(0)` when over `MAX_MESSAGES` (O(n)). Use `VecDeque` in `Buffer::messages` for O(1) front removal.
+- [ ] **VecDeque for message buffer** — `event_handler.rs:464,529` use `buffer.messages.remove(0)` when over `MAX_MESSAGES` (O(n)). Use `VecDeque` in `Buffer::messages` for O(1) front removal.
+
+- [ ] **Cloning entire message/nick vecs per frame** — `app.rs:841-848` clones `b.messages` (up to 400 items) and `b.nicks` every frame for the render pass. Restructure render code to borrow these directly instead of cloning.
+
+- [ ] **Per-frame lowercase allocation in search** — `app.rs:1067` calls `self.search_text.to_lowercase()` once per rendered message line every frame. Cache the lowercased string once per frame when search is active.
+
+- [ ] **Dead code: `debug_log` field** — `app.rs` has `#[allow(dead_code)] pub(crate) debug_log: Vec<String>` that is never read or written. Remove it.
 
 - [ ] **Tests** — `ANSIParser::parse`, `extract_metadata`, `sort_buffers`, and `parse_id` are pure/near-pure functions; good first targets for unit tests.
