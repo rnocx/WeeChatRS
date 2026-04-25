@@ -75,7 +75,7 @@ Requires **Rust stable 1.75+**. Install via [rustup](https://rustup.rs) if neede
 # Install Xcode command-line tools if not already present
 xcode-select --install
 
-git clone https://github.com/your-username/weechat-gui.git
+git clone https://github.com/rnocx/WeeChatRS.git
 cd weechat-gui
 cargo build --release
 # output: ./target/release/weechat-rs
@@ -90,7 +90,7 @@ sudo apt-get install \
   libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
   libxkbcommon-dev libssl-dev pkg-config
 
-git clone https://github.com/your-username/weechat-gui.git
+git clone https://github.com/rnocx/WeeChatRS.git
 cd weechat-gui
 cargo build --release
 # output: ./target/release/weechat-rs
