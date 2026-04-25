@@ -36,6 +36,7 @@ pub struct Buffer {
     pub last_read_id: Option<String>,
     pub topic: String,
     pub modes: String,
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone)]

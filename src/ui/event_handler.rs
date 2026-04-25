@@ -1,7 +1,7 @@
 use crate::relay::client::RelayEvent;
 use crate::relay::models::*;
 use crate::ui::app::{WeeChatApp, MAX_MESSAGES};
-use chrono::{Utc, DateTime};
+use chrono::{Utc, DateTime, Local};
 use serde_json::Value;
 
 impl WeeChatApp {
@@ -101,8 +101,19 @@ impl WeeChatApp {
             if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
                 return dt.with_timezone(&Utc);
             }
+            // No timezone in string — treat as Unix timestamp (seconds) if numeric,
+            // otherwise assume the relay's local time and convert to UTC via the local offset.
+            if let Ok(secs) = s.parse::<i64>() {
+                if let Some(dt) = DateTime::from_timestamp(secs, 0) {
+                    return dt;
+                }
+            }
             if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-                return dt.and_utc();
+                // Interpret as local time so we don't offset by the relay server's timezone.
+                return chrono::TimeZone::from_local_datetime(&Local, &dt)
+                    .single()
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(Utc::now);
             }
         }
         Utc::now()
@@ -148,7 +159,11 @@ impl WeeChatApp {
                 } else {
                     parts[1]
                 };
-                *server = net_candidate.to_string().to_lowercase();
+                // local_variables.server is authoritative — only fall back to
+                // full_name parsing when it wasn't present in the relay data.
+                if *server == "orphans" {
+                    *server = net_candidate.to_string().to_lowercase();
+                }
             }
             if *kind == "unknown" {
                 if parts.len() <= 2 || (parts.len() == 3 && parts[1] == "server") { *kind = "server".to_string(); }
@@ -193,6 +208,11 @@ impl WeeChatApp {
                     .unwrap_or("unknown").to_string();
                 let full_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
                 let plugin = obj.get("plugin").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let hidden = obj.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
+                // Relay sends the server-side read marker; use it so the unread divider
+                // is correct immediately on connect without needing any prior local state.
+                let relay_last_read_id = obj.get("last_read_line_id").and_then(|v| Self::parse_id(v))
+                    .or_else(|| obj.get("last_read_line").and_then(|v| v.as_object()).and_then(|o| o.get("id")).and_then(|v| Self::parse_id(v)));
 
                 if let Some(id) = id {
                     let mut topic = String::new();
@@ -211,6 +231,11 @@ impl WeeChatApp {
                         activity = existing.activity;
                         last_read_id = existing.last_read_id.clone();
                     }
+                    // Relay's read marker takes priority — it's the authoritative baseline
+                    // for showing the unread divider after a fresh connect.
+                    if relay_last_read_id.is_some() {
+                        last_read_id = relay_last_read_id.clone();
+                    }
 
                     Self::extract_metadata(obj, &mut topic, &mut modes, &mut kind, &mut server, &full_name, &plugin);
 
@@ -228,6 +253,7 @@ impl WeeChatApp {
                         last_read_id,
                         topic,
                         modes,
+                        hidden,
                     });
                 }
             }
@@ -237,10 +263,32 @@ impl WeeChatApp {
             Self::sort_buffers(&mut new_buffers);
             self.buffers = new_buffers;
 
-            // Re-apply user's custom ordering; new buffers not in the order go to the end.
+            // Re-apply user's custom ordering. Buffers not in the order (e.g. newly
+            // opened query windows) are anchored just after their server header so they
+            // appear in the right group rather than being dumped at the end.
             if !self.buffer_order.is_empty() {
+                let order = &self.buffer_order;
+                let max_order = order.len();
+
+                // Position of each server group's header in buffer_order.
+                let server_header_pos: std::collections::HashMap<String, usize> = self.buffers.iter()
+                    .filter(|b| b.kind == "server" || b.kind == "core")
+                    .filter_map(|b| {
+                        order.iter().position(|id| id == &b.id)
+                            .map(|pos| (b.server.clone(), pos))
+                    })
+                    .collect();
+
                 self.buffers.sort_by_key(|b| {
-                    self.buffer_order.iter().position(|id| id == &b.id).unwrap_or(usize::MAX)
+                    if let Some(pos) = order.iter().position(|id| id == &b.id) {
+                        pos * 10_000
+                    } else {
+                        // Anchor to the server header slot; fall back to end if server unknown.
+                        let base = server_header_pos.get(&b.server)
+                            .map(|&p| p * 10_000 + 1)
+                            .unwrap_or(max_order * 10_000 + 1);
+                        base + b.number as usize
+                    }
                 });
             }
 
@@ -319,7 +367,11 @@ impl WeeChatApp {
                 let start = buffer.messages.len() - MAX_MESSAGES;
                 buffer.messages.drain(0..start);
             }
-            if self.selected_buffer_id.as_deref() == Some(buffer_id) {
+            // Only mark everything as read when loading for the first time (no prior
+            // read marker). On subsequent reloads the existing marker must be kept so
+            // the unread divider stays visible for messages that arrived since the user
+            // last viewed this buffer.
+            if buffer.last_read_id.is_none() {
                 if let Some(last) = buffer.messages.last() {
                     buffer.last_read_id = Some(last.id.clone());
                 }
