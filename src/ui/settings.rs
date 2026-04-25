@@ -15,6 +15,7 @@ impl WeeChatApp {
         let mut show_server_headers = self.show_server_headers;
         let mut show_inline_images = self.show_inline_images;
         let mut show_link_previews = self.show_link_previews;
+        let mut show_hidden_buffers = self.show_hidden_buffers;
         let mut opacity = self.opacity;
         let mut close_clicked = false;
         let mut reset_theme = false;
@@ -51,12 +52,21 @@ impl WeeChatApp {
                 ui.checkbox(&mut show_server_headers, "Show server group headers in buffer list");
                 ui.checkbox(&mut show_inline_images, "Show inline image previews (🖼 preview button on image URLs)");
                 ui.checkbox(&mut show_link_previews, "Show link previews (🔗 preview button on URLs — fetches title, description, og:image)");
+                ui.checkbox(&mut show_hidden_buffers, "Show hidden buffers in buffer list");
 
                 ui.add_space(12.0);
                 ui.label(RichText::new("Appearance").strong());
                 ui.horizontal(|ui| {
                     ui.label("Font size:");
-                    ui.add(egui::Slider::new(&mut font_size, 8.0..=32.0));
+                    let sizes: &[f32] = &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 20.0, 22.0, 24.0];
+                    egui::ComboBox::from_id_source("font_size_combo")
+                        .selected_text(format!("{}px", font_size as u32))
+                        .width(80.0)
+                        .show_ui(ui, |ui| {
+                            for &size in sizes {
+                                ui.selectable_value(&mut font_size, size, format!("{}px", size as u32));
+                            }
+                        });
                 });
                 ui.checkbox(&mut use_monospace, "Use Monospace font everywhere");
                 ui.horizontal(|ui| {
@@ -121,6 +131,7 @@ impl WeeChatApp {
         self.show_server_headers = show_server_headers;
         self.show_inline_images = show_inline_images;
         self.show_link_previews = show_link_previews;
+        self.show_hidden_buffers = show_hidden_buffers;
         self.opacity = opacity;
         if reset_theme { self.theme = AppTheme::default(); }
     }
