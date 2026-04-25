@@ -35,17 +35,16 @@ impl RelayClient {
         ctx: EguiContext,
     ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<ClientCommand>();
-        
-        let host_clone = host.trim()
+
+        let host_clean = host.trim()
             .replace("https://", "")
             .replace("http://", "")
             .replace("wss://", "")
             .replace("ws://", "");
-        
+
         let scheme = if use_ssl { "wss" } else { "ws" };
-        let url_str = format!("{}://{}:{}/api", scheme, host_clone, port);
-        
-        // Macro to send an event and immediately wake the egui render loop.
+        let url_str = format!("{}://{}:{}/api", scheme, host_clean, port);
+
         macro_rules! send {
             ($tx:expr, $ctx:expr, $ev:expr) => {{
                 let _ = $tx.send($ev);
@@ -54,6 +53,8 @@ impl RelayClient {
         }
 
         tokio::spawn(async move {
+            let password = password;
+            let host_clone = host_clean;
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(30);
 
@@ -163,7 +164,7 @@ impl RelayClient {
         if let Some(body) = body {
             payload["body"] = body;
         }
-        
+
         if let Ok(json) = serde_json::to_string(&payload) {
             let _ = self.tx.send(ClientCommand::Text(json));
         }

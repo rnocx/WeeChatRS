@@ -129,6 +129,7 @@ impl WeeChatApp {
     pub(crate) fn send_current_message(&mut self) {
         if self.input_text.is_empty() { return; }
         let msg = self.input_text.clone();
+
         let is_command = msg.starts_with('/');
 
         if let Some(client) = &self.client {
@@ -153,10 +154,10 @@ impl WeeChatApp {
             }
         }
 
-        if self.command_history.last().map(|s| s.as_str()) != Some(&msg) {
-            self.command_history.push(msg);
+        if self.command_history.back().map(|s| s.as_str()) != Some(&msg) {
+            self.command_history.push_back(msg);
             if self.command_history.len() > 100 {
-                self.command_history.remove(0);
+                self.command_history.pop_front();
             }
         }
 
