@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use chrono::{DateTime, Utc};
+use std::collections::VecDeque;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WeeChatResponse {
@@ -30,7 +31,7 @@ pub struct Buffer {
     pub plugin: String,
     pub kind: String,
     pub server: String,
-    pub messages: Vec<Line>,
+    pub messages: VecDeque<Line>,
     pub nicks: Vec<Nick>,
     pub activity: BufferActivity,
     pub last_read_id: Option<String>,

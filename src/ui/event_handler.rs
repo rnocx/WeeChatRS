@@ -3,6 +3,13 @@ use crate::relay::models::*;
 use crate::ui::app::{WeeChatApp, MAX_MESSAGES};
 use chrono::{Utc, DateTime, Local};
 use serde_json::Value;
+use std::sync::OnceLock;
+
+static ANSI_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+fn ansi_re() -> &'static regex::Regex {
+    ANSI_RE.get_or_init(|| regex::Regex::new(r"\x1B\[[0-9;]*[A-Za-z]").unwrap())
+}
 
 impl WeeChatApp {
     pub(crate) fn handle_event(&mut self, event: RelayEvent) {
@@ -220,7 +227,7 @@ impl WeeChatApp {
                     let mut kind = String::new();
                     let mut server = String::new();
 
-                    let mut messages = Vec::new();
+                    let mut messages = std::collections::VecDeque::new();
                     let mut nicks = Vec::new();
                     let mut activity = BufferActivity::None;
                     let mut last_read_id = None;
@@ -362,17 +369,18 @@ impl WeeChatApp {
         }).collect();
 
         if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
-            buffer.messages = lines;
-            if buffer.messages.len() > MAX_MESSAGES {
-                let start = buffer.messages.len() - MAX_MESSAGES;
-                buffer.messages.drain(0..start);
+            let mut deque: std::collections::VecDeque<Line> = lines.into();
+            if deque.len() > MAX_MESSAGES {
+                let excess = deque.len() - MAX_MESSAGES;
+                deque.drain(0..excess);
             }
+            buffer.messages = deque;
             // Only mark everything as read when loading for the first time (no prior
             // read marker). On subsequent reloads the existing marker must be kept so
             // the unread divider stays visible for messages that arrived since the user
             // last viewed this buffer.
             if buffer.last_read_id.is_none() {
-                if let Some(last) = buffer.messages.last() {
+                if let Some(last) = buffer.messages.back() {
                     buffer.last_read_id = Some(last.id.clone());
                 }
             }
@@ -427,8 +435,7 @@ impl WeeChatApp {
     }
 
     pub(crate) fn strip_ansi(text: &str) -> String {
-        let re = regex::Regex::new(r"\x1B\[[0-9;]*[A-Za-z]").unwrap();
-        re.replace_all(text, "").to_string()
+        ansi_re().replace_all(text, "").to_string()
     }
 
     fn handle_line_added(&mut self, resp: WeeChatResponse) {
@@ -459,9 +466,9 @@ impl WeeChatApp {
 
                     if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
                         if !buffer.messages.iter().any(|m| m.id == line.id) {
-                            buffer.messages.push(line.clone());
+                            buffer.messages.push_back(line.clone());
                             if buffer.messages.len() > MAX_MESSAGES {
-                                buffer.messages.remove(0);
+                                buffer.messages.pop_front();
                             }
 
                             if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
@@ -518,7 +525,7 @@ impl WeeChatApp {
                             let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
                             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
                             let timestamp = Self::parse_date(obj.get("date"));
-                            buffer.messages.push(Line {
+                            buffer.messages.push_back(Line {
                                 id: line_id,
                                 timestamp,
                                 prefix: prefix.to_string(),
@@ -526,7 +533,7 @@ impl WeeChatApp {
                                 displayed,
                             });
                             if buffer.messages.len() > MAX_MESSAGES {
-                                buffer.messages.remove(0);
+                                buffer.messages.pop_front();
                             }
                         }
                     }

@@ -7,6 +7,7 @@
 - [x] Float ID parsing — relay sends buffer IDs as JSON floats; `parse_id()` handles i64/f64/str
 - [ ] Server lag indicator — show real-time relay latency in the toolbar
 - [ ] Auth error feedback — authentication failures are swallowed as plain disconnects; surface as a distinct error state
+- [ ] TOTP support — generate and auto-submit TOTP codes for WeeChat relay authentication; store the TOTP secret in the system keyring alongside the relay password; use the `totp-rs` crate for code generation
 
 ## ⌨️ UX & Productivity
 - [x] Command history — Arrow Up/Down cycles sent messages in the input bar
@@ -49,23 +50,20 @@
 
 ## 🔧 Code Quality & Performance
 
-- [ ] **Cache compiled regexes** — two regexes compiled on every call:
-    - `strip_ansi()` in `event_handler.rs:430` — once per highlight notification
-    - `ANSIParser::parse()` in `ansi.rs:82` — once per rendered message line
-    - Fix: `std::sync::OnceLock` for both
+- [x] **Cache compiled regexes** — `strip_ansi()` and `ANSIParser::parse()` now use `std::sync::OnceLock` static regexes.
 
-- [ ] **Single buffer lookup per frame** — `app.rs:841-848` runs 7 separate `buffers.iter().find()` calls for the same selected buffer every frame. Extract once into a local `Option<&Buffer>` and derive all fields from it.
+- [x] **Single buffer lookup per frame** — `app.rs` now does one `buffers.iter().find()` per frame and derives all fields from the result.
 
 - [x] **Unsafe `unwrap()` in render loop** — fixed; code now uses `.and_then()` chaining with no unwrap on `current_buffer_last_read_id`.
 
-- [ ] **VecDeque for command history** — `input.rs:159` uses `Vec::remove(0)` to trim to 100 items (O(n) shift). Replace with `VecDeque` + `pop_front`.
+- [x] **VecDeque for command history** — `command_history` is now a `VecDeque`; uses `push_back`/`pop_front`.
 
-- [ ] **VecDeque for message buffer** — `event_handler.rs:464,529` use `buffer.messages.remove(0)` when over `MAX_MESSAGES` (O(n)). Use `VecDeque` in `Buffer::messages` for O(1) front removal.
+- [x] **VecDeque for message buffer** — `Buffer::messages` is now a `VecDeque`; uses `push_back`/`pop_front` for O(1) front removal.
 
-- [ ] **Cloning entire message/nick vecs per frame** — `app.rs:841-848` clones `b.messages` (up to 400 items) and `b.nicks` every frame for the render pass. Restructure render code to borrow these directly instead of cloning.
+- [ ] **Cloning entire message/nick vecs per frame** — `app.rs` clones `b.messages` (up to 400 items) and `b.nicks` every frame for the render pass. Restructure render code to borrow these directly instead of cloning.
 
-- [ ] **Per-frame lowercase allocation in search** — `app.rs:1067` calls `self.search_text.to_lowercase()` once per rendered message line every frame. Cache the lowercased string once per frame when search is active.
+- [x] **Per-frame lowercase allocation in search** — search query is now lowercased once per frame outside the message loop.
 
-- [ ] **Dead code: `debug_log` field** — `app.rs` has `#[allow(dead_code)] pub(crate) debug_log: Vec<String>` that is never read or written. Remove it.
+- [x] **Dead code: `debug_log` field** — removed.
 
 - [ ] **Tests** — `ANSIParser::parse`, `extract_metadata`, `sort_buffers`, and `parse_id` are pure/near-pure functions; good first targets for unit tests.

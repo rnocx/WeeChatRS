@@ -5,7 +5,7 @@ use crate::ui::theme::AppTheme;
 use egui::{FontId, ScrollArea, Label, Key, Visuals, TextStyle, FontFamily, Color32, text::LayoutJob, Margin, Frame, Rounding, Stroke, Vec2, Modifiers, Rect, Painter};
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(crate) enum ImageState {
     Loading,
@@ -248,9 +248,6 @@ pub struct WeeChatApp {
     pub(crate) buffers: Vec<Buffer>,
     pub(crate) selected_buffer_id: Option<String>,
     pub(crate) input_text: String,
-    #[allow(dead_code)]
-    pub(crate) debug_log: Vec<String>,
-
     // Settings
     pub(crate) show_settings: bool,
     pub(crate) show_filtered_lines: bool,
@@ -287,7 +284,7 @@ pub struct WeeChatApp {
     pub(crate) completion: Option<CompletionState>,
 
     // Command History
-    pub(crate) command_history: Vec<String>,
+    pub(crate) command_history: VecDeque<String>,
     pub(crate) history_index: Option<usize>,
 
     // Search state
@@ -343,7 +340,6 @@ impl WeeChatApp {
             buffers: Vec::new(),
             selected_buffer_id: None,
             input_text: String::new(),
-            debug_log: Vec::new(),
             show_settings: false,
             show_filtered_lines: settings.show_filtered_lines,
             colored_nicks: settings.colored_nicks,
@@ -369,7 +365,7 @@ impl WeeChatApp {
             preview_tx,
             preview_rx,
             completion: None,
-            command_history: Vec::new(),
+            command_history: VecDeque::new(),
             history_index: None,
             show_search: false,
             search_text: String::new(),
@@ -839,13 +835,14 @@ impl eframe::App for WeeChatApp {
         }
 
         let current_buffer_id = self.selected_buffer_id.clone();
-        let current_buffer_nicks = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id)).map(|b| b.nicks.clone());
-        let current_buffer_full_name = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id)).map(|b| b.full_name.clone());
-        let current_buffer_messages = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id)).map(|b| b.messages.clone());
-        let current_buffer_last_read_id = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id)).and_then(|b| b.last_read_id.clone());
-        let current_buffer_topic = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id)).map(|b| b.topic.clone()).unwrap_or_default();
-        let current_buffer_modes = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id)).map(|b| b.modes.clone()).unwrap_or_default();
-        let current_buffer_kind = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id)).map(|b| b.kind.clone()).unwrap_or_default();
+        let current_buf = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id));
+        let current_buffer_nicks = current_buf.map(|b| b.nicks.clone());
+        let current_buffer_full_name = current_buf.map(|b| b.full_name.clone());
+        let current_buffer_messages = current_buf.map(|b| b.messages.clone());
+        let current_buffer_last_read_id = current_buf.and_then(|b| b.last_read_id.clone());
+        let current_buffer_topic = current_buf.map(|b| b.topic.clone()).unwrap_or_default();
+        let current_buffer_modes = current_buf.map(|b| b.modes.clone()).unwrap_or_default();
+        let current_buffer_kind = current_buf.map(|b| b.kind.clone()).unwrap_or_default();
 
         let font_id = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
 
@@ -1058,14 +1055,18 @@ impl eframe::App for WeeChatApp {
                         Frame::none().inner_margin(Margin::same(16.0)).show(ui, |ui| {
                             if let Some(messages) = &current_buffer_messages {
                                 let mut marker_shown = false;
+                                let search_query = if self.search_text.is_empty() {
+                                    None
+                                } else {
+                                    Some(self.search_text.to_lowercase())
+                                };
                                 for line in messages {
                                     if !self.show_filtered_lines && !line.displayed { continue; }
-                                    
-                                    if !self.search_text.is_empty() {
+
+                                    if let Some(q) = &search_query {
                                         let clean_prefix = Self::strip_ansi(&line.prefix).to_lowercase();
                                         let clean_msg = Self::strip_ansi(&line.message).to_lowercase();
-                                        let q = self.search_text.to_lowercase();
-                                        if !clean_prefix.contains(&q) && !clean_msg.contains(&q) { continue; }
+                                        if !clean_prefix.contains(q) && !clean_msg.contains(q) { continue; }
                                     }
 
                                     let past_read_marker = current_buffer_last_read_id.as_ref().map(|rid| {
