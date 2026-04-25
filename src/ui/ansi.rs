@@ -1,6 +1,13 @@
 use egui::{Color32, TextFormat, FontId, Stroke};
 use crate::ui::theme::AppTheme;
 use regex::Regex;
+use std::sync::OnceLock;
+
+static URL_RE: OnceLock<Regex> = OnceLock::new();
+
+fn url_re() -> &'static Regex {
+    URL_RE.get_or_init(|| Regex::new(r"https?://[^\s<>]+").unwrap())
+}
 
 #[derive(Clone)]
 pub struct ANSISection {
@@ -79,7 +86,7 @@ impl ANSIParser {
         }
         
         // Linkify pass
-        let url_re = Regex::new(r"https?://[^\s<>]+").unwrap();
+        let url_re = url_re();
         let mut final_sections = Vec::new();
         
         for (text, format) in raw_sections {
