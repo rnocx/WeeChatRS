@@ -192,6 +192,8 @@ pub struct AppSettings {
     pub show_link_previews: bool,
     pub opacity: f32,
     #[serde(default)]
+    pub show_hidden_buffers: bool,
+    #[serde(default)]
     pub buffer_order: Vec<String>,
     /// Buffer IDs the user has explicitly read; used to suppress stale hotlist entries on
     /// reconnect when the server-side `POST /api/buffers/{id}/read` is unavailable.
@@ -219,6 +221,7 @@ impl Default for AppSettings {
             show_inline_images: true,
             show_link_previews: true,
             opacity: 1.0,
+            show_hidden_buffers: false,
             buffer_order: Vec::new(),
             cleared_buffer_ids: HashSet::new(),
         }
@@ -257,6 +260,7 @@ pub struct WeeChatApp {
     pub(crate) show_inline_images: bool,
     pub(crate) show_link_previews: bool,
     pub(crate) opacity: f32,
+    pub(crate) show_hidden_buffers: bool,
 
     // Image preview state
     pub(crate) image_cache: HashMap<String, ImageState>,
@@ -345,6 +349,7 @@ impl WeeChatApp {
             show_inline_images: settings.show_inline_images,
             show_link_previews: settings.show_link_previews,
             opacity: settings.opacity,
+            show_hidden_buffers: settings.show_hidden_buffers,
             image_cache: HashMap::new(),
             image_expanded: HashSet::new(),
             image_tx,
@@ -431,6 +436,7 @@ impl eframe::App for WeeChatApp {
             show_inline_images: self.show_inline_images,
             show_link_previews: self.show_link_previews,
             opacity: self.opacity,
+            show_hidden_buffers: self.show_hidden_buffers,
             buffer_order: self.buffer_order.clone(),
             cleared_buffer_ids: self.cleared_buffer_ids.clone(),
         };
@@ -665,6 +671,9 @@ impl eframe::App for WeeChatApp {
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         for buffer in &self.buffers {
+                            if buffer.hidden && !self.show_hidden_buffers {
+                                continue;
+                            }
                             let is_selected = self.selected_buffer_id.as_deref() == Some(&buffer.id);
                             let is_root = buffer.kind == "server" || buffer.kind == "core";
                             let is_child = buffer.kind == "channel" || buffer.kind == "private";
@@ -726,10 +735,22 @@ impl eframe::App for WeeChatApp {
                             if !is_dragging {
                                 let buf_id = buffer.id.clone();
                                 let buf_kind = buffer.kind.clone();
+                                let buf_hidden = buffer.hidden;
                                 resp.context_menu(|ui| {
                                     if buf_kind == "channel" {
                                         if ui.button("Leave Channel").clicked() {
                                             pending_buffer_command = Some((buf_id.clone(), "/part".to_string()));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                    if buf_hidden {
+                                        if ui.button("Unhide Buffer").clicked() {
+                                            pending_buffer_command = Some((buf_id.clone(), "/buffer unhide".to_string()));
+                                            ui.close_menu();
+                                        }
+                                    } else {
+                                        if ui.button("Hide Buffer").clicked() {
+                                            pending_buffer_command = Some((buf_id.clone(), "/buffer hide".to_string()));
                                             ui.close_menu();
                                         }
                                     }
@@ -1015,7 +1036,12 @@ impl eframe::App for WeeChatApp {
                                         if !clean_prefix.contains(&q) && !clean_msg.contains(&q) { continue; }
                                     }
 
-                                    if !marker_shown && current_buffer_last_read_id.is_some() && &line.id > current_buffer_last_read_id.as_ref().unwrap() {
+                                    let past_read_marker = current_buffer_last_read_id.as_ref().map(|rid| {
+                                        let lid = line.id.parse::<i64>().unwrap_or(0);
+                                        let rid = rid.parse::<i64>().unwrap_or(0);
+                                        lid > rid
+                                    }).unwrap_or(false);
+                                    if !marker_shown && past_read_marker {
                                         ui.add_space(8.0);
                                         ui.horizontal(|ui| {
                                             ui.add_space(20.0);
@@ -1051,13 +1077,15 @@ impl eframe::App for WeeChatApp {
 
                                     // Two-part row: fixed left anchor (timestamp + prefix) keeps
                                     // wrapped message lines from bleeding back into the timestamp column.
-                                    ui.horizontal(|ui| {
+                                    // TOP alignment ensures timestamp/nick always share the first text line.
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
                                         if self.show_timestamps {
-                                            ui.label(egui::RichText::new(line.timestamp.format("%H:%M:%S").to_string()).font(font_id.clone()).color(text_muted));
+                                            ui.label(egui::RichText::new(line.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()).font(font_id.clone()).color(text_muted));
                                         }
                                         let prefix_sections = ANSIParser::parse(&line.prefix, font_id.clone(), &self.theme);
                                         let mut prefix_job = LayoutJob::default();
+                                        prefix_job.halign = egui::Align::LEFT;
                                         for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.format); }
                                         ui.add(Label::new(prefix_job).wrap(false));
 
