@@ -1,6 +1,10 @@
-# WeeChatRS
-
-A modern, high-performance GUI client for [WeeChat](https://weechat.org/) Relay, built in Rust using `egui` and `tokio`. Real-time chat with a polished native UI, full ANSI color support, and zero runtime dependencies.
+<div align="center">
+  <img src="assets/icon.png" alt="WeeChatRS" width="160" />
+  <h1>WeeChatRS</h1>
+  <p>A modern, high-performance GUI client for <a href="https://weechat.org/">WeeChat</a> Relay,<br>
+  built in Rust using <code>egui</code> and <code>tokio</code>.<br>
+  Real-time chat with a polished native UI, full ANSI color support, and zero runtime dependencies.</p>
+</div>
 
 ## Features
 
