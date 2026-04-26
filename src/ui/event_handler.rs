@@ -33,23 +33,25 @@ impl WeeChatApp {
             RelayEvent::Disconnected => {
                 self.is_connecting = false;
                 if self.connecting_pending {
-                    // Disconnected before we confirmed auth — treat as auth failure.
+                    // Disconnected before we confirmed a successful connection.
                     self.connecting_pending = false;
-                    self.auth_error = Some("Connection closed — check your password and relay settings.".to_string());
+                    self.auth_error = Some("Connection closed before auth completed — check your password and relay settings.".to_string());
                     self.client = None;
-                } else if !self.auto_reconnect {
-                    self.client = None;
+                    self.connection_status = String::new();
+                } else {
+                    if !self.auto_reconnect {
+                        self.client = None;
+                    }
+                    self.buffers.clear();
+                    self.selected_buffer_id = None;
+                    self.connection_status = "Disconnected".to_string();
                 }
-                self.buffers.clear();
-                self.selected_buffer_id = None;
-                self.connection_status = "Disconnected".to_string();
             }
             RelayEvent::Error(e) => {
-                let is_auth = e.contains("401") || e.contains("403")
-                    || e.to_lowercase().contains("unauthorized")
-                    || e.to_lowercase().contains("forbidden");
-
-                if self.connecting_pending || is_auth {
+                if self.connecting_pending {
+                    let is_auth = e.contains("401") || e.contains("403")
+                        || e.to_lowercase().contains("unauthorized")
+                        || e.to_lowercase().contains("forbidden");
                     self.connecting_pending = false;
                     self.auth_error = Some(if is_auth {
                         "Wrong password or relay not configured to accept this connection.".to_string()
