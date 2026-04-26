@@ -346,7 +346,9 @@ impl WeeChatApp {
         for val in body {
             if let Some(obj) = val.as_object() {
                 let buffer_id = obj.get("buffer_id").and_then(|v| Self::parse_id(v));
-                let priority = obj.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
+                let priority = obj.get("priority")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+                    .unwrap_or(0);
 
                 if let Some(buffer_id) = buffer_id {
                     // Skip the buffer the user is currently viewing.
@@ -471,7 +473,9 @@ impl WeeChatApp {
                     .or_else(|| obj.get("buffer_id").and_then(|v| Self::parse_id(v)));
 
                 let is_highlight = obj.get("highlight").and_then(|v| v.as_bool()).unwrap_or(false);
-                let notify_level = obj.get("notify_level").and_then(|v| v.as_i64()).unwrap_or(0);
+                let notify_level = obj.get("notify_level")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+                    .unwrap_or(0);
 
                 if let Some(buffer_id) = buffer_id {
                     let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
