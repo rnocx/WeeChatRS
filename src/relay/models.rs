@@ -34,10 +34,14 @@ pub struct Buffer {
     pub messages: VecDeque<Line>,
     pub nicks: Vec<Nick>,
     pub activity: BufferActivity,
+    pub unread_count: u32,
     pub last_read_id: Option<String>,
     pub topic: String,
     pub modes: String,
     pub hidden: bool,
+    /// Snapshot of last_read_id taken when the buffer was first entered this session.
+    /// Used to anchor the unread divider while the user views the buffer.
+    pub visit_start_marker_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
