@@ -205,6 +205,8 @@ pub struct AppSettings {
     pub font_name: String,
     #[serde(default)]
     pub font_path: String,
+    #[serde(default)]
+    pub muted_buffer_names: HashSet<String>,
 }
 
 impl Default for AppSettings {
@@ -233,6 +235,7 @@ impl Default for AppSettings {
             save_password: false,
             font_name: String::new(),
             font_path: String::new(),
+            muted_buffer_names: HashSet::new(),
         }
     }
 }
@@ -318,6 +321,9 @@ pub struct WeeChatApp {
 
     // Tracks when the current buffer was selected; drives the unread divider transition.
     pub(crate) selected_view_since: Option<std::time::Instant>,
+
+    // Muted buffers (stored by full_name, stable across WeeChat restarts).
+    pub(crate) muted_buffer_names: HashSet<String>,
 }
 
 pub(crate) struct CompletionState {
@@ -403,6 +409,7 @@ impl WeeChatApp {
             applied_font_path: settings.font_path,
             available_fonts,
             selected_view_since: None,
+            muted_buffer_names: settings.muted_buffer_names,
         }
     }
 
@@ -494,6 +501,7 @@ impl eframe::App for WeeChatApp {
             save_password: self.save_password,
             font_name: self.font_name.clone(),
             font_path: self.font_path.clone(),
+            muted_buffer_names: self.muted_buffer_names.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -661,6 +669,7 @@ impl eframe::App for WeeChatApp {
         let mut next_selected_buffer_id = None;
         let mut pending_buffer_command = None;
         let mut next_drag_buffer_id: Option<String> = None;
+        let mut pending_mute: Option<(String, String, bool)> = None; // (buf_id, full_name, mute)
 
         egui::TopBottomPanel::top("top_panel")
             .frame(Frame::none().fill(surface_color).inner_margin(Margin::symmetric(12.0, 8.0)))
@@ -745,8 +754,11 @@ impl eframe::App for WeeChatApp {
                                 ui.add_space(8.0);
                             }
 
+                            let is_muted = buffer.muted;
                             let (bg, fg) = if is_selected {
                                 (accent_color.linear_multiply(0.2), text_primary)
+                            } else if is_muted {
+                                (Color32::TRANSPARENT, text_muted.linear_multiply(0.6))
                             } else if self.show_server_headers && is_root && buffer.activity == BufferActivity::None {
                                 (Color32::TRANSPARENT, accent_color.linear_multiply(0.75))
                             } else {
@@ -768,17 +780,21 @@ impl eframe::App for WeeChatApp {
                                     .inner_margin(Margin::symmetric(8.0, 4.0))
                                     .show(ui, |ui| {
                                         ui.set_min_width(ui.available_width());
-                                        let name = if buffer.activity == BufferActivity::Highlight {
+                                        let name = if !is_muted && buffer.activity == BufferActivity::Highlight {
                                             format!("• {}", buffer.name)
+                                        } else if is_muted {
+                                            format!("🔇 {}", buffer.name)
                                         } else {
                                             buffer.name.clone()
                                         };
                                         let label = if self.show_server_headers && is_root {
-                                            egui::RichText::new(name.to_uppercase()).color(fg).strong()
+                                            egui::RichText::new(name.to_uppercase()).color(fg).italics()
+                                        } else if is_muted {
+                                            egui::RichText::new(name).color(fg).italics()
                                         } else {
                                             egui::RichText::new(name).color(fg).strong()
                                         };
-                                        let unread = buffer.unread_count;
+                                        let unread = if is_muted { 0 } else { buffer.unread_count };
                                         let buf_activity = buffer.activity;
                                         if unread > 0 {
                                             ui.horizontal(|ui| {
@@ -819,9 +835,23 @@ impl eframe::App for WeeChatApp {
                             }
                             if !is_dragging {
                                 let buf_id = buffer.id.clone();
+                                let buf_full_name = buffer.full_name.clone();
                                 let buf_kind = buffer.kind.clone();
                                 let buf_hidden = buffer.hidden;
+                                let buf_muted = buffer.muted;
                                 resp.context_menu(|ui| {
+                                    if buf_muted {
+                                        if ui.button("🔔 Unmute Buffer").clicked() {
+                                            pending_mute = Some((buf_id.clone(), buf_full_name.clone(), false));
+                                            ui.close_menu();
+                                        }
+                                    } else {
+                                        if ui.button("🔇 Mute Buffer").clicked() {
+                                            pending_mute = Some((buf_id.clone(), buf_full_name.clone(), true));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                    ui.separator();
                                     if buf_kind == "channel" {
                                         if ui.button("Leave Channel").clicked() {
                                             pending_buffer_command = Some((buf_id.clone(), "/part".to_string()));
@@ -902,6 +932,21 @@ impl eframe::App for WeeChatApp {
 
         if let Some(id) = next_selected_buffer_id {
             self.select_buffer(id);
+        }
+
+        if let Some((buf_id, full_name, mute)) = pending_mute {
+            if mute {
+                self.muted_buffer_names.insert(full_name);
+            } else {
+                self.muted_buffer_names.remove(&full_name);
+            }
+            if let Some(b) = self.buffers.iter_mut().find(|b| b.id == buf_id) {
+                b.muted = mute;
+                if mute {
+                    b.activity = BufferActivity::None;
+                    b.unread_count = 0;
+                }
+            }
         }
 
         if let Some((id, cmd)) = pending_buffer_command {
