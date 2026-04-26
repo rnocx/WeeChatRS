@@ -22,8 +22,6 @@ plist = "1.6"
 rfd = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
 notify-rust = "4.11"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
