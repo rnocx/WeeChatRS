@@ -1,0 +1,18 @@
+FROM --platform=linux/amd64 rust:1-bookworm
+
+RUN apt-get update && apt-get install -y \
+    libdbus-1-dev \
+    libxcb-render0-dev \
+    libxcb-shape0-dev \
+    libxcb-xfixes0-dev \
+    libxkbcommon-dev \
+    libgtk-3-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cargo build --release 2>&1
+
+RUN cp target/release/weechat-rs /weechat-rs-linux-x86_64
