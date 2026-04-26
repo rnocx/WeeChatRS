@@ -315,7 +315,9 @@ pub struct WeeChatApp {
     pub(crate) font_path: String,
     pub(crate) applied_font_path: String,
     pub(crate) available_fonts: Vec<(String, String)>,
-    pub(crate) font_filter: String,
+
+    // Tracks when the current buffer was selected; drives the unread divider transition.
+    pub(crate) selected_view_since: Option<std::time::Instant>,
 }
 
 pub(crate) struct CompletionState {
@@ -400,7 +402,7 @@ impl WeeChatApp {
             font_path: settings.font_path.clone(),
             applied_font_path: settings.font_path,
             available_fonts,
-            font_filter: String::new(),
+            selected_view_since: None,
         }
     }
 
@@ -433,16 +435,33 @@ impl WeeChatApp {
     }
 
     pub(crate) fn select_buffer(&mut self, id: String) {
+        // Tell WeeChat to mark the buffer we're LEAVING as read while lines are
+        // still loaded and the last line ID is concrete.  Calling it on *exit*
+        // (rather than on *entry*) is more reliable because WeeChat processes the
+        // request against a buffer it already knows has been visited.
+        if let Some(prev_id) = self.selected_buffer_id.clone() {
+            if prev_id != id {
+                if let Some(client) = &self.client {
+                    client.send_api(&format!("POST /api/buffers/{}/read", prev_id), None, None);
+                }
+            }
+        }
+
         self.selected_buffer_id = Some(id.clone());
+        self.selected_view_since = Some(std::time::Instant::now());
         // Mark as cleared so stale hotlist entries are suppressed on reconnect.
         self.cleared_buffer_ids.insert(id.clone());
         if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == id) {
             buffer.activity = BufferActivity::None;
+            buffer.unread_count = 0;
+            // Snapshot the current read marker so the unread divider stays anchored
+            // at the right position while the user views this buffer.
+            buffer.visit_start_marker_id = buffer.last_read_id.clone();
             if let Some(client) = &self.client {
                 client.send_api(&format!("GET /api/buffers/{}", id), Some(&format!("_buffer_info:{}", id)), None);
                 client.send_api(&format!("GET /api/buffers/{}/lines?lines=-{}", id, MAX_MESSAGES), Some(&format!("_buffer_lines:{}", id)), None);
                 client.send_api(&format!("GET /api/buffers/{}/nicks", id), Some(&format!("_nicks:{}", id)), None);
-                // Ask WeeChat to clear its server-side hotlist entry (relay v2, WeeChat ≥ 4.x).
+                // Also mark the buffer we're entering as read (belt-and-suspenders).
                 client.send_api(&format!("POST /api/buffers/{}/read", id), None, None);
             }
         }
@@ -612,8 +631,10 @@ impl eframe::App for WeeChatApp {
             Color32::from_rgba_unmultiplied(35, 35, 45, 220)
         };
 
-        // Semantic text tiers
-        let text_primary   = if is_light { Color32::from_gray(15)  } else { Color32::WHITE };
+        // Semantic text tiers — text_primary follows the theme foreground when set
+        let text_primary = self.theme.foreground
+            .map(Color32::from)
+            .unwrap_or_else(|| if is_light { Color32::from_gray(15) } else { Color32::WHITE });
         let text_secondary = if is_light { Color32::from_gray(70)  } else { Color32::from_gray(160) };
         let text_muted     = if is_light { Color32::from_gray(120) } else { Color32::from_gray(100) };
 
@@ -757,7 +778,30 @@ impl eframe::App for WeeChatApp {
                                         } else {
                                             egui::RichText::new(name).color(fg).strong()
                                         };
-                                        ui.label(label);
+                                        let unread = buffer.unread_count;
+                                        let buf_activity = buffer.activity;
+                                        if unread > 0 {
+                                            ui.horizontal(|ui| {
+                                                ui.label(label);
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    let badge_text = if unread > 99 { "99+".to_string() } else { unread.to_string() };
+                                                    let badge_bg = if buf_activity == BufferActivity::Highlight {
+                                                        Color32::from_rgb(200, 50, 50)
+                                                    } else {
+                                                        accent_color
+                                                    };
+                                                    Frame::none()
+                                                        .fill(badge_bg)
+                                                        .rounding(Rounding::same(8.0))
+                                                        .inner_margin(Margin::symmetric(4.0, 1.0))
+                                                        .show(ui, |ui| {
+                                                            ui.label(egui::RichText::new(badge_text).color(Color32::WHITE).strong().size(self.font_size * 0.72));
+                                                        });
+                                                });
+                                            });
+                                        } else {
+                                            ui.label(label);
+                                        }
                                     });
                             }).response;
 
@@ -873,7 +917,8 @@ impl eframe::App for WeeChatApp {
         let current_buffer_nicks = current_buf.map(|b| b.nicks.clone());
         let current_buffer_full_name = current_buf.map(|b| b.full_name.clone());
         let current_buffer_messages = current_buf.map(|b| b.messages.clone());
-        let current_buffer_last_read_id = current_buf.and_then(|b| b.last_read_id.clone());
+        let _current_buffer_last_read_id = current_buf.and_then(|b| b.last_read_id.clone());
+        let current_buffer_visit_marker_id = current_buf.and_then(|b| b.visit_start_marker_id.clone());
         let current_buffer_topic = current_buf.map(|b| b.topic.clone()).unwrap_or_default();
         let current_buffer_modes = current_buf.map(|b| b.modes.clone()).unwrap_or_default();
         let current_buffer_kind = current_buf.map(|b| b.kind.clone()).unwrap_or_default();
@@ -1113,19 +1158,34 @@ impl eframe::App for WeeChatApp {
                                         if !clean_prefix.contains(q) && !clean_msg.contains(q) { continue; }
                                     }
 
-                                    let past_read_marker = current_buffer_last_read_id.as_ref().map(|rid| {
+                                    let past_visit_marker = current_buffer_visit_marker_id.as_ref().map(|vid| {
                                         let lid = line.id.parse::<i64>().unwrap_or(0);
-                                        let rid = rid.parse::<i64>().unwrap_or(0);
-                                        lid > rid
+                                        let vid = vid.parse::<i64>().unwrap_or(0);
+                                        lid > vid
                                     }).unwrap_or(false);
-                                    if !marker_shown && past_read_marker {
+                                    if !marker_shown && past_visit_marker {
+                                        let elapsed = self.selected_view_since
+                                            .map(|t| t.elapsed())
+                                            .unwrap_or(std::time::Duration::from_secs(99));
+                                        let divider_color = Color32::from_rgb(200, 50, 50);
                                         ui.add_space(8.0);
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.separator();
-                                            ui.label(egui::RichText::new(" NEW MESSAGES ").color(Color32::from_rgb(255, 100, 100)).size(10.0).strong());
-                                            ui.separator();
-                                        });
+                                        if elapsed < std::time::Duration::from_secs(2) {
+                                            // Text phase — schedule repaint for the transition.
+                                            let remaining = std::time::Duration::from_secs(2) - elapsed;
+                                            ctx.request_repaint_after(remaining);
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.separator();
+                                                ui.label(egui::RichText::new(" NEW MESSAGES ").color(divider_color).size(10.0).strong());
+                                                ui.separator();
+                                            });
+                                        } else {
+                                            // Line phase — plain red rule.
+                                            ui.scope(|ui| {
+                                                ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, divider_color);
+                                                ui.separator();
+                                            });
+                                        }
                                         ui.add_space(8.0);
                                         marker_shown = true;
                                     }
