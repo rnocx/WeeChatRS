@@ -201,6 +201,10 @@ pub struct AppSettings {
     pub cleared_buffer_ids: HashSet<String>,
     #[serde(default)]
     pub save_password: bool,
+    #[serde(default)]
+    pub font_name: String,
+    #[serde(default)]
+    pub font_path: String,
 }
 
 impl Default for AppSettings {
@@ -227,6 +231,8 @@ impl Default for AppSettings {
             buffer_order: Vec::new(),
             cleared_buffer_ids: HashSet::new(),
             save_password: false,
+            font_name: String::new(),
+            font_path: String::new(),
         }
     }
 }
@@ -303,6 +309,13 @@ pub struct WeeChatApp {
 
     // Buffers the user has explicitly read this session; suppresses stale hotlist entries.
     pub(crate) cleared_buffer_ids: HashSet<String>,
+
+    // Font selection
+    pub(crate) font_name: String,
+    pub(crate) font_path: String,
+    pub(crate) applied_font_path: String,
+    pub(crate) available_fonts: Vec<(String, String)>,
+    pub(crate) font_filter: String,
 }
 
 pub(crate) struct CompletionState {
@@ -326,6 +339,11 @@ impl WeeChatApp {
 
         let saved_password = crate::ui::secure_storage::load(&settings.host, &settings.port);
         let password_from_keyring = saved_password.is_some();
+
+        if !settings.font_path.is_empty() {
+            crate::ui::fonts::apply(&cc.egui_ctx, &settings.font_path);
+        }
+        let available_fonts = crate::ui::fonts::scan_system_fonts();
 
         Self {
             host: settings.host,
@@ -378,6 +396,11 @@ impl WeeChatApp {
             dragging_buffer_id: None,
             drag_drop_before_id: None,
             cleared_buffer_ids: settings.cleared_buffer_ids,
+            font_name: settings.font_name,
+            font_path: settings.font_path.clone(),
+            applied_font_path: settings.font_path,
+            available_fonts,
+            font_filter: String::new(),
         }
     }
 
@@ -450,6 +473,8 @@ impl eframe::App for WeeChatApp {
             buffer_order: self.buffer_order.clone(),
             cleared_buffer_ids: self.cleared_buffer_ids.clone(),
             save_password: self.save_password,
+            font_name: self.font_name.clone(),
+            font_path: self.font_path.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -529,6 +554,11 @@ impl eframe::App for WeeChatApp {
         if arrow_up_shortcut { self.cycle_buffer(-1); }
         if arrow_down_shortcut { self.cycle_buffer(1); }
         if search_shortcut { self.show_search = !self.show_search; }
+
+        if self.font_path != self.applied_font_path {
+            crate::ui::fonts::apply(ctx, &self.font_path);
+            self.applied_font_path = self.font_path.clone();
+        }
 
         let mut style = (*ctx.style()).clone();
         let font_family = if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional };

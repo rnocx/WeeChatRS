@@ -24,6 +24,7 @@ reqwest = { version = "0.12", default-features = false, features = ["native-tls"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 notify-rust = "4.11"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+fontdb = "0.22"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 native-tls = "0.2"
