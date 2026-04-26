@@ -20,8 +20,10 @@ impl WeeChatApp {
             }
             RelayEvent::Connected => {
                 self.is_connecting = false;
+                self.connecting_pending = false;
+                self.auth_error = None;
                 self.connection_status = "Connected".to_string();
-                self.buffers.clear(); 
+                self.buffers.clear();
                 if let Some(client) = &self.client {
                     client.send_api("GET /api/buffers", Some("_list_buffers"), None);
                     client.send_api("POST /api/sync", None, Some(serde_json::json!({"colors": "ansi", "buffers": "all"})));
@@ -30,7 +32,12 @@ impl WeeChatApp {
             }
             RelayEvent::Disconnected => {
                 self.is_connecting = false;
-                if !self.auto_reconnect {
+                if self.connecting_pending {
+                    // Disconnected before we confirmed auth — treat as auth failure.
+                    self.connecting_pending = false;
+                    self.auth_error = Some("Connection closed — check your password and relay settings.".to_string());
+                    self.client = None;
+                } else if !self.auto_reconnect {
                     self.client = None;
                 }
                 self.buffers.clear();
@@ -38,10 +45,25 @@ impl WeeChatApp {
                 self.connection_status = "Disconnected".to_string();
             }
             RelayEvent::Error(e) => {
-                self.connection_status = format!("Error: {}", e);
-                if !self.auto_reconnect {
+                let is_auth = e.contains("401") || e.contains("403")
+                    || e.to_lowercase().contains("unauthorized")
+                    || e.to_lowercase().contains("forbidden");
+
+                if self.connecting_pending || is_auth {
+                    self.connecting_pending = false;
+                    self.auth_error = Some(if is_auth {
+                        "Wrong password or relay not configured to accept this connection.".to_string()
+                    } else {
+                        format!("Connection failed: {}", e)
+                    });
                     self.client = None;
-                    self.buffers.clear();
+                    self.connection_status = String::new();
+                } else {
+                    self.connection_status = format!("Error: {}", e);
+                    if !self.auto_reconnect {
+                        self.client = None;
+                        self.buffers.clear();
+                    }
                 }
             }
             RelayEvent::Message(resp) => {

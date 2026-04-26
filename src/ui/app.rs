@@ -245,6 +245,8 @@ pub struct WeeChatApp {
     
     pub(crate) connection_status: String,
     pub(crate) is_connecting: bool,
+    pub(crate) connecting_pending: bool,
+    pub(crate) auth_error: Option<String>,
     pub(crate) buffers: Vec<Buffer>,
     pub(crate) selected_buffer_id: Option<String>,
     pub(crate) input_text: String,
@@ -337,6 +339,8 @@ impl WeeChatApp {
             event_tx,
             connection_status: "".to_string(),
             is_connecting: false,
+            connecting_pending: false,
+            auth_error: None,
             buffers: Vec::new(),
             selected_buffer_id: None,
             input_text: String::new(),
@@ -932,7 +936,7 @@ impl eframe::App for WeeChatApp {
         egui::CentralPanel::default()
             .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(0.0)))
             .show(ctx, |ui| {
-            if self.client.is_none() {
+            if self.client.is_none() || self.connecting_pending {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ctx.available_rect().height() * 0.2);
                     
@@ -948,14 +952,14 @@ impl eframe::App for WeeChatApp {
                             
                             egui::Grid::new("login_grid").num_columns(2).spacing([15.0, 15.0]).show(ui, |ui| {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Host:"); });
-                                ui.add(egui::TextEdit::singleline(&mut self.host).desired_width(240.0));
+                                if ui.add(egui::TextEdit::singleline(&mut self.host).desired_width(240.0)).changed() { self.auth_error = None; }
                                 ui.end_row();
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Port:"); });
-                                ui.add(egui::TextEdit::singleline(&mut self.port).desired_width(240.0));
+                                if ui.add(egui::TextEdit::singleline(&mut self.port).desired_width(240.0)).changed() { self.auth_error = None; }
                                 ui.end_row();
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Password:"); });
                                 ui.horizontal(|ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(200.0));
+                                    if ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(200.0)).changed() { self.auth_error = None; }
                                     if self.password_from_keyring {
                                         ui.label(egui::RichText::new("(keyring)").small().color(ui.visuals().weak_text_color()));
                                     }
@@ -987,20 +991,30 @@ impl eframe::App for WeeChatApp {
                             ui.add_space(25.0);
 
                             ui.horizontal(|ui| {
-                                if ui.add(egui::Button::new(egui::RichText::new("Connect").strong().color(Color32::WHITE)).fill(accent_color).min_size(Vec2::new(120.0, 40.0))).clicked() {
+                                let btn_label = if self.connecting_pending { "Connecting…" } else { "Connect" };
+                                let btn = egui::Button::new(egui::RichText::new(btn_label).strong().color(Color32::WHITE))
+                                    .fill(if self.connecting_pending { accent_color.linear_multiply(0.5) } else { accent_color })
+                                    .min_size(Vec2::new(120.0, 40.0));
+                                if ui.add_enabled(!self.connecting_pending, btn).clicked() {
                                     if self.save_password && !self.password.is_empty() {
                                         let _ = crate::ui::secure_storage::save(&self.host, &self.port, &self.password);
                                         self.password_from_keyring = true;
                                     }
                                     let port = self.port.parse().unwrap_or(9001);
-                                    self.client = Some(RelayClient::connect(self.host.clone(), port, self.password.clone(), self.use_ssl, self.event_tx.clone(), ctx.clone()));
+                                    self.auth_error = None;
+                                    self.connecting_pending = true;
                                     self.connection_status = "Connecting...".to_string();
+                                    self.client = Some(RelayClient::connect(self.host.clone(), port, self.password.clone(), self.use_ssl, self.event_tx.clone(), ctx.clone()));
                                 }
                             });
-                            
+
                             ui.add_space(15.0);
-                            if !self.connection_status.is_empty() {
-                                ui.label(egui::RichText::new(&self.connection_status).color(if self.connection_status.starts_with("Error") { Color32::from_rgb(255, 100, 100) } else { accent_color }));
+                            if let Some(err) = &self.auth_error.clone() {
+                                ui.label(egui::RichText::new(format!("⚠ {}", err)).color(Color32::from_rgb(220, 80, 80)));
+                            } else if self.connecting_pending {
+                                ui.label(egui::RichText::new("Connecting…").color(accent_color));
+                            } else if !self.connection_status.is_empty() && self.connection_status.starts_with("Error") {
+                                ui.label(egui::RichText::new(&self.connection_status.clone()).color(Color32::from_rgb(220, 80, 80)));
                             }
                         });
                 });
