@@ -281,6 +281,7 @@ impl WeeChatApp {
                         last_read_id = existing.last_read_id.clone();
                         visit_start_marker_id = existing.visit_start_marker_id.clone();
                     }
+                    let muted = self.muted_buffer_names.contains(&full_name);
                     // Relay's read marker takes priority — it's the authoritative baseline
                     // for showing the unread divider after a fresh connect.
                     if relay_last_read_id.is_some() {
@@ -305,6 +306,7 @@ impl WeeChatApp {
                         topic,
                         modes,
                         hidden,
+                        muted,
                         visit_start_marker_id,
                     });
                 }
@@ -374,6 +376,10 @@ impl WeeChatApp {
                 if let Some(buffer_id) = buffer_id {
                     // Skip the buffer the user is currently viewing.
                     if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
+                        continue;
+                    }
+                    // Skip muted buffers — they are intentionally silenced.
+                    if self.buffers.iter().any(|b| b.id == buffer_id && b.muted) {
                         continue;
                     }
                     // Skip buffers the user has explicitly read in this or a previous session.
@@ -533,7 +539,7 @@ impl WeeChatApp {
 
                             if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
                                 buffer.last_read_id = Some(line.id.clone());
-                            } else if displayed {
+                            } else if displayed && !buffer.muted {
                                 buffer.unread_count = buffer.unread_count.saturating_add(1);
                                 let activity = if is_highlight || notify_level == 3 {
                                     BufferActivity::Highlight
@@ -545,14 +551,14 @@ impl WeeChatApp {
                                     BufferActivity::Metadata
                                 };
 
-                                if activity > buffer.activity {
+                                if !buffer.muted && activity > buffer.activity {
                                     buffer.activity = activity;
                                     // A real new message arrived while the user isn't watching —
                                     // evict from cleared set so it shows as unread on next reconnect.
                                     self.cleared_buffer_ids.remove(&buffer_id);
                                 }
 
-                                if is_highlight || notify_level == 3 {
+                                if (is_highlight || notify_level == 3) && !buffer.muted {
                                     let sender = Self::strip_ansi(prefix);
                                     let text = Self::strip_ansi(message);
                                     let body = if sender.is_empty() { text } else { format!("{}: {}", sender, text) };
