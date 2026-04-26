@@ -523,6 +523,7 @@ impl WeeChatApp {
                                     let sender = Self::strip_ansi(prefix);
                                     let text = Self::strip_ansi(message);
                                     let body = if sender.is_empty() { text } else { format!("{}: {}", sender, text) };
+                                    #[cfg(not(target_os = "linux"))]
                                     let _ = notify_rust::Notification::new()
                                         .summary(&buffer.name)
                                         .body(&body)
