@@ -24,6 +24,11 @@ impl WeeChatApp {
                 self.auth_error = None;
                 self.connection_status = "Connected".to_string();
                 self.buffers.clear();
+                // Keep cleared_buffer_ids across reconnects. The local record of which
+                // buffers the user has read is more reliable than the server's hotlist
+                // when POST /api/buffers/{id}/read hasn't been fully acknowledged
+                // (e.g. the connection dropped before WeeChat processed it).
+                // New live messages still update activity via buffer_line_added events.
                 if let Some(client) = &self.client {
                     client.send_api("GET /api/buffers", Some("_list_buffers"), None);
                     client.send_api("POST /api/sync", None, Some(serde_json::json!({"colors": "ansi", "buffers": "all"})));
@@ -106,6 +111,16 @@ impl WeeChatApp {
                 | "buffer_localvar_removed" => {
                     if let Some(client) = &self.client {
                         client.send_api("GET /api/buffers", Some("_list_buffers"), None);
+                    }
+                }
+                "buffer_hotlist_added" | "buffer_hotlist_updated" => {
+                    self.handle_hotlist(resp);
+                }
+                "buffer_hotlist_removed" => {
+                    // WeeChat cleared a hotlist entry (user read it elsewhere).
+                    // Re-fetch the full hotlist so our state stays in sync.
+                    if let Some(client) = &self.client {
+                        client.send_api("GET /api/hotlist", Some("_hotlist"), None);
                     }
                 }
                 _ => {}
@@ -254,13 +269,17 @@ impl WeeChatApp {
                     let mut messages = std::collections::VecDeque::new();
                     let mut nicks = Vec::new();
                     let mut activity = BufferActivity::None;
+                    let mut unread_count = 0u32;
                     let mut last_read_id = None;
+                    let mut visit_start_marker_id = None;
 
                     if let Some(existing) = self.buffers.iter().find(|b| b.id == id) {
                         messages = existing.messages.clone();
                         nicks = existing.nicks.clone();
                         activity = existing.activity;
+                        unread_count = existing.unread_count;
                         last_read_id = existing.last_read_id.clone();
+                        visit_start_marker_id = existing.visit_start_marker_id.clone();
                     }
                     // Relay's read marker takes priority — it's the authoritative baseline
                     // for showing the unread divider after a fresh connect.
@@ -281,10 +300,12 @@ impl WeeChatApp {
                         messages,
                         nicks,
                         activity,
+                        unread_count,
                         last_read_id,
                         topic,
                         modes,
                         hidden,
+                        visit_start_marker_id,
                     });
                 }
             }
@@ -368,6 +389,12 @@ impl WeeChatApp {
                             1 => BufferActivity::Metadata,
                             _ => BufferActivity::None,
                         };
+                        // Extract message + highlight counts from hotlist payload.
+                        if let Some(count_obj) = obj.get("count").and_then(|v| v.as_object()) {
+                            let msg = count_obj.get("message").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let hl  = count_obj.get("highlight").and_then(|v| v.as_i64()).unwrap_or(0);
+                            buffer.unread_count = (msg + hl) as u32;
+                        }
                     }
                 }
             }
@@ -401,11 +428,16 @@ impl WeeChatApp {
                 deque.drain(0..excess);
             }
             buffer.messages = deque;
-            // Only mark everything as read when loading for the first time (no prior
-            // read marker). On subsequent reloads the existing marker must be kept so
-            // the unread divider stays visible for messages that arrived since the user
-            // last viewed this buffer.
-            if buffer.last_read_id.is_none() {
+            let is_selected = self.selected_buffer_id.as_deref() == Some(buffer_id);
+            if is_selected {
+                // Advance the persistent marker to the latest message so the next
+                // visit to this buffer starts with no divider.  The visual divider
+                // for the *current* visit is anchored on visit_start_marker_id which
+                // was snapshotted in select_buffer before this update.
+                if let Some(last) = buffer.messages.back() {
+                    buffer.last_read_id = Some(last.id.clone());
+                }
+            } else if buffer.last_read_id.is_none() {
                 if let Some(last) = buffer.messages.back() {
                     buffer.last_read_id = Some(last.id.clone());
                 }
@@ -502,14 +534,15 @@ impl WeeChatApp {
                             if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
                                 buffer.last_read_id = Some(line.id.clone());
                             } else if displayed {
+                                buffer.unread_count = buffer.unread_count.saturating_add(1);
                                 let activity = if is_highlight || notify_level == 3 {
                                     BufferActivity::Highlight
                                 } else if notify_level == 2 {
                                     BufferActivity::Message
-                                } else if notify_level == 1 {
-                                    BufferActivity::Metadata
                                 } else {
-                                    buffer.activity
+                                    // notify_level 1 or 0: any displayed message in an
+                                    // unviewed buffer deserves at least a metadata indicator.
+                                    BufferActivity::Metadata
                                 };
 
                                 if activity > buffer.activity {

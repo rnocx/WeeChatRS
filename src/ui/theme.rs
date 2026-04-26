@@ -18,6 +18,17 @@ impl From<ThemeColor> for Color32 {
     }
 }
 
+impl From<Color32> for ThemeColor {
+    fn from(c: Color32) -> Self {
+        let [r, g, b, _] = c.to_array();
+        ThemeColor {
+            r: r as f64 / 255.0,
+            g: g as f64 / 255.0,
+            b: b as f64 / 255.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppTheme {
     pub name: String,

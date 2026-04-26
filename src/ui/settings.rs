@@ -1,7 +1,8 @@
-use crate::ui::theme::AppTheme;
+use crate::ui::theme::{AppTheme, ThemeColor};
 use crate::ui::app::WeeChatApp;
 use crate::ui::fonts;
 use egui::{Color32, Vec2, RichText};
+use egui::color_picker::{color_edit_button_srgba, Alpha};
 
 impl WeeChatApp {
     pub(crate) fn show_settings_window(&mut self, ctx: &egui::Context, accent_color: Color32, is_light: bool) {
@@ -74,13 +75,28 @@ impl WeeChatApp {
                 ui.checkbox(&mut use_monospace, "Use Monospace font everywhere");
 
                 ui.add_space(8.0);
-                ui.label(RichText::new("Font family").strong());
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.font_filter)
-                            .hint_text("Search fonts…")
-                            .desired_width(200.0),
-                    );
+                    ui.label("Font family:");
+                    let selected_label = if self.font_name.is_empty() {
+                        "Default".to_string()
+                    } else {
+                        self.font_name.clone()
+                    };
+                    egui::ComboBox::from_id_source("font_family_combo")
+                        .selected_text(&selected_label)
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(self.font_name.is_empty(), "Default").clicked() {
+                                reset_font = true;
+                            }
+                            ui.separator();
+                            for (name, path) in &self.available_fonts {
+                                let selected = name.as_str() == self.font_name.as_str();
+                                if ui.selectable_label(selected, name.as_str()).clicked() {
+                                    new_font = Some((name.clone(), path.clone()));
+                                }
+                            }
+                        });
                     if ui.add(
                         egui::Button::new(RichText::new("Browse…").color(accent_color))
                             .fill(secondary_fill)
@@ -98,40 +114,7 @@ impl WeeChatApp {
                             new_font = Some((name, path_str));
                         }
                     }
-                    if !self.font_name.is_empty() {
-                        if ui.add(
-                            egui::Button::new(RichText::new("Reset").color(Color32::WHITE))
-                                .fill(Color32::from_rgb(120, 60, 60))
-                        ).clicked() {
-                            reset_font = true;
-                        }
-                    }
                 });
-                if !self.font_name.is_empty() {
-                    ui.label(
-                        RichText::new(format!("Current: {}", self.font_name))
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                }
-                let filter_lc = self.font_filter.to_lowercase();
-                let matching: Vec<&(String, String)> = self.available_fonts.iter()
-                    .filter(|(name, _)| filter_lc.is_empty() || name.to_lowercase().contains(&filter_lc))
-                    .collect();
-                if !matching.is_empty() {
-                    egui::ScrollArea::vertical()
-                        .id_source("font_list")
-                        .max_height(160.0)
-                        .show(ui, |ui| {
-                            ui.set_min_width(300.0);
-                            for (name, path) in &matching {
-                                let selected = name.as_str() == self.font_name.as_str();
-                                if ui.selectable_label(selected, name.as_str()).clicked() {
-                                    new_font = Some((name.to_string(), path.to_string()));
-                                }
-                            }
-                        });
-                }
 
                 ui.horizontal(|ui| {
                     ui.label("Opacity:");
@@ -139,38 +122,87 @@ impl WeeChatApp {
                 });
 
                 ui.separator();
-                ui.label(RichText::new("Theme").strong());
-                ui.label(
-                    RichText::new("Supports .itermcolors color schemes")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-                ui.add_space(4.0);
-                ui.label(format!("Current: {}", self.theme.name));
                 ui.horizontal(|ui| {
-                    if ui.add(
-                        egui::Button::new(RichText::new("Import").color(accent_color))
-                            .fill(secondary_fill)
-                            .stroke(secondary_stroke)
-                            .min_size(Vec2::new(80.0, 28.0))
-                    ).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().add_filter("itermcolors", &["itermcolors"]).pick_file() {
-                            if let Ok(data) = std::fs::read(&path) {
-                                let name = path.file_stem().unwrap().to_string_lossy().to_string();
-                                if let Ok(new_theme) = AppTheme::parse_itermcolors(&data, name) {
-                                    self.theme = new_theme;
+                    ui.label(RichText::new("Theme").strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(
+                            egui::Button::new(RichText::new("Reset").color(Color32::WHITE))
+                                .fill(danger_color)
+                                .min_size(Vec2::new(70.0, 24.0))
+                        ).clicked() {
+                            reset_theme = true;
+                        }
+                        if ui.add(
+                            egui::Button::new(RichText::new("Import .itermcolors").color(accent_color))
+                                .fill(secondary_fill)
+                                .stroke(secondary_stroke)
+                                .min_size(Vec2::new(140.0, 24.0))
+                        ).clicked() {
+                            if let Some(path) = rfd::FileDialog::new().add_filter("itermcolors", &["itermcolors"]).pick_file() {
+                                if let Ok(data) = std::fs::read(&path) {
+                                    let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                                    if let Ok(new_theme) = AppTheme::parse_itermcolors(&data, name) {
+                                        self.theme = new_theme;
+                                    }
                                 }
                             }
                         }
+                    });
+                });
+                ui.label(
+                    RichText::new(format!("Current: {}", self.theme.name))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+
+                ui.add_space(6.0);
+
+                // BG / FG
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Background:").small());
+                    let mut bg = self.theme.background
+                        .map(Color32::from)
+                        .unwrap_or(Color32::from_rgb(18, 18, 18));
+                    if color_edit_button_srgba(ui, &mut bg, Alpha::Opaque).changed() {
+                        self.theme.background = Some(ThemeColor::from(bg));
                     }
-                    if ui.add(
-                        egui::Button::new(RichText::new("Reset").color(Color32::WHITE))
-                            .fill(danger_color)
-                            .min_size(Vec2::new(80.0, 28.0))
-                    ).clicked() {
-                        reset_theme = true;
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("Foreground:").small());
+                    let mut fg = self.theme.foreground
+                        .map(Color32::from)
+                        .unwrap_or(Color32::from_rgb(204, 204, 204));
+                    if color_edit_button_srgba(ui, &mut fg, Alpha::Opaque).changed() {
+                        self.theme.foreground = Some(ThemeColor::from(fg));
                     }
                 });
+
+                ui.add_space(6.0);
+
+                // ANSI palette — two rows of 8
+                const LABELS: [&str; 16] = [
+                    "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
+                    "Br.Black", "Br.Red", "Br.Green", "Br.Yellow", "Br.Blue", "Br.Magenta", "Br.Cyan", "Br.White",
+                ];
+                for row in 0..2usize {
+                    ui.horizontal(|ui| {
+                        for col in 0..8usize {
+                            let i = row * 8 + col;
+                            ui.vertical(|ui| {
+                                ui.set_width(46.0);
+                                let mut c = Color32::from(self.theme.ansi[i]);
+                                if color_edit_button_srgba(ui, &mut c, Alpha::Opaque).changed() {
+                                    self.theme.ansi[i] = ThemeColor::from(c);
+                                }
+                                ui.label(
+                                    RichText::new(LABELS[i])
+                                        .size(9.0)
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                            });
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
 
                 ui.add_space(20.0);
                 ui.vertical_centered_justified(|ui| {
