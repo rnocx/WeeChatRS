@@ -37,6 +37,7 @@
 - [x] Session persistence — host, port, SSL, UI preferences saved across restarts
 - [x] Theme persistence — selected `.itermcolors` theme saved
 - [x] Secure storage — relay password in system keyring (macOS Keychain, libsecret, Windows Credential Manager)
+- [x] Linux secure storage in cross-compiled builds — solved via Docker (`docker/Dockerfile.linux-x86_64`); builds natively in `linux/amd64` with full `libdbus-1-dev` and `sync-secret-service` keyring support.
 - [ ] Android APK build — eframe supports Android via `android-activity`; blockers: feature-gate `notify-rust`, `plist`, `rfd` behind `#[cfg(not(target_os = "android"))]`, swap `native-tls` for `rustls`, add `android_main` entry point, wire up `cargo-apk`
 - [ ] Scroll position memory — remember per-buffer scroll position when switching back
 
