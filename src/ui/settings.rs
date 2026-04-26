@@ -1,5 +1,6 @@
 use crate::ui::theme::AppTheme;
 use crate::ui::app::WeeChatApp;
+use crate::ui::fonts;
 use egui::{Color32, Vec2, RichText};
 
 impl WeeChatApp {
@@ -19,6 +20,8 @@ impl WeeChatApp {
         let mut opacity = self.opacity;
         let mut close_clicked = false;
         let mut reset_theme = false;
+        let mut new_font: Option<(String, String)> = None; // (name, path)
+        let mut reset_font = false;
 
         // Danger red that works on both light and dark backgrounds
         let danger_color = Color32::from_rgb(185, 55, 55);
@@ -69,6 +72,67 @@ impl WeeChatApp {
                         });
                 });
                 ui.checkbox(&mut use_monospace, "Use Monospace font everywhere");
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("Font family").strong());
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.font_filter)
+                            .hint_text("Search fonts…")
+                            .desired_width(200.0),
+                    );
+                    if ui.add(
+                        egui::Button::new(RichText::new("Browse…").color(accent_color))
+                            .fill(secondary_fill)
+                            .stroke(secondary_stroke)
+                    ).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Font files", &["ttf", "otf", "ttc"])
+                            .pick_file()
+                        {
+                            let path_str = path.to_string_lossy().into_owned();
+                            let name = fonts::family_from_file(&path_str)
+                                .unwrap_or_else(|| path.file_stem()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_default());
+                            new_font = Some((name, path_str));
+                        }
+                    }
+                    if !self.font_name.is_empty() {
+                        if ui.add(
+                            egui::Button::new(RichText::new("Reset").color(Color32::WHITE))
+                                .fill(Color32::from_rgb(120, 60, 60))
+                        ).clicked() {
+                            reset_font = true;
+                        }
+                    }
+                });
+                if !self.font_name.is_empty() {
+                    ui.label(
+                        RichText::new(format!("Current: {}", self.font_name))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                }
+                let filter_lc = self.font_filter.to_lowercase();
+                let matching: Vec<&(String, String)> = self.available_fonts.iter()
+                    .filter(|(name, _)| filter_lc.is_empty() || name.to_lowercase().contains(&filter_lc))
+                    .collect();
+                if !matching.is_empty() {
+                    egui::ScrollArea::vertical()
+                        .id_source("font_list")
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width(300.0);
+                            for (name, path) in &matching {
+                                let selected = name.as_str() == self.font_name.as_str();
+                                if ui.selectable_label(selected, name.as_str()).clicked() {
+                                    new_font = Some((name.to_string(), path.to_string()));
+                                }
+                            }
+                        });
+                }
+
                 ui.horizontal(|ui| {
                     ui.label("Opacity:");
                     ui.add(egui::Slider::new(&mut opacity, 0.1..=1.0));
@@ -134,5 +198,13 @@ impl WeeChatApp {
         self.show_hidden_buffers = show_hidden_buffers;
         self.opacity = opacity;
         if reset_theme { self.theme = AppTheme::default(); }
+        if reset_font {
+            self.font_name.clear();
+            self.font_path.clear();
+        }
+        if let Some((name, path)) = new_font {
+            self.font_name = name;
+            self.font_path = path;
+        }
     }
 }
