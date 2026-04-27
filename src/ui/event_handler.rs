@@ -17,12 +17,33 @@ impl WeeChatApp {
             RelayEvent::Connecting => {
                 self.is_connecting = true;
                 self.connection_status = "Connecting...".to_string();
+                self.connection_attempts += 1;
+                if self.connection_attempts == 1 {
+                    self.log_conn("TCP connection + WebSocket handshake in progress…");
+                } else {
+                    let backoff = {
+                        let secs = 1u64 << (self.connection_attempts - 2).min(4);
+                        secs.min(30)
+                    };
+                    self.log_conn(format!(
+                        "Reconnect attempt {} (backoff was {}s)…",
+                        self.connection_attempts - 1,
+                        backoff
+                    ));
+                }
             }
             RelayEvent::Connected => {
                 self.is_connecting = false;
                 self.connecting_pending = false;
                 self.auth_error = None;
                 self.connection_status = "Connected".to_string();
+                self.log_conn("WebSocket handshake complete");
+                self.log_conn("Sending credentials via Sec-WebSocket-Protocol bearer token");
+                self.log_conn("Authentication accepted by relay");
+                self.log_conn("→ GET /api/buffers");
+                self.log_conn("→ POST /api/sync  {colors: ansi, input: false}");
+                self.log_conn("→ GET /api/hotlist");
+                self.log_conn("Connected");
                 self.buffers.clear();
                 // Keep cleared_buffer_ids across reconnects. The local record of which
                 // buffers the user has read is more reliable than the server's hotlist
@@ -38,9 +59,10 @@ impl WeeChatApp {
             RelayEvent::Disconnected => {
                 self.is_connecting = false;
                 if self.connecting_pending {
-                    // Disconnected before we confirmed a successful connection.
                     self.connecting_pending = false;
                     self.auth_error = Some("Connection closed before auth completed — check your password and relay settings.".to_string());
+                    self.log_conn("WebSocket closed by server before authentication completed");
+                    self.log_conn("Check: relay password, relay plugin loaded, port correct");
                     self.client = None;
                     self.connection_status = String::new();
                 } else {
@@ -50,6 +72,11 @@ impl WeeChatApp {
                     self.buffers.clear();
                     self.selected_buffer_id = None;
                     self.connection_status = "Disconnected".to_string();
+                    if self.auto_reconnect {
+                        self.log_conn("Disconnected — auto-reconnect is ON, will retry");
+                    } else {
+                        self.log_conn("Disconnected");
+                    }
                 }
             }
             RelayEvent::Error(e) => {
@@ -58,6 +85,12 @@ impl WeeChatApp {
                         || e.to_lowercase().contains("unauthorized")
                         || e.to_lowercase().contains("forbidden");
                     self.connecting_pending = false;
+                    if is_auth {
+                        self.log_conn(format!("Auth error: {}", e));
+                        self.log_conn("Wrong password or relay not configured to accept this connection");
+                    } else {
+                        self.log_conn(format!("Connection error: {}", e));
+                    }
                     self.auth_error = Some(if is_auth {
                         "Wrong password or relay not configured to accept this connection.".to_string()
                     } else {
@@ -66,6 +99,7 @@ impl WeeChatApp {
                     self.client = None;
                     self.connection_status = String::new();
                 } else {
+                    self.log_conn(format!("Error: {}", e));
                     self.connection_status = format!("Error: {}", e);
                     if !self.auto_reconnect {
                         self.client = None;
@@ -177,6 +211,7 @@ impl WeeChatApp {
                 }
                 "upgrade" => {
                     self.connection_status = "WeeChat upgrading…".to_string();
+                    self.log_conn("WeeChat is upgrading — waiting for reload…");
                 }
                 "upgrade_ended" => {
                     // WeeChat finished reloading — re-fetch everything to get a clean state.
@@ -185,6 +220,7 @@ impl WeeChatApp {
                         client.send_api("GET /api/hotlist", Some("_hotlist"), None);
                     }
                     self.connection_status = "Connected".to_string();
+                    self.log_conn("WeeChat upgrade complete — re-synced");
                 }
                 "buffer_opened" | "buffer_closed" | "buffer_renamed"
                 | "buffer_localvar_added" | "buffer_localvar_changed"
@@ -404,6 +440,15 @@ impl WeeChatApp {
         }
 
         if !new_buffers.is_empty() {
+            let network_count = {
+                let mut seen = std::collections::HashSet::new();
+                new_buffers.iter().filter(|b| b.kind != "core").for_each(|b| { seen.insert(&b.server); });
+                seen.len()
+            };
+            self.log_conn(format!(
+                "← GET /api/buffers  {} buffers, {} network(s)",
+                new_buffers.len(), network_count
+            ));
             Self::sort_buffers(&mut new_buffers);
             self.buffers = new_buffers;
 
@@ -456,6 +501,11 @@ impl WeeChatApp {
 
     fn handle_hotlist(&mut self, resp: WeeChatResponse) {
         let body = Self::body_as_vec(&resp);
+        let is_initial = resp.request_id.as_deref() == Some("_hotlist");
+        let entry_count = body.len();
+        if is_initial {
+            self.log_conn(format!("← GET /api/hotlist  {} active entr{}", entry_count, if entry_count == 1 { "y" } else { "ies" }));
+        }
         for val in body {
             if let Some(obj) = val.as_object() {
                 let buffer_id = obj.get("buffer_id").and_then(|v| Self::parse_id(v));
@@ -519,15 +569,24 @@ impl WeeChatApp {
             })
         }).collect();
 
+        let mut log_entry: Option<String> = None;
         if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
             let mut deque: std::collections::VecDeque<Line> = lines.into();
             if deque.len() > MAX_STORED_LINES {
                 let excess = deque.len() - MAX_STORED_LINES;
                 deque.drain(0..excess);
             }
+            let line_count = deque.len();
+            let is_load_more = self.loading_more_buffer_id.as_deref() == Some(buffer_id);
+            log_entry = Some(format!(
+                "← GET /api/buffers/{}/lines  {} lines{}  [#{}]",
+                buffer_id, line_count,
+                if is_load_more { " (load more)" } else { "" },
+                buffer.name
+            ));
             buffer.messages = deque;
             // Clear the in-flight load-more marker now that the response arrived.
-            if self.loading_more_buffer_id.as_deref() == Some(buffer_id) {
+            if is_load_more {
                 self.loading_more_buffer_id = None;
             }
             let is_selected = self.selected_buffer_id.as_deref() == Some(buffer_id);
@@ -544,6 +603,9 @@ impl WeeChatApp {
                     buffer.last_read_id = Some(last.id.clone());
                 }
             }
+        }
+        if let Some(entry) = log_entry {
+            self.log_conn(entry);
         }
     }
 
