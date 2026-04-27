@@ -126,7 +126,9 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
     Ok(LinkPreview { title, description, image_url, site_name })
 }
 
-pub const MAX_MESSAGES: usize = 400;
+pub const INITIAL_LINES: usize = 1000;
+pub const LOAD_MORE_LINES: usize = 1000;
+pub const MAX_STORED_LINES: usize = 10_000;
 
 /// Reorder `buffers` by moving the dragged item (and its whole server group when it is a server
 /// header) to just before `drop_before_id`, or to the end when `drop_before_id` is `None`.
@@ -195,8 +197,10 @@ pub struct AppSettings {
     pub show_hidden_buffers: bool,
     #[serde(default)]
     pub buffer_order: Vec<String>,
-    /// Buffer IDs the user has explicitly read; used to suppress stale hotlist entries on
-    /// reconnect when the server-side `POST /api/buffers/{id}/read` is unavailable.
+    /// Buffer IDs the user has explicitly read; suppresses stale hotlist entries on
+    /// reconnect.  The relay API has no dedicated read-mark endpoint — the correct
+    /// mechanism is POST /api/input + "/input hotlist_clear", but this local set
+    /// provides a reliable fallback for the client-side indicator state.
     #[serde(default)]
     pub cleared_buffer_ids: HashSet<String>,
     #[serde(default)]
@@ -324,6 +328,12 @@ pub struct WeeChatApp {
 
     // Muted buffers (stored by full_name, stable across WeeChat restarts).
     pub(crate) muted_buffer_names: HashSet<String>,
+
+    // Set to the buffer ID while a "load more" history request is in flight.
+    pub(crate) loading_more_buffer_id: Option<String>,
+
+    // Transient search text inside the font-family dropdown.
+    pub(crate) font_search: String,
 }
 
 pub(crate) struct CompletionState {
@@ -410,6 +420,8 @@ impl WeeChatApp {
             available_fonts,
             selected_view_since: None,
             muted_buffer_names: settings.muted_buffer_names,
+            loading_more_buffer_id: None,
+            font_search: String::new(),
         }
     }
 
@@ -442,14 +454,19 @@ impl WeeChatApp {
     }
 
     pub(crate) fn select_buffer(&mut self, id: String) {
-        // Tell WeeChat to mark the buffer we're LEAVING as read while lines are
-        // still loaded and the last line ID is concrete.  Calling it on *exit*
-        // (rather than on *entry*) is more reliable because WeeChat processes the
-        // request against a buffer it already knows has been visited.
+        // Clear the hotlist entry for the buffer we're LEAVING so WeeChat's own
+        // TUI reflects it as read.  POST /api/buffers/{id}/read does not exist in
+        // the relay API — the correct approach is POST /api/input with the
+        // WeeChat command "/input hotlist_clear" targeted at the specific buffer.
         if let Some(prev_id) = self.selected_buffer_id.clone() {
             if prev_id != id {
                 if let Some(client) = &self.client {
-                    client.send_api(&format!("POST /api/buffers/{}/read", prev_id), None, None);
+                    if let Ok(numeric_id) = prev_id.parse::<i64>() {
+                        client.send_api("POST /api/input", None, Some(serde_json::json!({
+                            "buffer_id": numeric_id,
+                            "command": "/input hotlist_clear"
+                        })));
+                    }
                 }
             }
         }
@@ -464,12 +481,20 @@ impl WeeChatApp {
             // Snapshot the current read marker so the unread divider stays anchored
             // at the right position while the user views this buffer.
             buffer.visit_start_marker_id = buffer.last_read_id.clone();
+            let fetch_nicks = buffer.has_nicklist;
             if let Some(client) = &self.client {
                 client.send_api(&format!("GET /api/buffers/{}", id), Some(&format!("_buffer_info:{}", id)), None);
-                client.send_api(&format!("GET /api/buffers/{}/lines?lines=-{}", id, MAX_MESSAGES), Some(&format!("_buffer_lines:{}", id)), None);
-                client.send_api(&format!("GET /api/buffers/{}/nicks", id), Some(&format!("_nicks:{}", id)), None);
-                // Also mark the buffer we're entering as read (belt-and-suspenders).
-                client.send_api(&format!("POST /api/buffers/{}/read", id), None, None);
+                client.send_api(&format!("GET /api/buffers/{}/lines?lines=-{}", id, INITIAL_LINES), Some(&format!("_buffer_lines:{}", id)), None);
+                if fetch_nicks {
+                    client.send_api(&format!("GET /api/buffers/{}/nicks", id), Some(&format!("_nicks:{}", id)), None);
+                }
+                // Also clear hotlist on entry so it's covered if we entered directly.
+                if let Ok(numeric_id) = id.parse::<i64>() {
+                    client.send_api("POST /api/input", None, Some(serde_json::json!({
+                        "buffer_id": numeric_id,
+                        "command": "/input hotlist_clear"
+                    })));
+                }
             }
         }
     }
@@ -670,6 +695,7 @@ impl eframe::App for WeeChatApp {
         let mut pending_buffer_command = None;
         let mut next_drag_buffer_id: Option<String> = None;
         let mut pending_mute: Option<(String, String, bool)> = None; // (buf_id, full_name, mute)
+        let mut pending_load_more: Option<(String, usize)> = None; // (buffer_id, lines_to_request)
 
         egui::TopBottomPanel::top("top_panel")
             .frame(Frame::none().fill(surface_color).inner_margin(Margin::symmetric(12.0, 8.0)))
@@ -794,7 +820,7 @@ impl eframe::App for WeeChatApp {
                                         } else {
                                             egui::RichText::new(name).color(fg).strong()
                                         };
-                                        let unread = if is_muted { 0 } else { buffer.unread_count };
+                                        let unread = if is_muted || is_root { 0 } else { buffer.unread_count };
                                         let buf_activity = buffer.activity;
                                         if unread > 0 {
                                             ui.horizontal(|ui| {
@@ -953,10 +979,6 @@ impl eframe::App for WeeChatApp {
             self.send_command_to_buffer(&id, &cmd);
         }
 
-        if self.show_settings {
-            self.show_settings_window(ctx, accent_color, is_light);
-        }
-
         let current_buffer_id = self.selected_buffer_id.clone();
         let current_buf = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id));
         let current_buffer_nicks = current_buf.map(|b| b.nicks.clone());
@@ -1056,7 +1078,9 @@ impl eframe::App for WeeChatApp {
         egui::CentralPanel::default()
             .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(0.0)))
             .show(ctx, |ui| {
-            if self.client.is_none() || self.connecting_pending {
+            if self.show_settings {
+                self.show_settings_window(ui, accent_color, is_light);
+            } else if self.client.is_none() || self.connecting_pending {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ctx.available_rect().height() * 0.2);
                     
@@ -1187,6 +1211,28 @@ impl eframe::App for WeeChatApp {
                     ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 1.0;
                         Frame::none().inner_margin(Margin::same(16.0)).show(ui, |ui| {
+                            // "Load more" button — shown at the top when there may be older lines.
+                            if let (Some(buf_id), Some(messages)) = (current_buffer_id.as_ref(), current_buffer_messages.as_ref()) {
+                                if messages.len() >= INITIAL_LINES {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 180.0).max(0.0) / 2.0);
+                                        if self.loading_more_buffer_id.as_deref() == Some(buf_id.as_str()) {
+                                            ui.spinner();
+                                            ui.label(egui::RichText::new("Loading…").color(text_muted).small());
+                                        } else if ui.button("⬆ Load older messages").clicked() {
+                                            pending_load_more = Some((buf_id.clone(), messages.len() + LOAD_MORE_LINES));
+                                        }
+                                    });
+                                    ui.add_space(8.0);
+                                    ui.scope(|ui| {
+                                        ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border_color);
+                                        ui.separator();
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                            }
+
                             if let Some(messages) = &current_buffer_messages {
                                 let mut marker_shown = false;
                                 let search_query = if self.search_text.is_empty() {
@@ -1428,6 +1474,17 @@ impl eframe::App for WeeChatApp {
                 ui.centered_and_justified(|ui| { ui.label(egui::RichText::new("Select a buffer to start chatting").color(text_muted).size(16.0)); });
             }
         });
+
+        if let Some((buf_id, count)) = pending_load_more {
+            self.loading_more_buffer_id = Some(buf_id.clone());
+            if let Some(client) = &self.client {
+                client.send_api(
+                    &format!("GET /api/buffers/{}/lines?lines=-{}", buf_id, count),
+                    Some(&format!("_buffer_lines:{}", buf_id)),
+                    None,
+                );
+            }
+        }
 
         if self.client.is_some() { ctx.request_repaint(); }
     }

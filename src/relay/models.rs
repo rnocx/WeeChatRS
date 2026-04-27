@@ -40,6 +40,7 @@ pub struct Buffer {
     pub modes: String,
     pub hidden: bool,
     pub muted: bool,
+    pub has_nicklist: bool,
     /// Snapshot of last_read_id taken when the buffer was first entered this session.
     /// Used to anchor the unread divider while the user views the buffer.
     pub visit_start_marker_id: Option<String>,

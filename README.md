@@ -172,7 +172,11 @@ src/
 
 ## Contributing
 
-See `todo.md` for planned features and known issues.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. See `todo.md` for planned features and known issues.
+
+## Development Notes
+
+[Claude Code](https://claude.ai/code) was used throughout development for debugging, refactoring, and release management. All code has been reviewed and tested by the project author.
 
 ## License
 
