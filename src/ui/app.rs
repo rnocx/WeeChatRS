@@ -334,6 +334,14 @@ pub struct WeeChatApp {
 
     // Transient search text inside the font-family dropdown.
     pub(crate) font_search: String,
+
+    // Connection status log shown while connecting / after disconnect.
+    pub(crate) connection_log: VecDeque<String>,
+    pub(crate) show_connection_log: bool,
+    // Set when a new log entry arrives while the log panel is closed, cleared when opened.
+    pub(crate) connection_log_unread: bool,
+    // How many connection attempts have been made since the last explicit Connect click.
+    pub(crate) connection_attempts: u32,
 }
 
 pub(crate) struct CompletionState {
@@ -422,6 +430,10 @@ impl WeeChatApp {
             muted_buffer_names: settings.muted_buffer_names,
             loading_more_buffer_id: None,
             font_search: String::new(),
+            connection_log: VecDeque::new(),
+            show_connection_log: false,
+            connection_log_unread: false,
+            connection_attempts: 0,
         }
     }
 
@@ -496,6 +508,17 @@ impl WeeChatApp {
                     })));
                 }
             }
+        }
+    }
+
+    pub(crate) fn log_conn(&mut self, msg: impl Into<String>) {
+        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        self.connection_log.push_back(format!("[{}]  {}", ts, msg.into()));
+        if self.connection_log.len() > 200 {
+            self.connection_log.pop_front();
+        }
+        if !self.show_connection_log {
+            self.connection_log_unread = true;
         }
     }
 }
@@ -720,6 +743,16 @@ impl eframe::App for WeeChatApp {
                         if ui.button(egui::RichText::new("⚙").size(16.0)).on_hover_text("Settings").clicked() {
                             self.show_settings = !self.show_settings;
                         }
+                        let log_icon = if self.connection_log_unread {
+                            egui::RichText::new("⬡").size(16.0).color(Color32::from_rgb(255, 165, 0))
+                        } else {
+                            egui::RichText::new("⬡").size(16.0)
+                        };
+                        if ui.button(log_icon).on_hover_text("Connection log").clicked() {
+                            self.show_connection_log = !self.show_connection_log;
+                            self.connection_log_unread = false;
+                            self.show_settings = false;
+                        }
                         if self.client.is_some() {
                             let status_text = if self.is_connecting { "● Connecting" } else { "● Connected" };
                             let status_color = if self.is_connecting { Color32::from_rgb(255, 165, 0) } else { Color32::from_rgb(50, 205, 50) };
@@ -731,6 +764,7 @@ impl eframe::App for WeeChatApp {
                                 }
                                 self.client = None;
                                 self.connection_status = "Disconnected".to_string();
+                                self.log_conn("Disconnected by user");
                             }
                         }
                     });
@@ -1080,6 +1114,61 @@ impl eframe::App for WeeChatApp {
             .show(ctx, |ui| {
             if self.show_settings {
                 self.show_settings_window(ui, accent_color, is_light);
+            } else if self.show_connection_log {
+                // Connection log panel — toggled via toolbar button.
+                ui.vertical_centered(|ui| {
+                    ui.add_space(32.0);
+                    let log_w = (ui.available_width() - 80.0).min(720.0);
+                    ui.allocate_ui(egui::vec2(log_w, ui.available_height() - 32.0), |ui| {
+                        ui.horizontal(|ui| {
+                            let (dot_color, label) = if self.connecting_pending {
+                                (Color32::from_rgb(255, 165, 0), "Connecting…")
+                            } else if self.client.is_some() {
+                                (Color32::from_rgb(50, 205, 50), "Connected")
+                            } else {
+                                (Color32::from_rgb(220, 60, 60), "Disconnected")
+                            };
+                            ui.label(egui::RichText::new("●").color(dot_color).size(14.0));
+                            ui.label(egui::RichText::new(label).strong().size(14.0));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("Clear").clicked() {
+                                    self.connection_log.clear();
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
+                        egui::Frame::none()
+                            .fill(if is_light { Color32::from_gray(245) } else { Color32::from_rgb(14, 14, 14) })
+                            .rounding(egui::Rounding::same(8.0))
+                            .stroke(egui::Stroke::new(1.0, border_color))
+                            .inner_margin(egui::Margin::same(12.0))
+                            .show(ui, |ui| {
+                                let log_font = egui::FontId::new(self.font_size * 0.88, egui::FontFamily::Monospace);
+                                egui::ScrollArea::vertical()
+                                    .stick_to_bottom(true)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        if self.connection_log.is_empty() {
+                                            ui.label(egui::RichText::new("No connection activity yet.").color(text_muted).italics());
+                                        }
+                                        for entry in &self.connection_log {
+                                            let color = if entry.contains("Error") || entry.contains("failed") || entry.contains("Disconnected") {
+                                                Color32::from_rgb(220, 80, 80)
+                                            } else if entry.contains("Connected") {
+                                                Color32::from_rgb(50, 205, 50)
+                                            } else {
+                                                text_secondary
+                                            };
+                                            ui.label(egui::RichText::new(entry).font(log_font.clone()).color(color));
+                                        }
+                                        if self.connecting_pending {
+                                            ui.spinner();
+                                        }
+                                    });
+                            });
+                    });
+                });
             } else if self.client.is_none() || self.connecting_pending {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ctx.available_rect().height() * 0.2);
@@ -1148,6 +1237,12 @@ impl eframe::App for WeeChatApp {
                                     self.auth_error = None;
                                     self.connecting_pending = true;
                                     self.connection_status = "Connecting...".to_string();
+                                    self.connection_log.clear();
+                                    self.connection_attempts = 0;
+                                    let proto = if self.use_ssl { "wss" } else { "ws" };
+                                    self.log_conn(format!("Connecting to {}://{}:{}/api", proto, self.host, port));
+                                    self.log_conn(format!("SSL/TLS: {}", if self.use_ssl { "enabled" } else { "disabled" }));
+                                    self.log_conn("Auth method: base64url bearer token over Sec-WebSocket-Protocol header");
                                     self.client = Some(RelayClient::connect(self.host.clone(), port, self.password.clone(), self.use_ssl, self.event_tx.clone(), ctx.clone()));
                                 }
                             });
