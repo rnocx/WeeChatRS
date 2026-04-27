@@ -12,7 +12,7 @@ Using LLMs (such as ChatGPT, Claude, Copilot, or similar tools) to assist with d
 
 - You must read, understand, and verify any LLM-generated code before submitting it.
 - LLM output is a starting point, not a finished contribution. Test it, reason about it, and own it.
-- Do not include AI attribution in commit messages or source code comments.
+- Do include AI attribution in commit messages or source code comments.
 
 ## General Guidelines
 
