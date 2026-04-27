@@ -1,6 +1,6 @@
 use crate::relay::client::RelayEvent;
 use crate::relay::models::*;
-use crate::ui::app::{WeeChatApp, MAX_MESSAGES};
+use crate::ui::app::{WeeChatApp, MAX_STORED_LINES};
 use chrono::{Utc, DateTime, Local};
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -31,7 +31,7 @@ impl WeeChatApp {
                 // New live messages still update activity via buffer_line_added events.
                 if let Some(client) = &self.client {
                     client.send_api("GET /api/buffers", Some("_list_buffers"), None);
-                    client.send_api("POST /api/sync", None, Some(serde_json::json!({"colors": "ansi", "buffers": "all"})));
+                    client.send_api("POST /api/sync", None, Some(serde_json::json!({"colors": "ansi", "input": false})));
                     client.send_api("GET /api/hotlist", Some("_hotlist"), None);
                 }
             }
@@ -105,7 +105,87 @@ impl WeeChatApp {
         if let Some(event) = &resp.event_name {
             match event.as_str() {
                 "buffer_line_added" => self.handle_line_added(resp),
-                "buffer_line_changed" => self.handle_line_changed(resp),
+                "buffer_line_data_changed" => self.handle_line_changed(resp),
+                "buffer_hidden" => {
+                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                            buf.hidden = true;
+                        }
+                    }
+                }
+                "buffer_unhidden" => {
+                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                            buf.hidden = false;
+                        }
+                    }
+                }
+                "buffer_title_changed" => {
+                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        if let Some(client) = &self.client {
+                            client.send_api(
+                                &format!("GET /api/buffers/{}", buffer_id),
+                                Some(&format!("_buffer_info:{}", buffer_id)),
+                                None,
+                            );
+                        }
+                    }
+                }
+                "nicklist_nick_added" => {
+                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        if let Some(nick) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
+                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                                if !buf.nicks.iter().any(|n| n.name == nick.name) {
+                                    buf.nicks.push(nick);
+                                    buf.nicks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                }
+                            }
+                        }
+                    }
+                }
+                "nicklist_nick_removing" => {
+                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        if let Some(name) = resp.body.as_ref().and_then(|b| b.get("name")).and_then(|v| v.as_str()) {
+                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                                buf.nicks.retain(|n| n.name != name);
+                            }
+                        }
+                    }
+                }
+                "nicklist_nick_changed" => {
+                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        if let Some(updated) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
+                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                                if let Some(existing) = buf.nicks.iter_mut().find(|n| n.name == updated.name) {
+                                    *existing = updated;
+                                } else {
+                                    buf.nicks.push(updated);
+                                    buf.nicks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                }
+                            }
+                        }
+                    }
+                }
+                "buffer_cleared" => {
+                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                            buf.messages.clear();
+                            buf.last_read_id = None;
+                            buf.visit_start_marker_id = None;
+                        }
+                    }
+                }
+                "upgrade" => {
+                    self.connection_status = "WeeChat upgrading…".to_string();
+                }
+                "upgrade_ended" => {
+                    // WeeChat finished reloading — re-fetch everything to get a clean state.
+                    if let Some(client) = &self.client {
+                        client.send_api("GET /api/buffers", Some("_list_buffers"), None);
+                        client.send_api("GET /api/hotlist", Some("_hotlist"), None);
+                    }
+                    self.connection_status = "Connected".to_string();
+                }
                 "buffer_opened" | "buffer_closed" | "buffer_renamed"
                 | "buffer_localvar_added" | "buffer_localvar_changed"
                 | "buffer_localvar_removed" => {
@@ -125,6 +205,14 @@ impl WeeChatApp {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn has_tag(obj: &serde_json::Map<String, Value>, tag: &str) -> bool {
+        match obj.get("tags") {
+            Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some(tag)),
+            Some(Value::String(s)) => s.split(',').any(|t| t.trim() == tag),
+            _ => false,
         }
     }
 
@@ -255,6 +343,7 @@ impl WeeChatApp {
                 let full_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
                 let plugin = obj.get("plugin").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let hidden = obj.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
+                let has_nicklist = obj.get("nicklist").and_then(|v| v.as_bool()).unwrap_or(true);
                 // Relay sends the server-side read marker; use it so the unread divider
                 // is correct immediately on connect without needing any prior local state.
                 let relay_last_read_id = obj.get("last_read_line_id").and_then(|v| Self::parse_id(v))
@@ -307,6 +396,7 @@ impl WeeChatApp {
                         modes,
                         hidden,
                         muted,
+                        has_nicklist,
                         visit_start_marker_id,
                     });
                 }
@@ -389,17 +479,19 @@ impl WeeChatApp {
                         continue;
                     }
                     if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                        // WeeChat hotlist priorities:
+                        // 0 = low (join/part/system), 1 = message, 2 = private, 3 = highlight
                         buffer.activity = match priority {
                             3 => BufferActivity::Highlight,
-                            2 => BufferActivity::Message,
-                            1 => BufferActivity::Metadata,
-                            _ => BufferActivity::None,
+                            2 | 1 => BufferActivity::Message,
+                            _ => BufferActivity::Metadata,
                         };
-                        // Extract message + highlight counts from hotlist payload.
-                        if let Some(count_obj) = obj.get("count").and_then(|v| v.as_object()) {
-                            let msg = count_obj.get("message").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let hl  = count_obj.get("highlight").and_then(|v| v.as_i64()).unwrap_or(0);
-                            buffer.unread_count = (msg + hl) as u32;
+                        // count is an array: [low_priority, message, private, highlight]
+                        if let Some(count_arr) = obj.get("count").and_then(|v| v.as_array()) {
+                            let msg  = count_arr.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                            let priv_msg = count_arr.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
+                            let hl   = count_arr.get(3).and_then(|v| v.as_i64()).unwrap_or(0);
+                            buffer.unread_count = (msg + priv_msg + hl) as u32;
                         }
                     }
                 }
@@ -429,11 +521,15 @@ impl WeeChatApp {
 
         if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
             let mut deque: std::collections::VecDeque<Line> = lines.into();
-            if deque.len() > MAX_MESSAGES {
-                let excess = deque.len() - MAX_MESSAGES;
+            if deque.len() > MAX_STORED_LINES {
+                let excess = deque.len() - MAX_STORED_LINES;
                 deque.drain(0..excess);
             }
             buffer.messages = deque;
+            // Clear the in-flight load-more marker now that the response arrived.
+            if self.loading_more_buffer_id.as_deref() == Some(buffer_id) {
+                self.loading_more_buffer_id = None;
+            }
             let is_selected = self.selected_buffer_id.as_deref() == Some(buffer_id);
             if is_selected {
                 // Advance the persistent marker to the latest message so the next
@@ -474,19 +570,27 @@ impl WeeChatApp {
         }
     }
 
+    fn parse_nick_obj(obj: &serde_json::Map<String, Value>) -> Option<Nick> {
+        let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() { return None; }
+        let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+        let color = obj.get("color").and_then(|v| v.as_str()).unwrap_or("");
+        let color_ansi = if color.is_empty() {
+            obj.get("color_name").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        } else {
+            color.to_string()
+        };
+        Some(Nick { name: name.to_string(), prefix: prefix.to_string(), color_ansi })
+    }
+
     fn extract_nicks(&self, val: &Value, nicks: &mut Vec<Nick>) {
         if let Some(obj) = val.as_object() {
             if let Some(Value::Array(nick_arr)) = obj.get("nicks") {
                 for n in nick_arr {
                     if let Some(no) = n.as_object() {
-                        let name = no.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        let prefix = no.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
-                        let color = no.get("color").and_then(|v| v.as_str()).unwrap_or("");
-                        nicks.push(Nick {
-                            name: name.to_string(),
-                            prefix: prefix.to_string(),
-                            color_ansi: color.to_string(),
-                        });
+                        if let Some(nick) = Self::parse_nick_obj(no) {
+                            nicks.push(nick);
+                        }
                     }
                 }
             }
@@ -514,6 +618,11 @@ impl WeeChatApp {
                 let notify_level = obj.get("notify_level")
                     .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
                     .unwrap_or(0);
+                let is_self_msg = Self::has_tag(obj, "self_msg");
+                let is_notify_none = Self::has_tag(obj, "notify_none");
+                let is_join_part = Self::has_tag(obj, "irc_join")
+                    || Self::has_tag(obj, "irc_part")
+                    || Self::has_tag(obj, "irc_quit");
 
                 if let Some(buffer_id) = buffer_id {
                     let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
@@ -533,25 +642,30 @@ impl WeeChatApp {
                     if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
                         if !buffer.messages.iter().any(|m| m.id == line.id) {
                             buffer.messages.push_back(line.clone());
-                            if buffer.messages.len() > MAX_MESSAGES {
+                            if buffer.messages.len() > MAX_STORED_LINES {
                                 buffer.messages.pop_front();
                             }
 
                             if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
                                 buffer.last_read_id = Some(line.id.clone());
-                            } else if displayed && !buffer.muted {
-                                buffer.unread_count = buffer.unread_count.saturating_add(1);
+                            } else if displayed && !buffer.muted && !is_notify_none && !is_self_msg {
                                 let activity = if is_highlight || notify_level == 3 {
                                     BufferActivity::Highlight
                                 } else if notify_level == 2 {
                                     BufferActivity::Message
+                                } else if is_join_part {
+                                    // Join/part lines get a metadata marker but no badge count.
+                                    BufferActivity::Metadata
                                 } else {
-                                    // notify_level 1 or 0: any displayed message in an
-                                    // unviewed buffer deserves at least a metadata indicator.
                                     BufferActivity::Metadata
                                 };
 
-                                if !buffer.muted && activity > buffer.activity {
+                                // Only increment the badge for real messages, not join/part noise.
+                                if !is_join_part {
+                                    buffer.unread_count = buffer.unread_count.saturating_add(1);
+                                }
+
+                                if activity > buffer.activity {
                                     buffer.activity = activity;
                                     // A real new message arrived while the user isn't watching —
                                     // evict from cleared set so it shows as unread on next reconnect.
@@ -599,7 +713,7 @@ impl WeeChatApp {
                                 message: message.to_string(),
                                 displayed,
                             });
-                            if buffer.messages.len() > MAX_MESSAGES {
+                            if buffer.messages.len() > MAX_STORED_LINES {
                                 buffer.messages.pop_front();
                             }
                         }
