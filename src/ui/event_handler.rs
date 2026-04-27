@@ -664,6 +664,12 @@ impl WeeChatApp {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn osascript_quote(s: &str) -> String {
+        // AppleScript strings use double-quotes; escape embedded quotes with \"
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
     pub(crate) fn strip_ansi(text: &str) -> String {
         ansi_re().replace_all(text, "").to_string()
     }
@@ -738,10 +744,27 @@ impl WeeChatApp {
                                     let sender = Self::strip_ansi(prefix);
                                     let text = Self::strip_ansi(message);
                                     let body = if sender.is_empty() { text } else { format!("{}: {}", sender, text) };
-                                    let _ = notify_rust::Notification::new()
-                                        .summary(&buffer.name)
-                                        .body(&body)
-                                        .show();
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        // notify-rust uses a mac-notification-sys helper app which
+                                        // macOS tries to activate on notification click instead of
+                                        // WeeChatRS. Use osascript directly to avoid that.
+                                        let script = format!(
+                                            "display notification {} with title {}",
+                                            Self::osascript_quote(&body),
+                                            Self::osascript_quote(&buffer.name),
+                                        );
+                                        let _ = std::process::Command::new("osascript")
+                                            .args(["-e", &script])
+                                            .spawn();
+                                    }
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        let _ = notify_rust::Notification::new()
+                                            .summary(&buffer.name)
+                                            .body(&body)
+                                            .show();
+                                    }
                                 }
                             }
                         }
