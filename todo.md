@@ -6,7 +6,7 @@
 - [x] Auto-reconnection — exponential backoff on dropped connections
 - [x] Float ID parsing — relay sends buffer IDs as JSON floats; `parse_id()` handles i64/f64/str
 - [ ] Server lag indicator — show real-time relay latency in the toolbar
-- [ ] Auth error feedback — authentication failures are swallowed as plain disconnects; surface as a distinct error state
+- [x] Auth error feedback — authentication failures are swallowed as plain disconnects; surface as a distinct error state
 - [ ] TOTP support — generate and auto-submit TOTP codes for WeeChat relay authentication; store the TOTP secret in the system keyring alongside the relay password; use the `totp-rs` crate for code generation
 
 ## ⌨️ UX & Productivity
@@ -28,7 +28,7 @@
 ## 🎨 Styling & Polishing
 - [x] Modern UI redesign — card-style login, layered surfaces, rounded aesthetic
 - [x] Top toolbar — connection status, sidebar toggles, settings button
-- [ ] Unread count badge — show message count next to buffer name, not just the highlight dot
+- [x] Unread count badge — show message count next to buffer name, not just the highlight dot
 - [ ] User icons — subtle avatars next to nicks in the list
 - [ ] Dynamic layout — option to move buffer list to the right or top
 - [ ] Detached settings window — open Settings as a separate OS window (movable to any monitor) using eframe's multi-viewport API (`ctx.show_viewport_deferred()`); requires extracting mutable settings fields into a shared `Arc<Mutex<SettingsState>>`
@@ -45,7 +45,7 @@
 - [x] Inline images — `🖼 preview` button on image URLs (.png/.jpg/.gif/.webp); click to load and display inline, toggleable in Settings
 - [x] Link previews — `🔗 preview` button on non-image URLs; fetches OG tags (title, description, og:image), renders card with left accent bar, toggleable in Settings
 - [ ] File drag & drop — upload via common paste services
-- [ ] Code syntax highlighting — `syntect` for fenced code blocks in chat
+- [ ] Code syntax highlighting — `syntect` for fenced code blocks in chat ( debatable if this should exist)
 
 ---
 
@@ -61,7 +61,7 @@
 
 - [x] **VecDeque for message buffer** — `Buffer::messages` is now a `VecDeque`; uses `push_back`/`pop_front` for O(1) front removal.
 
-- [ ] **Cloning entire message/nick vecs per frame** — `app.rs` clones `b.messages` (up to 400 items) and `b.nicks` every frame for the render pass. Restructure render code to borrow these directly instead of cloning.
+- [ ] **Cloning entire message/nick vecs per frame** — `app.rs` clones `b.messages` (up to 1000 items, 10k cap) and `b.nicks` every frame for the render pass. Restructure render code to borrow these directly instead of cloning.
 
 - [x] **Per-frame lowercase allocation in search** — search query is now lowercased once per frame outside the message loop.
 
