@@ -3,7 +3,7 @@ use egui::Context as EguiContext;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, tungstenite::client::IntoClientRequest};
+use tokio_tungstenite::{connect_async_tls_with_config, Connector, tungstenite::protocol::Message, tungstenite::client::IntoClientRequest};
 use url::Url;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::time::Duration;
@@ -86,7 +86,17 @@ impl RelayClient {
                 headers.insert("Sec-WebSocket-Protocol", auth_protocol.parse().unwrap());
                 headers.insert("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(auth_string.as_bytes())).parse().unwrap());
 
-                match connect_async(request).await {
+                let connector = if use_ssl {
+                    let tls = native_tls::TlsConnector::builder()
+                        .danger_accept_invalid_certs(true)
+                        .build()
+                        .ok();
+                    tls.map(Connector::NativeTls)
+                } else {
+                    None
+                };
+
+                match connect_async_tls_with_config(request, None, false, connector).await {
                     Ok((ws_stream, _)) => {
                         send!(event_tx, ctx, RelayEvent::Connected);
                         backoff = Duration::from_secs(1);
