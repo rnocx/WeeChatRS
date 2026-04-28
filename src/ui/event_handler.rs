@@ -42,18 +42,20 @@ impl WeeChatApp {
                 self.log_conn("Authentication accepted by relay");
                 self.log_conn("→ GET /api/buffers");
                 self.log_conn("→ POST /api/sync  {colors: ansi, input: false}");
-                self.log_conn("→ GET /api/hotlist");
                 self.log_conn("Connected");
                 self.buffers.clear();
-                // Keep cleared_buffer_ids across reconnects. The local record of which
-                // buffers the user has read is more reliable than the server's hotlist
-                // when POST /api/buffers/{id}/read hasn't been fully acknowledged
-                // (e.g. the connection dropped before WeeChat processed it).
-                // New live messages still update activity via buffer_line_added events.
+                // On a fresh connect (user clicked Connect) trust the relay's hotlist
+                // entirely — cleared_buffer_ids only applies within a session to avoid
+                // re-showing activity the user already dismissed during an in-progress
+                // connection drop/reconnect cycle.
+                if self.connection_attempts == 1 {
+                    self.cleared_buffer_ids.clear();
+                }
                 if let Some(client) = &self.client {
                     client.send_api("GET /api/buffers", Some("_list_buffers"), None);
                     client.send_api("POST /api/sync", None, Some(serde_json::json!({"colors": "ansi", "input": false})));
-                    client.send_api("GET /api/hotlist", Some("_hotlist"), None);
+                    // Hotlist is fetched from handle_buffer_list once buffers are populated,
+                    // so the activity state is never applied to an empty buffer list.
                 }
             }
             RelayEvent::Disconnected => {
@@ -214,10 +216,10 @@ impl WeeChatApp {
                     self.log_conn("WeeChat is upgrading — waiting for reload…");
                 }
                 "upgrade_ended" => {
-                    // WeeChat finished reloading — re-fetch everything to get a clean state.
+                    // WeeChat finished reloading — re-fetch buffers; handle_buffer_list
+                    // will chain the hotlist fetch once buffers are populated.
                     if let Some(client) = &self.client {
                         client.send_api("GET /api/buffers", Some("_list_buffers"), None);
-                        client.send_api("GET /api/hotlist", Some("_hotlist"), None);
                     }
                     self.connection_status = "Connected".to_string();
                     self.log_conn("WeeChat upgrade complete — re-synced");
@@ -495,6 +497,13 @@ impl WeeChatApp {
                     let id = first.id.clone();
                     self.select_buffer(id);
                 }
+            }
+
+            // Fetch hotlist only after buffers are populated so activity is never
+            // applied to an empty list and silently dropped.
+            self.log_conn("→ GET /api/hotlist");
+            if let Some(client) = &self.client {
+                client.send_api("GET /api/hotlist", Some("_hotlist"), None);
             }
         }
     }
