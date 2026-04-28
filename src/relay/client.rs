@@ -31,6 +31,7 @@ impl RelayClient {
         port: u16,
         password: String,
         use_ssl: bool,
+        accept_invalid_certs: bool,
         event_tx: mpsc::UnboundedSender<RelayEvent>,
         ctx: EguiContext,
     ) -> Self {
@@ -88,7 +89,7 @@ impl RelayClient {
 
                 let connector = if use_ssl {
                     let tls = native_tls::TlsConnector::builder()
-                        .danger_accept_invalid_certs(true)
+                        .danger_accept_invalid_certs(accept_invalid_certs)
                         .build()
                         .ok();
                     tls.map(Connector::NativeTls)

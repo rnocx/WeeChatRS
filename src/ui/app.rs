@@ -217,6 +217,8 @@ pub struct AppSettings {
     pub nicklist_width: f32,
     #[serde(default)]
     pub buffers_width: f32,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
 }
 
 fn default_true() -> bool { true }
@@ -252,6 +254,7 @@ impl Default for AppSettings {
             show_toolbar: true,
             nicklist_width: 0.0,
             buffers_width: 0.0,
+            accept_invalid_certs: false,
         }
     }
 }
@@ -263,7 +266,8 @@ pub struct WeeChatApp {
     pub(crate) save_password: bool,
     pub(crate) password_from_keyring: bool,
     pub(crate) use_ssl: bool,
-    
+    pub(crate) accept_invalid_certs: bool,
+
     pub(crate) client: Option<RelayClient>,
     pub(crate) event_rx: mpsc::UnboundedReceiver<RelayEvent>,
     pub(crate) event_tx: mpsc::UnboundedSender<RelayEvent>,
@@ -393,6 +397,7 @@ impl WeeChatApp {
             save_password: settings.save_password,
             password_from_keyring,
             use_ssl: settings.use_ssl,
+            accept_invalid_certs: settings.accept_invalid_certs,
             client: None,
             event_rx,
             event_tx,
@@ -571,6 +576,7 @@ impl eframe::App for WeeChatApp {
             font_name: self.font_name.clone(),
             font_path: self.font_path.clone(),
             muted_buffer_names: self.muted_buffer_names.clone(),
+            accept_invalid_certs: self.accept_invalid_certs,
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -1246,7 +1252,12 @@ impl eframe::App for WeeChatApp {
                             ui.add_space(15.0);
                             ui.horizontal(|ui| {
                                 ui.checkbox(&mut self.use_ssl, "Use SSL");
-                                ui.add_space(20.0);
+                                if self.use_ssl {
+                                    ui.add_space(20.0);
+                                    ui.checkbox(&mut self.accept_invalid_certs, "Accept self-signed certificates");
+                                }
+                            });
+                            ui.horizontal(|ui| {
                                 ui.checkbox(&mut self.auto_reconnect, "Auto-reconnect");
                             });
                             ui.horizontal(|ui| {
@@ -1286,7 +1297,7 @@ impl eframe::App for WeeChatApp {
                                     self.log_conn(format!("Connecting to {}://{}:{}/api", proto, self.host, port));
                                     self.log_conn(format!("SSL/TLS: {}", if self.use_ssl { "enabled" } else { "disabled" }));
                                     self.log_conn("Auth method: base64url bearer token over Sec-WebSocket-Protocol header");
-                                    self.client = Some(RelayClient::connect(self.host.clone(), port, self.password.clone(), self.use_ssl, self.event_tx.clone(), ctx.clone()));
+                                    self.client = Some(RelayClient::connect(self.host.clone(), port, self.password.clone(), self.use_ssl, self.accept_invalid_certs, self.event_tx.clone(), ctx.clone()));
                                 }
                             });
 
