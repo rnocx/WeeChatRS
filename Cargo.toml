@@ -37,3 +37,6 @@ keyring = { version = "3", features = ["windows-native"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service"] }
 openssl = { version = "0.10", features = ["vendored"] }
+
+[build-dependencies]
+winres = "0.1"
