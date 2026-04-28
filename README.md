@@ -29,6 +29,7 @@
 | `Meta + ↑ / ↓` | Cycle buffers |
 | `Meta + B` | Toggle buffer list |
 | `Meta + N` | Toggle nick list |
+| `Meta + T` | Toggle toolbar |
 | `Ctrl + F` | Toggle message search |
 | `Tab` | Complete nick or emoji (cycles matches) |
 | `Arrow ↑ / ↓` | Cycle command history (input bar) |

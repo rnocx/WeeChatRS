@@ -211,7 +211,11 @@ pub struct AppSettings {
     pub font_path: String,
     #[serde(default)]
     pub muted_buffer_names: HashSet<String>,
+    #[serde(default = "default_true")]
+    pub show_toolbar: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -240,6 +244,7 @@ impl Default for AppSettings {
             font_name: String::new(),
             font_path: String::new(),
             muted_buffer_names: HashSet::new(),
+            show_toolbar: true,
         }
     }
 }
@@ -294,6 +299,7 @@ pub struct WeeChatApp {
     // UI visibility
     pub(crate) show_buffers: bool,
     pub(crate) show_nicklist: bool,
+    pub(crate) show_toolbar: bool,
 
     // Completion state
     pub(crate) completion: Option<CompletionState>,
@@ -397,6 +403,7 @@ impl WeeChatApp {
             show_timestamps: settings.show_timestamps,
             show_buffers: settings.show_buffers,
             show_nicklist: settings.show_nicklist,
+            show_toolbar: settings.show_toolbar,
             auto_reconnect: settings.auto_reconnect,
             show_titlebar: settings.show_titlebar,
             show_server_headers: settings.show_server_headers,
@@ -537,6 +544,7 @@ impl eframe::App for WeeChatApp {
             show_timestamps: self.show_timestamps,
             show_buffers: self.show_buffers,
             show_nicklist: self.show_nicklist,
+            show_toolbar: self.show_toolbar,
             auto_reconnect: self.auto_reconnect,
             show_titlebar: self.show_titlebar,
             show_server_headers: self.show_server_headers,
@@ -620,6 +628,7 @@ impl eframe::App for WeeChatApp {
                 if i.consume_key(i.modifiers, Key::F) { search_shortcut = true; }
                 if i.consume_key(i.modifiers, Key::B) { self.show_buffers = !self.show_buffers; }
                 if i.consume_key(i.modifiers, Key::N) { self.show_nicklist = !self.show_nicklist; }
+                if i.consume_key(i.modifiers, Key::T) { self.show_toolbar = !self.show_toolbar; }
             } else {
                 if i.consume_key(Modifiers::NONE, Key::ArrowUp) { history_up = true; }
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) { history_down = true; }
@@ -720,7 +729,7 @@ impl eframe::App for WeeChatApp {
         let mut pending_mute: Option<(String, String, bool)> = None; // (buf_id, full_name, mute)
         let mut pending_load_more: Option<(String, usize)> = None; // (buffer_id, lines_to_request)
 
-        egui::TopBottomPanel::top("top_panel")
+        if self.show_toolbar { egui::TopBottomPanel::top("top_panel")
             .frame(Frame::none().fill(surface_color).inner_margin(Margin::symmetric(12.0, 8.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -770,6 +779,7 @@ impl eframe::App for WeeChatApp {
                     });
                 });
             });
+        } // show_toolbar
 
         if self.show_buffers {
             egui::SidePanel::left("buffers_panel")
