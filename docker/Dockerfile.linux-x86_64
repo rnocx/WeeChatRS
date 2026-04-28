@@ -13,6 +13,6 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /src
 COPY . .
 
-RUN cargo build --release 2>&1
+RUN cargo build --release --jobs 2 2>&1
 
 RUN cp target/release/weechat-rs /weechat-rs-linux-x86_64
