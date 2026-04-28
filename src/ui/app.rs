@@ -1115,7 +1115,10 @@ impl eframe::App for WeeChatApp {
             if self.show_settings {
                 self.show_settings_window(ui, accent_color, is_light);
             } else if self.show_connection_log {
-                // Connection log panel — toggled via toolbar button.
+                // Connection log panel — toggled via toolbar button, closed with X or Escape.
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.show_connection_log = false;
+                }
                 ui.vertical_centered(|ui| {
                     ui.add_space(32.0);
                     let log_w = (ui.available_width() - 80.0).min(720.0);
@@ -1131,8 +1134,8 @@ impl eframe::App for WeeChatApp {
                             ui.label(egui::RichText::new("●").color(dot_color).size(14.0));
                             ui.label(egui::RichText::new(label).strong().size(14.0));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("Clear").clicked() {
-                                    self.connection_log.clear();
+                                if ui.button(egui::RichText::new("✕").size(14.0)).on_hover_text("Close").clicked() {
+                                    self.show_connection_log = false;
                                 }
                             });
                         });
