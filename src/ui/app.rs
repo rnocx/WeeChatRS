@@ -1624,6 +1624,5 @@ impl eframe::App for WeeChatApp {
             }
         }
 
-        if self.client.is_some() { ctx.request_repaint(); }
     }
 }
