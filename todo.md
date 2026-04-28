@@ -68,3 +68,11 @@
 - [x] **Dead code: `debug_log` field** — removed.
 
 - [ ] **Tests** — `ANSIParser::parse`, `extract_metadata`, `sort_buffers`, and `parse_id` are pure/near-pure functions; good first targets for unit tests.
+
+---
+
+## 📦 Release Checklist
+
+- [x] All release artifacts must be packaged — Linux/Windows as `.zip`, macOS as `.dmg`; never upload raw binaries
+- [x] Every release must include a `SHA256SUMS` file listing checksums for all artifacts; users verify with `sha256sum -c SHA256SUMS`
+- [ ] Automate the release pipeline — build script or CI that produces all artifacts, generates `SHA256SUMS`, and uploads to both Gitea and GitHub in one step
