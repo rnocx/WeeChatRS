@@ -215,10 +215,12 @@ pub struct AppSettings {
     pub show_toolbar: bool,
     #[serde(default = "default_nicklist_width")]
     pub nicklist_width: f32,
+    #[serde(default)]
+    pub buffers_width: f32,
 }
 
 fn default_true() -> bool { true }
-fn default_nicklist_width() -> f32 { 140.0 }
+fn default_nicklist_width() -> f32 { 0.0 }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -248,7 +250,8 @@ impl Default for AppSettings {
             font_path: String::new(),
             muted_buffer_names: HashSet::new(),
             show_toolbar: true,
-            nicklist_width: 140.0,
+            nicklist_width: 0.0,
+            buffers_width: 0.0,
         }
     }
 }
@@ -305,6 +308,7 @@ pub struct WeeChatApp {
     pub(crate) show_nicklist: bool,
     pub(crate) show_toolbar: bool,
     pub(crate) nicklist_width: f32,
+    pub(crate) buffers_width: f32,
 
     // Completion state
     pub(crate) completion: Option<CompletionState>,
@@ -410,6 +414,7 @@ impl WeeChatApp {
             show_nicklist: settings.show_nicklist,
             show_toolbar: settings.show_toolbar,
             nicklist_width: settings.nicklist_width,
+            buffers_width: settings.buffers_width,
             auto_reconnect: settings.auto_reconnect,
             show_titlebar: settings.show_titlebar,
             show_server_headers: settings.show_server_headers,
@@ -552,6 +557,7 @@ impl eframe::App for WeeChatApp {
             show_nicklist: self.show_nicklist,
             show_toolbar: self.show_toolbar,
             nicklist_width: self.nicklist_width,
+            buffers_width: self.buffers_width,
             auto_reconnect: self.auto_reconnect,
             show_titlebar: self.show_titlebar,
             show_server_headers: self.show_server_headers,
@@ -789,9 +795,15 @@ impl eframe::App for WeeChatApp {
         } // show_toolbar
 
         if self.show_buffers {
-            egui::SidePanel::left("buffers_panel")
+            if self.buffers_width == 0.0 {
+                let buf_font_id = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
+                let char_w = ctx.fonts(|f| f.glyph_width(&buf_font_id, 'W'));
+                self.buffers_width = char_w * 25.0 + 20.0; // 25 chars + 2×10px inner margin
+            }
+            let buffers_resp = egui::SidePanel::left("buffers_panel")
                 .resizable(true)
-                .default_width(180.0)
+                .default_width(self.buffers_width)
+                .min_width(80.0)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
@@ -874,26 +886,27 @@ impl eframe::App for WeeChatApp {
                                         let unread = if is_muted || is_root { 0 } else { buffer.unread_count };
                                         let buf_activity = buffer.activity;
                                         if unread > 0 {
-                                            ui.horizontal(|ui| {
-                                                ui.label(label);
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    let badge_text = if unread > 99 { "99+".to_string() } else { unread.to_string() };
-                                                    let badge_bg = if buf_activity == BufferActivity::Highlight {
-                                                        Color32::from_rgb(200, 50, 50)
-                                                    } else {
-                                                        accent_color
-                                                    };
-                                                    Frame::none()
-                                                        .fill(badge_bg)
-                                                        .rounding(Rounding::same(8.0))
-                                                        .inner_margin(Margin::symmetric(4.0, 1.0))
-                                                        .show(ui, |ui| {
-                                                            ui.label(egui::RichText::new(badge_text).color(Color32::WHITE).strong().size(self.font_size * 0.72));
-                                                        });
+                                            // Place badge first (right side), then name fills remaining space.
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                let badge_text = if unread > 99 { "99+".to_string() } else { unread.to_string() };
+                                                let badge_bg = if buf_activity == BufferActivity::Highlight {
+                                                    Color32::from_rgb(200, 50, 50)
+                                                } else {
+                                                    accent_color
+                                                };
+                                                Frame::none()
+                                                    .fill(badge_bg)
+                                                    .rounding(Rounding::same(8.0))
+                                                    .inner_margin(Margin::symmetric(4.0, 1.0))
+                                                    .show(ui, |ui| {
+                                                        ui.label(egui::RichText::new(badge_text).color(Color32::WHITE).strong().size(self.font_size * 0.72));
+                                                    });
+                                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                    ui.add(Label::new(label).truncate(true));
                                                 });
                                             });
                                         } else {
-                                            ui.label(label);
+                                            ui.add(Label::new(label).truncate(true));
                                         }
                                     });
                             }).response;
@@ -1005,6 +1018,7 @@ impl eframe::App for WeeChatApp {
                         self.drag_drop_before_id = None;
                     }
                 });
+            self.buffers_width = buffers_resp.response.rect.width();
         }
 
         if let Some(id) = next_selected_buffer_id {
@@ -1046,6 +1060,11 @@ impl eframe::App for WeeChatApp {
         let is_query_or_core = current_buffer_kind == "private" || current_buffer_kind == "server" || current_buffer_kind == "core" || current_buffer_full_name.as_ref().map(|n| n == "weechat" || n.contains("highmon")).unwrap_or(false);
 
         if self.show_nicklist && !is_query_or_core && self.client.is_some() && current_buffer_id.is_some() {
+            // Initialise width to 12 characters wide on first launch (sentinel 0.0 means unset).
+            if self.nicklist_width == 0.0 {
+                let char_w = ctx.fonts(|f| f.glyph_width(&font_id, 'W'));
+                self.nicklist_width = char_w * 16.0 + 20.0; // 16 chars + 2×10px inner margin
+            }
             let nicks_resp = egui::SidePanel::right("nicks_panel")
                 .resizable(true)
                 .default_width(self.nicklist_width)
@@ -1056,9 +1075,6 @@ impl eframe::App for WeeChatApp {
                     ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
                     ui.add_space(8.0);
                     ScrollArea::vertical().show(ui, |ui| {
-                        // Constrain label widths to the panel's current width so nicks
-                        // never push the panel wider than the user has dragged it.
-                        ui.set_max_width(ui.available_width());
                         if let Some(nicks) = &current_buffer_nicks {
                             for nick in nicks {
                                 let text = format!("{}{}", nick.prefix, nick.name);
@@ -1073,8 +1089,10 @@ impl eframe::App for WeeChatApp {
                                 let sections = ANSIParser::parse(&input, font_id.clone(), &self.theme);
                                 let mut job = LayoutJob::default();
                                 for s in sections { job.append(&s.text, 0.0, s.format); }
-                                
-                                let label_res = ui.add(Label::new(job).wrap(false).sense(egui::Sense::click()));
+
+                                // truncate(true) clips the label at available width so long
+                                // nicks never push the panel wider than the user has dragged it.
+                                let label_res = ui.add(Label::new(job).truncate(true).sense(egui::Sense::click()));
                                 label_res.context_menu(|ui| {
                                     if ui.button(format!("Query {}", nick.name)).clicked() {
                                         self.send_command(&format!("/query {}", nick.name));
