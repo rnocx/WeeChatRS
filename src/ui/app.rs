@@ -1624,5 +1624,11 @@ impl eframe::App for WeeChatApp {
             }
         }
 
+        // Safety-net: ensure we poll for relay events even if a background repaint
+        // was missed (e.g. during sleep or OS-level throttling). 100 ms cap keeps
+        // CPU near zero while guaranteeing at most a 100 ms delay on any message.
+        if self.client.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 }
