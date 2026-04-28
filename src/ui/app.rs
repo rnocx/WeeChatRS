@@ -213,9 +213,12 @@ pub struct AppSettings {
     pub muted_buffer_names: HashSet<String>,
     #[serde(default = "default_true")]
     pub show_toolbar: bool,
+    #[serde(default = "default_nicklist_width")]
+    pub nicklist_width: f32,
 }
 
 fn default_true() -> bool { true }
+fn default_nicklist_width() -> f32 { 140.0 }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -245,6 +248,7 @@ impl Default for AppSettings {
             font_path: String::new(),
             muted_buffer_names: HashSet::new(),
             show_toolbar: true,
+            nicklist_width: 140.0,
         }
     }
 }
@@ -300,6 +304,7 @@ pub struct WeeChatApp {
     pub(crate) show_buffers: bool,
     pub(crate) show_nicklist: bool,
     pub(crate) show_toolbar: bool,
+    pub(crate) nicklist_width: f32,
 
     // Completion state
     pub(crate) completion: Option<CompletionState>,
@@ -404,6 +409,7 @@ impl WeeChatApp {
             show_buffers: settings.show_buffers,
             show_nicklist: settings.show_nicklist,
             show_toolbar: settings.show_toolbar,
+            nicklist_width: settings.nicklist_width,
             auto_reconnect: settings.auto_reconnect,
             show_titlebar: settings.show_titlebar,
             show_server_headers: settings.show_server_headers,
@@ -545,6 +551,7 @@ impl eframe::App for WeeChatApp {
             show_buffers: self.show_buffers,
             show_nicklist: self.show_nicklist,
             show_toolbar: self.show_toolbar,
+            nicklist_width: self.nicklist_width,
             auto_reconnect: self.auto_reconnect,
             show_titlebar: self.show_titlebar,
             show_server_headers: self.show_server_headers,
@@ -1039,15 +1046,19 @@ impl eframe::App for WeeChatApp {
         let is_query_or_core = current_buffer_kind == "private" || current_buffer_kind == "server" || current_buffer_kind == "core" || current_buffer_full_name.as_ref().map(|n| n == "weechat" || n.contains("highmon")).unwrap_or(false);
 
         if self.show_nicklist && !is_query_or_core && self.client.is_some() && current_buffer_id.is_some() {
-            egui::SidePanel::right("nicks_panel")
+            let nicks_resp = egui::SidePanel::right("nicks_panel")
                 .resizable(true)
-                .default_width(140.0)
+                .default_width(self.nicklist_width)
+                .min_width(60.0)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
                     ui.add_space(8.0);
                     ScrollArea::vertical().show(ui, |ui| {
+                        // Constrain label widths to the panel's current width so nicks
+                        // never push the panel wider than the user has dragged it.
+                        ui.set_max_width(ui.available_width());
                         if let Some(nicks) = &current_buffer_nicks {
                             for nick in nicks {
                                 let text = format!("{}{}", nick.prefix, nick.name);
@@ -1078,6 +1089,7 @@ impl eframe::App for WeeChatApp {
                         }
                     });
                 });
+            self.nicklist_width = nicks_resp.response.rect.width();
         }
 
         if self.client.is_some() && current_buffer_id.is_some() {
