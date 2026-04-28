@@ -1,6 +1,7 @@
 pub mod app;
 pub mod ansi;
 pub mod theme;
+pub mod fset;
 
 mod settings;
 mod input;

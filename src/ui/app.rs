@@ -354,6 +354,9 @@ pub struct WeeChatApp {
     // Transient search text inside the font-family dropdown.
     pub(crate) font_search: String,
 
+    // fset buffer panel state (search filter + inline edit)
+    pub(crate) fset_state: crate::ui::fset::FsetState,
+
     // Connection status log shown while connecting / after disconnect.
     pub(crate) connection_log: VecDeque<String>,
     pub(crate) show_connection_log: bool,
@@ -457,6 +460,7 @@ impl WeeChatApp {
             show_connection_log: false,
             connection_log_unread: false,
             connection_attempts: 0,
+            fset_state: crate::ui::fset::FsetState::default(),
         }
     }
 
@@ -1311,7 +1315,8 @@ impl eframe::App for WeeChatApp {
                             }
                         });
                 });
-            } else if let Some(_full_name) = current_buffer_full_name {
+            } else if let Some(full_name) = current_buffer_full_name {
+                let is_fset_buffer = full_name.contains("fset");
                 ui.vertical(|ui| {
                     if self.show_search {
                         Frame::none()
@@ -1357,6 +1362,51 @@ impl eframe::App for WeeChatApp {
                         ui.separator();
                     }
                     
+                    // -------------------------------------------------------
+                    // fset buffer — custom table renderer
+                    // -------------------------------------------------------
+                    if is_fset_buffer {
+                        if let Some(messages) = &current_buffer_messages {
+                            let actions = crate::ui::fset::show_fset_panel(
+                                ui,
+                                messages,
+                                &mut self.fset_state,
+                                self.font_size,
+                                self.use_monospace,
+                                surface_color,
+                                text_primary,
+                                text_muted,
+                                accent_color,
+                                border_color,
+                            );
+                            for action in actions {
+                                use crate::ui::fset::FsetAction;
+                                match action {
+                                    FsetAction::SetValue { name, value } => {
+                                        let cmd = format!("/set {} {}", name, value);
+                                        if let Some(buf_id) = &current_buffer_id {
+                                            self.send_command_to_buffer(buf_id, &cmd);
+                                        }
+                                    }
+                                    FsetAction::ResetToDefault { name } => {
+                                        let cmd = format!("/unset {}", name);
+                                        if let Some(buf_id) = &current_buffer_id {
+                                            self.send_command_to_buffer(buf_id, &cmd);
+                                        }
+                                    }
+                                    FsetAction::BeginEdit { name, current } => {
+                                        self.fset_state.editing_option = Some(name);
+                                        self.fset_state.edit_value = current;
+                                    }
+                                    FsetAction::CancelEdit => {
+                                        self.fset_state.editing_option = None;
+                                        self.fset_state.edit_value.clear();
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+
                     ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 1.0;
                         Frame::none().inner_margin(Margin::same(16.0)).show(ui, |ui| {
@@ -1617,7 +1667,8 @@ impl eframe::App for WeeChatApp {
                                 }
                             }
                         });
-                    });
+                    }); // ScrollArea
+                    } // else (non-fset)
                 });
             } else {
                 ui.centered_and_justified(|ui| { ui.label(egui::RichText::new("Select a buffer to start chatting").color(text_muted).size(16.0)); });
