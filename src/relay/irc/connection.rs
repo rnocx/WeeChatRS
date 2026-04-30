@@ -436,6 +436,18 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
                 }
             }
 
+            // Auto-open a DM buffer for private messages we haven't seen before
+            if !is_channel(&target) && !session.joined.contains(&buffer_id) {
+                session.joined.insert(buffer_id.clone());
+                let display_name = if nick.eq_ignore_ascii_case(&session.our_nick) {
+                    target.clone()
+                } else {
+                    nick.clone()
+                };
+                let buf = session.alloc_buffer(&buffer_id, &display_name, "private");
+                events.push(BackendEvent::BufferOpened(buf));
+            }
+
             events.push(BackendEvent::LineAdded { buffer_id, line });
         }
 
