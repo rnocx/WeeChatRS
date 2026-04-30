@@ -569,12 +569,14 @@ impl WeeChatApp {
             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
             let timestamp = Self::parse_date(obj.get("date"));
 
+            let highlight = obj.get("highlight").and_then(|v| v.as_bool()).unwrap_or(false);
             Some(Line {
                 id,
                 timestamp,
                 prefix: prefix.to_string(),
                 message: message.to_string(),
                 displayed,
+                highlight,
             })
         }).collect();
 
@@ -714,6 +716,7 @@ impl WeeChatApp {
                         prefix: prefix.to_string(),
                         message: message.to_string(),
                         displayed,
+                        highlight: is_highlight,
                     };
 
                     if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
@@ -806,6 +809,7 @@ impl WeeChatApp {
                                 prefix: prefix.to_string(),
                                 message: message.to_string(),
                                 displayed,
+                                highlight: false,
                             });
                             if buffer.messages.len() > MAX_STORED_LINES {
                                 buffer.messages.pop_front();

@@ -804,7 +804,7 @@ impl eframe::App for WeeChatApp {
             if self.buffers_width == 0.0 {
                 let buf_font_id = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
                 let char_w = ctx.fonts(|f| f.glyph_width(&buf_font_id, 'W'));
-                self.buffers_width = char_w * 25.0 + 20.0; // 25 chars + 2×10px inner margin
+                self.buffers_width = char_w * 40.0 + 20.0; // 40 chars + 2×10px inner margin
             }
             let buffers_resp = egui::SidePanel::left("buffers_panel")
                 .resizable(true)
@@ -1069,7 +1069,7 @@ impl eframe::App for WeeChatApp {
             // Initialise width to 12 characters wide on first launch (sentinel 0.0 means unset).
             if self.nicklist_width == 0.0 {
                 let char_w = ctx.fonts(|f| f.glyph_width(&font_id, 'W'));
-                self.nicklist_width = char_w * 16.0 + 20.0; // 16 chars + 2×10px inner margin
+                self.nicklist_width = char_w * 25.0 + 20.0; // 25 chars + 2×10px inner margin
             }
             let nicks_resp = egui::SidePanel::right("nicks_panel")
                 .resizable(true)
@@ -1455,6 +1455,16 @@ impl eframe::App for WeeChatApp {
                                     // Two-part row: fixed left anchor (timestamp + prefix) keeps
                                     // wrapped message lines from bleeding back into the timestamp column.
                                     // TOP alignment ensures timestamp/nick always share the first text line.
+                                    let row_bg = if line.highlight {
+                                        let c = Color32::from(self.theme.ansi[3]);
+                                        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 28)
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    };
+                                    Frame::none()
+                                        .fill(row_bg)
+                                        .rounding(Rounding::same(3.0))
+                                        .show(ui, |ui| {
                                     ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
                                         if self.show_timestamps {
@@ -1614,6 +1624,7 @@ impl eframe::App for WeeChatApp {
                                             }
                                         }); // end vertical (message column)
                                     }); // end horizontal (full message row)
+                                    }); // end highlight frame
                                 }
                             }
                         });
