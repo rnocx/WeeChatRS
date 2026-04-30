@@ -1333,16 +1333,31 @@ impl eframe::App for WeeChatApp {
                                     self.log_conn(format!("Connecting to {}://{}:{}/api", proto, self.host, port));
                                     self.log_conn(format!("SSL/TLS: {}", if self.use_ssl { "enabled" } else { "disabled" }));
                                     self.log_conn("Auth method: base64url bearer token over Sec-WebSocket-Protocol header");
-                                    let config = WeeChatConfig {
-                                        host: self.host.clone(),
-                                        port,
-                                        password: self.password.clone(),
-                                        use_ssl: self.use_ssl,
-                                        accept_invalid_certs: self.accept_invalid_certs,
+                                    let mut backend: Box<dyn crate::relay::backend::BackendClient> = match self.backend_type {
+                                        BackendType::Soju => {
+                                            let config = crate::relay::irc::IrcConfig {
+                                                host: self.host.clone(),
+                                                port,
+                                                nick: String::new(),
+                                                password: self.password.clone(),
+                                                use_ssl: self.use_ssl,
+                                                accept_invalid_certs: self.accept_invalid_certs,
+                                            };
+                                            Box::new(crate::relay::irc::IrcClient::new(config, self.event_tx.clone(), ctx.clone()))
+                                        }
+                                        BackendType::WeeChat => {
+                                            let config = WeeChatConfig {
+                                                host: self.host.clone(),
+                                                port,
+                                                password: self.password.clone(),
+                                                use_ssl: self.use_ssl,
+                                                accept_invalid_certs: self.accept_invalid_certs,
+                                            };
+                                            Box::new(WeeChatClient::new(config, self.event_tx.clone(), ctx.clone()))
+                                        }
                                     };
-                                    let mut backend = WeeChatClient::new(config, self.event_tx.clone(), ctx.clone());
                                     backend.connect();
-                                    self.client = Some(Box::new(backend));
+                                    self.client = Some(backend);
                                 }
                             });
 
