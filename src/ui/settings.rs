@@ -19,6 +19,7 @@ impl WeeChatApp {
         let mut show_inline_images = self.show_inline_images;
         let mut show_link_previews = self.show_link_previews;
         let mut show_hidden_buffers = self.show_hidden_buffers;
+        let mut emoji_rendering = self.emoji_rendering;
         let mut opacity = self.opacity;
         let mut close = false;
         let mut reset_theme = false;
@@ -75,6 +76,7 @@ impl WeeChatApp {
                             ui.checkbox(&mut show_inline_images, "Show inline image previews (🖼 preview button on image URLs)");
                             ui.checkbox(&mut show_link_previews, "Show link previews (🔗 preview button on URLs)");
                             ui.checkbox(&mut show_hidden_buffers, "Show hidden buffers in buffer list");
+                            ui.checkbox(&mut emoji_rendering, "Color emoji rendering (requires emojinize script on WeeChat server)");
                         });
 
                         ui.add_space(8.0);
@@ -269,6 +271,7 @@ impl WeeChatApp {
         self.show_inline_images = show_inline_images;
         self.show_link_previews = show_link_previews;
         self.show_hidden_buffers = show_hidden_buffers;
+        self.emoji_rendering = emoji_rendering;
         self.opacity = opacity;
         if reset_theme { self.theme = AppTheme::default(); }
         if reset_font {
