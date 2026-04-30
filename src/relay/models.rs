@@ -53,6 +53,7 @@ pub struct Line {
     pub prefix: String,
     pub message: String,
     pub displayed: bool,
+    pub highlight: bool,
 }
 
 #[derive(Debug, Clone)]
