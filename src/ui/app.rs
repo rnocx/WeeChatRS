@@ -182,14 +182,88 @@ pub enum BackendType {
     Soju,
 }
 
+/// Per-connection saved profile (serialised to AppSettings).
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct ConnectionProfile {
+    pub label: String,
+    pub backend_type: BackendType,
+    pub host: String,
+    pub port: String,
+    pub nick: String,
+    pub use_ssl: bool,
+    pub accept_invalid_certs: bool,
+    pub auto_connect: bool,
+    #[serde(default)]
+    pub save_password: bool,
+}
+
+impl ConnectionProfile {
+    /// Stable, filesystem-safe prefix derived from label.
+    pub fn prefix(&self) -> String {
+        if self.label.is_empty() { return "conn".to_string(); }
+        self.label.to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+            .collect()
+    }
+    /// Keyring key for this profile's password.
+    pub fn keyring_host_key(&self) -> String { format!("{}@{}", self.label, self.host) }
+}
+
+impl Default for ConnectionProfile {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            backend_type: BackendType::WeeChat,
+            host: "localhost".to_string(),
+            port: "9001".to_string(),
+            nick: String::new(),
+            use_ssl: true,
+            accept_invalid_certs: false,
+            auto_connect: false,
+            save_password: false,
+        }
+    }
+}
+
+/// Per-connection runtime state (NOT serialised).
+pub struct ConnectionHandle {
+    pub prefix: String,
+    pub label: String,
+    pub backend_type: BackendType,
+    pub client: Box<dyn BackendClient>,
+    pub status: String,
+    pub is_connecting: bool,
+    pub connecting_pending: bool,
+    pub auth_error: Option<String>,
+    pub auto_reconnect: bool,
+    pub connection_attempts: u32,
+    pub connection_log: VecDeque<String>,
+}
+
+fn spawn_event_forwarder(
+    prefix: String,
+    mut from_rx: mpsc::UnboundedReceiver<BackendEvent>,
+    to_tx: mpsc::UnboundedSender<(String, BackendEvent)>,
+) {
+    tokio::spawn(async move {
+        while let Some(ev) = from_rx.recv().await {
+            let _ = to_tx.send((prefix.clone(), ev));
+        }
+    });
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub backend_type: BackendType,
+    #[serde(default)]
     pub host: String,
+    #[serde(default)]
     pub port: String,
     #[serde(default)]
     pub irc_nick: String,
+    #[serde(default)]
     pub use_ssl: bool,
     pub show_filtered_lines: bool,
     pub colored_nicks: bool,
@@ -211,10 +285,6 @@ pub struct AppSettings {
     pub show_hidden_buffers: bool,
     #[serde(default)]
     pub buffer_order: Vec<String>,
-    /// Buffer IDs the user has explicitly read; suppresses stale hotlist entries on
-    /// reconnect.  The relay API has no dedicated read-mark endpoint — the correct
-    /// mechanism is POST /api/input + "/input hotlist_clear", but this local set
-    /// provides a reliable fallback for the client-side indicator state.
     #[serde(default)]
     pub cleared_buffer_ids: HashSet<String>,
     #[serde(default)]
@@ -233,6 +303,9 @@ pub struct AppSettings {
     pub buffers_width: f32,
     #[serde(default)]
     pub accept_invalid_certs: bool,
+    /// Multi-connection profiles (new).
+    #[serde(default)]
+    pub connections: Vec<ConnectionProfile>,
 }
 
 fn default_true() -> bool { true }
@@ -272,29 +345,27 @@ impl Default for AppSettings {
             accept_invalid_certs: false,
             backend_type: BackendType::WeeChat,
             irc_nick: String::new(),
+            connections: Vec::new(),
         }
     }
 }
 
 pub struct WeeChatApp {
-    pub(crate) host: String,
-    pub(crate) port: String,
-    pub(crate) password: String,
-    pub(crate) save_password: bool,
-    pub(crate) password_from_keyring: bool,
-    pub(crate) backend_type: BackendType,
-    pub(crate) use_ssl: bool,
-    pub(crate) accept_invalid_certs: bool,
-    pub(crate) irc_nick: String,
+    // Multi-connection state
+    pub(crate) connections: Vec<ConnectionHandle>,
+    pub(crate) profiles: Vec<ConnectionProfile>,
+    pub(crate) shared_event_tx: mpsc::UnboundedSender<(String, BackendEvent)>,
+    pub(crate) event_rx: mpsc::UnboundedReceiver<(String, BackendEvent)>,
 
-    pub(crate) client: Option<Box<dyn BackendClient>>,
-    pub(crate) event_rx: mpsc::UnboundedReceiver<BackendEvent>,
-    pub(crate) event_tx: mpsc::UnboundedSender<BackendEvent>,
-    
-    pub(crate) connection_status: String,
-    pub(crate) is_connecting: bool,
-    pub(crate) connecting_pending: bool,
-    pub(crate) auth_error: Option<String>,
+    // Connection management UI state
+    pub(crate) show_connection_log: bool,
+    pub(crate) connection_log_unread: bool,
+    pub(crate) selected_conn_log: Option<String>,
+    pub(crate) editing_profile: ConnectionProfile,
+    pub(crate) editing_password: String,
+    pub(crate) editing_profile_idx: Option<usize>,
+    pub(crate) show_add_connection: bool,
+
     pub(crate) buffers: Vec<Buffer>,
     pub(crate) selected_buffer_id: Option<String>,
     pub(crate) input_text: String,
@@ -351,7 +422,7 @@ pub struct WeeChatApp {
     // Buffer drag-and-drop reordering
     pub(crate) buffer_order: Vec<String>,
     pub(crate) dragging_buffer_id: Option<String>,
-    pub(crate) drag_drop_before_id: Option<String>, // None = drop at end
+    pub(crate) drag_drop_before_id: Option<String>,
 
     // Buffers the user has explicitly read this session; suppresses stale hotlist entries.
     pub(crate) cleared_buffer_ids: HashSet<String>,
@@ -373,14 +444,6 @@ pub struct WeeChatApp {
 
     // Transient search text inside the font-family dropdown.
     pub(crate) font_search: String,
-
-    // Connection status log shown while connecting / after disconnect.
-    pub(crate) connection_log: VecDeque<String>,
-    pub(crate) show_connection_log: bool,
-    // Set when a new log entry arrives while the log panel is closed, cleared when opened.
-    pub(crate) connection_log_unread: bool,
-    // How many connection attempts have been made since the last explicit Connect click.
-    pub(crate) connection_attempts: u32,
 }
 
 pub(crate) struct CompletionState {
@@ -392,7 +455,7 @@ pub(crate) struct CompletionState {
 
 impl WeeChatApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<BackendEvent>();
+        let (shared_event_tx, event_rx) = mpsc::unbounded_channel::<(String, BackendEvent)>();
         let (image_tx, image_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
 
@@ -402,8 +465,22 @@ impl WeeChatApp {
             AppSettings::default()
         };
 
-        let saved_password = crate::ui::secure_storage::load(&settings.host, &settings.port);
-        let password_from_keyring = saved_password.is_some();
+        // Build profiles list: use saved connections if present, else migrate legacy fields
+        let mut profiles: Vec<ConnectionProfile> = settings.connections.clone();
+        if profiles.is_empty() && !settings.host.is_empty() && settings.host != "localhost" {
+            // Migrate from old single-connection settings
+            profiles.push(ConnectionProfile {
+                label: settings.host.clone(),
+                backend_type: settings.backend_type.clone(),
+                host: settings.host.clone(),
+                port: settings.port.clone(),
+                nick: settings.irc_nick.clone(),
+                use_ssl: settings.use_ssl,
+                accept_invalid_certs: settings.accept_invalid_certs,
+                auto_connect: false,
+                save_password: settings.save_password,
+            });
+        }
 
         if !settings.font_path.is_empty() {
             crate::ui::fonts::apply(&cc.egui_ctx, &settings.font_path);
@@ -411,22 +488,17 @@ impl WeeChatApp {
         let available_fonts = crate::ui::fonts::scan_system_fonts();
 
         Self {
-            host: settings.host,
-            port: settings.port,
-            password: saved_password.unwrap_or_default(),
-            save_password: settings.save_password,
-            password_from_keyring,
-            backend_type: settings.backend_type,
-            use_ssl: settings.use_ssl,
-            accept_invalid_certs: settings.accept_invalid_certs,
-            irc_nick: settings.irc_nick,
-            client: None,
+            connections: Vec::new(),
+            profiles,
+            shared_event_tx,
             event_rx,
-            event_tx,
-            connection_status: "".to_string(),
-            is_connecting: false,
-            connecting_pending: false,
-            auth_error: None,
+            show_connection_log: false,
+            connection_log_unread: false,
+            selected_conn_log: None,
+            editing_profile: ConnectionProfile::default(),
+            editing_password: String::new(),
+            editing_profile_idx: None,
+            show_add_connection: false,
             buffers: Vec::new(),
             selected_buffer_id: None,
             input_text: String::new(),
@@ -476,10 +548,6 @@ impl WeeChatApp {
             muted_buffer_names: settings.muted_buffer_names,
             loading_more_buffer_id: None,
             font_search: String::new(),
-            connection_log: VecDeque::new(),
-            show_connection_log: false,
-            connection_log_unread: false,
-            connection_attempts: 0,
         }
     }
 
@@ -495,7 +563,7 @@ impl WeeChatApp {
         let stroke = Stroke::new(1.5, color);
         let rounding = Rounding::same(2.0);
         painter.rect_stroke(rect.shrink(4.0), rounding, stroke);
-        
+
         let split_x = if is_right { rect.right() - 8.0 } else { rect.left() + 8.0 };
         painter.line_segment(
             [egui::pos2(split_x, rect.top() + 4.0), egui::pos2(split_x, rect.bottom() - 4.0)],
@@ -515,47 +583,122 @@ impl WeeChatApp {
         )
     }
 
+    pub(crate) fn is_any_connected(&self) -> bool {
+        self.connections.iter().any(|c| c.client.is_connected())
+    }
+
+    /// Returns (client_ref, raw_buffer_id) for the connection that owns the given full prefixed buffer_id.
+    pub(crate) fn client_for_buffer<'a>(&'a self, buffer_id: &str) -> Option<(&'a dyn BackendClient, String)> {
+        for conn in &self.connections {
+            let p = format!("{}/", conn.prefix);
+            if let Some(raw) = buffer_id.strip_prefix(&p) {
+                return Some((&*conn.client, raw.to_string()));
+            }
+        }
+        None
+    }
+
     pub(crate) fn select_buffer(&mut self, id: String) {
-        // Clear the hotlist entry for the buffer we're LEAVING so WeeChat's own
-        // TUI reflects it as read.  POST /api/buffers/{id}/read does not exist in
-        // the relay API — the correct approach is POST /api/input with the
-        // WeeChat command "/input hotlist_clear" targeted at the specific buffer.
         if let Some(prev_id) = self.selected_buffer_id.clone() {
             if prev_id != id {
-                if let Some(client) = &self.client {
-                    client.mark_read(&prev_id);
+                if let Some((client, raw_id)) = self.client_for_buffer(&prev_id) {
+                    client.mark_read(&raw_id);
                 }
             }
         }
 
         self.selected_buffer_id = Some(id.clone());
         self.selected_view_since = Some(std::time::Instant::now());
-        // Mark as cleared so stale hotlist entries are suppressed on reconnect.
         self.cleared_buffer_ids.insert(id.clone());
         if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == id) {
             buffer.activity = BufferActivity::None;
             buffer.unread_count = 0;
-            // Snapshot the current read marker so the unread divider stays anchored
-            // at the right position while the user views this buffer.
             buffer.visit_start_marker_id = buffer.last_read_id.clone();
             let fetch_nicks = buffer.has_nicklist;
-            if let Some(client) = &self.client {
-                client.refresh_buffer(&id);
-                client.fetch_lines(&id, INITIAL_LINES);
+            if let Some((client, raw_id)) = self.client_for_buffer(&id) {
+                client.refresh_buffer(&raw_id);
+                client.fetch_lines(&raw_id, INITIAL_LINES);
                 if fetch_nicks {
-                    client.fetch_nicks(&id);
+                    client.fetch_nicks(&raw_id);
                 }
-                client.mark_read(&id);
+                client.mark_read(&raw_id);
             }
         }
     }
 
-    pub(crate) fn log_conn(&mut self, msg: impl Into<String>) {
+    pub(crate) fn log_conn_for(&mut self, conn_prefix: &str, msg: impl Into<String>) {
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.connection_log.push_back(format!("[{}]  {}", ts, msg.into()));
-        if self.connection_log.len() > 200 {
-            self.connection_log.pop_front();
+        let text = format!("[{}]  {}", ts, msg.into());
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+            conn.connection_log.push_back(text.clone());
+            if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
         }
+        if !self.show_connection_log {
+            self.connection_log_unread = true;
+        }
+    }
+
+    /// Start a connection for the given profile with the given password.
+    pub(crate) fn do_connect(&mut self, profile: &ConnectionProfile, password: String, ctx: &egui::Context) {
+        let prefix = profile.prefix();
+        // Remove any stale handle with same prefix
+        self.connections.retain(|c| c.prefix != prefix);
+
+        let (per_conn_tx, per_conn_rx) = mpsc::unbounded_channel::<BackendEvent>();
+        let port = profile.port.parse::<u16>().unwrap_or(9001);
+        let proto = if profile.use_ssl { "wss" } else { "ws" };
+
+        let mut client: Box<dyn BackendClient> = match profile.backend_type {
+            BackendType::Soju => {
+                let config = crate::relay::irc::IrcConfig {
+                    host: profile.host.clone(),
+                    port,
+                    nick: if profile.nick.is_empty() { "user".to_string() } else { profile.nick.clone() },
+                    password: password.clone(),
+                    use_ssl: profile.use_ssl,
+                    accept_invalid_certs: profile.accept_invalid_certs,
+                };
+                Box::new(crate::relay::irc::IrcClient::new(config, per_conn_tx.clone(), ctx.clone()))
+            }
+            BackendType::WeeChat => {
+                let config = WeeChatConfig {
+                    host: profile.host.clone(),
+                    port,
+                    password: password.clone(),
+                    use_ssl: profile.use_ssl,
+                    accept_invalid_certs: profile.accept_invalid_certs,
+                };
+                Box::new(WeeChatClient::new(config, per_conn_tx.clone(), ctx.clone()))
+            }
+        };
+        client.connect();
+
+        spawn_event_forwarder(prefix.clone(), per_conn_rx, self.shared_event_tx.clone());
+
+        let mut conn = ConnectionHandle {
+            prefix: prefix.clone(),
+            label: profile.label.clone(),
+            backend_type: profile.backend_type.clone(),
+            client,
+            status: "Connecting...".to_string(),
+            is_connecting: true,
+            connecting_pending: true,
+            auth_error: None,
+            auto_reconnect: self.auto_reconnect,
+            connection_attempts: 1,
+            connection_log: VecDeque::new(),
+        };
+
+        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        conn.connection_log.push_back(format!("[{}]  Connecting to {}://{}:{}/api", ts, proto, profile.host, port));
+        let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
+        conn.connection_log.push_back(format!("[{}]  SSL/TLS: {}", ts2, if profile.use_ssl { "enabled" } else { "disabled" }));
+
+        if self.selected_conn_log.is_none() {
+            self.selected_conn_log = Some(prefix.clone());
+        }
+
+        self.connections.push(conn);
         if !self.show_connection_log {
             self.connection_log_unread = true;
         }
@@ -565,10 +708,10 @@ impl WeeChatApp {
 impl eframe::App for WeeChatApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let settings = AppSettings {
-            backend_type: self.backend_type.clone(),
-            host: self.host.clone(),
-            port: self.port.clone(),
-            use_ssl: self.use_ssl,
+            backend_type: BackendType::default(),
+            host: String::new(),
+            port: String::new(),
+            use_ssl: false,
             show_filtered_lines: self.show_filtered_lines,
             colored_nicks: self.colored_nicks,
             theme: self.theme.clone(),
@@ -590,19 +733,20 @@ impl eframe::App for WeeChatApp {
             show_hidden_buffers: self.show_hidden_buffers,
             buffer_order: self.buffer_order.clone(),
             cleared_buffer_ids: self.cleared_buffer_ids.clone(),
-            save_password: self.save_password,
+            save_password: false,
             font_name: self.font_name.clone(),
             font_path: self.font_path.clone(),
             muted_buffer_names: self.muted_buffer_names.clone(),
-            accept_invalid_certs: self.accept_invalid_certs,
-            irc_nick: self.irc_nick.clone(),
+            accept_invalid_certs: false,
+            irc_nick: String::new(),
+            connections: self.profiles.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        while let Ok(event) = self.event_rx.try_recv() {
-            self.handle_event(event);
+        while let Ok((prefix, event)) = self.event_rx.try_recv() {
+            self.handle_event(&prefix, event);
         }
 
         while let Ok((url, result)) = self.image_rx.try_recv() {
@@ -626,7 +770,6 @@ impl eframe::App for WeeChatApp {
         while let Ok((url, result)) = self.preview_rx.try_recv() {
             match result {
                 Ok(preview) => {
-                    // Auto-load the og:image through the existing image channel
                     if let Some(img_url) = &preview.image_url {
                         if !self.image_cache.contains_key(img_url) {
                             self.image_cache.insert(img_url.clone(), ImageState::Loading);
@@ -658,7 +801,7 @@ impl eframe::App for WeeChatApp {
             if i.consume_key(Modifiers::NONE, Key::Tab) {
                 tab_pressed = true;
             }
-            
+
             let meta = i.modifiers.command || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.ctrl;
             if meta {
                 if i.consume_key(i.modifiers, Key::ArrowUp) || i.key_pressed(Key::ArrowUp) { arrow_up_shortcut = true; }
@@ -684,7 +827,7 @@ impl eframe::App for WeeChatApp {
 
         let mut style = (*ctx.style()).clone();
         let font_family = if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional };
-        
+
         style.text_styles = [
             (TextStyle::Small, FontId::new(self.font_size * 0.8, font_family.clone())),
             (TextStyle::Body, FontId::new(self.font_size, font_family.clone())),
@@ -701,8 +844,6 @@ impl eframe::App for WeeChatApp {
         style.visuals.widgets.active.rounding = Rounding::same(8.0);
         ctx.set_style(style);
 
-        // Cornflower blue for the Default theme; otherwise use the theme's ANSI blue (index 4).
-        // Default's ANSI 4 is pure dark blue which is too muddy for UI elements.
         let accent_color = if self.theme.name == "Default" {
             Color32::from_rgb(100, 149, 237)
         } else {
@@ -712,11 +853,9 @@ impl eframe::App for WeeChatApp {
         let alpha = (self.opacity * 255.0) as u8;
         let bg_color = Color32::from_rgba_unmultiplied(base_bg.r(), base_bg.g(), base_bg.b(), alpha);
 
-        // Detect light vs dark so every derived color adapts automatically
         let luma = 0.299 * base_bg.r() as f32 + 0.587 * base_bg.g() as f32 + 0.114 * base_bg.b() as f32;
         let is_light = luma > 140.0;
 
-        // Surface: slightly darker than bg for light themes, slightly lighter for dark
         let surface_color = if is_light {
             Color32::from_rgba_unmultiplied(
                 base_bg.r().saturating_sub(18),
@@ -728,7 +867,6 @@ impl eframe::App for WeeChatApp {
             Color32::from_rgba_unmultiplied(30, 30, 30, alpha)
         };
 
-        // Card background for preview panels
         let card_bg = if is_light {
             Color32::from_rgba_unmultiplied(
                 base_bg.r().saturating_sub(12),
@@ -740,14 +878,12 @@ impl eframe::App for WeeChatApp {
             Color32::from_rgba_unmultiplied(35, 35, 45, 220)
         };
 
-        // Semantic text tiers — text_primary follows the theme foreground when set
         let text_primary = self.theme.foreground
             .map(Color32::from)
             .unwrap_or_else(|| if is_light { Color32::from_gray(15) } else { Color32::WHITE });
         let text_secondary = if is_light { Color32::from_gray(70)  } else { Color32::from_gray(160) };
         let text_muted     = if is_light { Color32::from_gray(120) } else { Color32::from_gray(100) };
 
-        // Border for frames/cards
         let border_color = if is_light { Color32::from_gray(200) } else { Color32::from_gray(55) };
 
         let mut visuals = if is_light { Visuals::light() } else { Visuals::dark() };
@@ -770,17 +906,17 @@ impl eframe::App for WeeChatApp {
         let mut next_selected_buffer_id = None;
         let mut pending_buffer_command = None;
         let mut next_drag_buffer_id: Option<String> = None;
-        let mut pending_mute: Option<(String, String, bool)> = None; // (buf_id, full_name, mute)
-        let mut pending_load_more: Option<(String, usize)> = None; // (buffer_id, lines_to_request)
+        let mut pending_mute: Option<(String, String, bool)> = None;
+        let mut pending_load_more: Option<(String, usize)> = None;
 
         if self.show_toolbar { egui::TopBottomPanel::top("top_panel")
             .frame(Frame::none().fill(surface_color).inner_margin(Margin::symmetric(12.0, 8.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-                    
+
                     let icon_size = Vec2::splat(24.0);
-                    
+
                     let (rect, res) = ui.allocate_at_least(icon_size, egui::Sense::click());
                     if res.clicked() { self.show_buffers = !self.show_buffers; }
                     let color = if self.show_buffers { accent_color } else { Color32::GRAY };
@@ -806,30 +942,32 @@ impl eframe::App for WeeChatApp {
                             self.connection_log_unread = false;
                             self.show_settings = false;
                         }
-                        if self.client.is_some() {
-                            let status_text = if self.is_connecting { "● Connecting" } else { "● Connected" };
-                            let status_color = if self.is_connecting { Color32::from_rgb(255, 165, 0) } else { Color32::from_rgb(50, 205, 50) };
-                            ui.label(egui::RichText::new(status_text).color(status_color).small());
-                            
-                            if ui.button("Disconnect").clicked() {
-                                if let Some(client) = self.client.as_mut() {
-                                    client.disconnect();
-                                }
-                                self.client = None;
-                                self.connection_status = "Disconnected".to_string();
-                                self.log_conn("Disconnected by user");
+                        // Show status indicators for each active connection
+                        for conn in &self.connections {
+                            if conn.client.is_connected() || conn.connecting_pending {
+                                let status_text = if conn.connecting_pending {
+                                    format!("● {}", conn.label)
+                                } else {
+                                    format!("● {}", conn.label)
+                                };
+                                let status_color = if conn.connecting_pending {
+                                    Color32::from_rgb(255, 165, 0)
+                                } else {
+                                    Color32::from_rgb(50, 205, 50)
+                                };
+                                ui.label(egui::RichText::new(status_text).color(status_color).small());
                             }
                         }
                     });
                 });
             });
-        } // show_toolbar
+        }
 
         if self.show_buffers {
             if self.buffers_width == 0.0 {
                 let buf_font_id = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
                 let char_w = ctx.fonts(|f| f.glyph_width(&buf_font_id, 'W'));
-                self.buffers_width = char_w * 20.0 + 20.0; // 20 chars + 2×10px inner margin
+                self.buffers_width = char_w * 20.0 + 20.0;
             }
             let buffers_resp = egui::SidePanel::left("buffers_panel")
                 .resizable(true)
@@ -844,8 +982,6 @@ impl eframe::App for WeeChatApp {
                     let is_dragging = self.dragging_buffer_id.is_some();
                     let pointer_pos = ctx.pointer_hover_pos();
 
-                    // Pre-compute which buffer IDs belong to the dragged group so we can fade
-                    // them all out and skip them as drop targets.
                     let dragged_group_ids: HashSet<String> = if let Some(drag_id) = &self.dragging_buffer_id {
                         if let Some(drag_buf) = self.buffers.iter().find(|b| &b.id == drag_id) {
                             if drag_buf.kind == "server" || drag_buf.kind == "core" {
@@ -917,7 +1053,6 @@ impl eframe::App for WeeChatApp {
                                         let unread = if is_muted || is_root { 0 } else { buffer.unread_count };
                                         let buf_activity = buffer.activity;
                                         if unread > 0 {
-                                            // Place badge first (right side), then name fills remaining space.
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 let badge_text = if unread > 99 { "99+".to_string() } else { unread.to_string() };
                                                 let badge_bg = if buf_activity == BufferActivity::Highlight {
@@ -997,21 +1132,16 @@ impl eframe::App for WeeChatApp {
                                 });
                             }
 
-                            // Only non-dragged-group rows are valid drop targets.
                             if !in_dragged_group {
                                 row_rects.push((outer_resp.rect, buffer.id.clone()));
                             }
                         }
                     });
 
-                    // Handle drag start (must happen after the scroll area, outside of it).
                     if let Some(id) = next_drag_buffer_id.take() {
                         self.dragging_buffer_id = Some(id);
                     }
 
-                    // Update drop target and draw the indicator line.
-                    // This runs every frame while dragging, using current pointer position
-                    // vs the collected row_rects (all in screen-space coordinates).
                     if self.dragging_buffer_id.is_some() {
                         if let Some(pos) = pointer_pos {
                             let mut drop_before: Option<String> = None;
@@ -1029,7 +1159,6 @@ impl eframe::App for WeeChatApp {
                             self.drag_drop_before_id = drop_before;
 
                             if let Some((first, _)) = row_rects.first() {
-                                // Draw over the scroll area — ui.painter() here is the panel painter.
                                 ui.painter().hline(
                                     first.left()..=first.right(),
                                     indicator_y,
@@ -1039,7 +1168,6 @@ impl eframe::App for WeeChatApp {
                         }
                     }
 
-                    // Handle drag release.
                     if is_dragging && ctx.input(|i| !i.pointer.primary_down()) {
                         if let Some(drag_id) = self.dragging_buffer_id.take() {
                             let drop_id = self.drag_drop_before_id.take();
@@ -1090,11 +1218,12 @@ impl eframe::App for WeeChatApp {
 
         let is_query_or_core = current_buffer_kind == "private" || current_buffer_kind == "server" || current_buffer_kind == "core" || current_buffer_full_name.as_ref().map(|n| n == "weechat" || n.contains("highmon")).unwrap_or(false);
 
-        if self.show_nicklist && !is_query_or_core && self.client.is_some() && current_buffer_id.is_some() {
-            // Initialise width to 12 characters wide on first launch (sentinel 0.0 means unset).
+        let any_connected = self.is_any_connected();
+
+        if self.show_nicklist && !is_query_or_core && any_connected && current_buffer_id.is_some() {
             if self.nicklist_width == 0.0 {
                 let char_w = ctx.fonts(|f| f.glyph_width(&font_id, 'W'));
-                self.nicklist_width = char_w * 15.0 + 20.0; // 15 chars + 2×10px inner margin
+                self.nicklist_width = char_w * 15.0 + 20.0;
             }
             let nicks_resp = egui::SidePanel::right("nicks_panel")
                 .resizable(true)
@@ -1121,8 +1250,6 @@ impl eframe::App for WeeChatApp {
                                 let mut job = LayoutJob::default();
                                 for s in sections { job.append(&s.text, 0.0, s.format); }
 
-                                // truncate(true) clips the label at available width so long
-                                // nicks never push the panel wider than the user has dragged it.
                                 let label_res = ui.add(Label::new(job).truncate(true).sense(egui::Sense::click()));
                                 label_res.context_menu(|ui| {
                                     if ui.button(format!("Query {}", nick.name)).clicked() {
@@ -1141,7 +1268,7 @@ impl eframe::App for WeeChatApp {
             self.nicklist_width = nicks_resp.response.rect.width();
         }
 
-        if self.client.is_some() && current_buffer_id.is_some() {
+        if any_connected && current_buffer_id.is_some() {
             egui::TopBottomPanel::bottom("input_panel")
                 .frame(Frame::none().fill(surface_color).inner_margin(Margin::symmetric(16.0, 10.0)))
                 .show(ctx, |ui| {
@@ -1149,14 +1276,14 @@ impl eframe::App for WeeChatApp {
                         let text_edit = egui::TextEdit::singleline(&mut self.input_text)
                             .hint_text("Type a message...")
                             .margin(Margin::symmetric(8.0, 4.0))
-                            .lock_focus(true) 
+                            .lock_focus(true)
                             .desired_width(ui.available_width() - 80.0);
-                        
+
                         let res = ui.add(text_edit);
-                        
+
                         if res.has_focus() {
-                            if tab_pressed { 
-                                self.perform_completion(ctx, res.id); 
+                            if tab_pressed {
+                                self.perform_completion(ctx, res.id);
                                 res.request_focus();
                             } else if history_up {
                                 self.cycle_history(-1, ctx, res.id);
@@ -1180,13 +1307,18 @@ impl eframe::App for WeeChatApp {
                 });
         }
 
+        // Collect pending connect/disconnect actions from the connection panel
+        let mut pending_connect: Option<(String, String)> = None; // (prefix, password)
+        let mut pending_disconnect: Option<String> = None; // prefix
+        let mut pending_delete_profile: Option<usize> = None;
+        let mut pending_edit_profile: Option<usize> = None;
+
         egui::CentralPanel::default()
             .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(0.0)))
             .show(ctx, |ui| {
             if self.show_settings {
                 self.show_settings_window(ui, accent_color, is_light);
             } else if self.show_connection_log {
-                // Connection log panel — toggled via toolbar button, closed with X or Escape.
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.show_connection_log = false;
                 }
@@ -1195,15 +1327,24 @@ impl eframe::App for WeeChatApp {
                     let log_w = (ui.available_width() - 80.0).min(720.0);
                     ui.allocate_ui(egui::vec2(log_w, ui.available_height() - 32.0), |ui| {
                         ui.horizontal(|ui| {
-                            let (dot_color, label) = if self.connecting_pending {
-                                (Color32::from_rgb(255, 165, 0), "Connecting…")
-                            } else if self.client.is_some() {
-                                (Color32::from_rgb(50, 205, 50), "Connected")
-                            } else {
-                                (Color32::from_rgb(220, 60, 60), "Disconnected")
-                            };
-                            ui.label(egui::RichText::new("●").color(dot_color).size(14.0));
-                            ui.label(egui::RichText::new(label).strong().size(14.0));
+                            ui.label(egui::RichText::new("Connection Log").strong().size(14.0));
+                            // Connection selector tabs
+                            for conn in &self.connections {
+                                let selected = self.selected_conn_log.as_deref() == Some(&conn.prefix);
+                                let dot_color = if conn.client.is_connected() {
+                                    Color32::from_rgb(50, 205, 50)
+                                } else if conn.connecting_pending {
+                                    Color32::from_rgb(255, 165, 0)
+                                } else {
+                                    Color32::from_rgb(180, 60, 60)
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("●").color(dot_color).size(10.0));
+                                    if ui.selectable_label(selected, &conn.label).clicked() {
+                                        self.selected_conn_log = Some(conn.prefix.clone());
+                                    }
+                                });
+                            }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.button(egui::RichText::new("✕").size(14.0)).on_hover_text("Close").clicked() {
                                     self.show_connection_log = false;
@@ -1223,10 +1364,20 @@ impl eframe::App for WeeChatApp {
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         ui.set_min_width(ui.available_width());
-                                        if self.connection_log.is_empty() {
+                                        // Find selected connection log
+                                        let selected_prefix = self.selected_conn_log.clone();
+                                        let log_entries: Vec<String> = self.connections.iter()
+                                            .find(|c| selected_prefix.as_deref() == Some(&c.prefix))
+                                            .map(|c| c.connection_log.iter().cloned().collect())
+                                            .unwrap_or_default();
+                                        let is_pending = self.connections.iter()
+                                            .find(|c| selected_prefix.as_deref() == Some(&c.prefix))
+                                            .map(|c| c.connecting_pending)
+                                            .unwrap_or(false);
+                                        if log_entries.is_empty() {
                                             ui.label(egui::RichText::new("No connection activity yet.").color(text_muted).italics());
                                         }
-                                        for entry in &self.connection_log {
+                                        for entry in &log_entries {
                                             let color = if entry.contains("Error") || entry.contains("failed") || entry.contains("Disconnected") {
                                                 Color32::from_rgb(220, 80, 80)
                                             } else if entry.contains("Connected") {
@@ -1236,141 +1387,218 @@ impl eframe::App for WeeChatApp {
                                             };
                                             ui.label(egui::RichText::new(entry).font(log_font.clone()).color(color));
                                         }
-                                        if self.connecting_pending {
+                                        if is_pending {
                                             ui.spinner();
                                         }
                                     });
                             });
                     });
                 });
-            } else if self.client.is_none() || self.connecting_pending {
+            } else if !any_connected || self.show_add_connection {
+                // Connection panel
                 ui.vertical_centered(|ui| {
-                    ui.add_space(ctx.available_rect().height() * 0.2);
-                    
-                    Frame::group(ui.style())
-                        .fill(surface_color)
-                        .rounding(Rounding::same(12.0))
-                        .stroke(Stroke::new(1.0, border_color))
-                        .inner_margin(Margin::same(30.0))
-                        .show(ui, |ui| {
-                            ui.set_max_width(400.0);
-                            ui.heading(egui::RichText::new("Connect to WeeChatRS").strong().size(24.0));
-                            ui.add_space(20.0);
+                    ui.add_space(ctx.available_rect().height() * 0.1);
 
-                            ui.horizontal(|ui| {
-                                ui.label("Backend:");
-                                ui.selectable_value(&mut self.backend_type, BackendType::WeeChat, "WeeChat Relay");
-                                ui.selectable_value(&mut self.backend_type, BackendType::Soju, "Soju IRC");
-                            });
-                            ui.add_space(10.0);
+                    if self.show_add_connection {
+                        // Add/Edit connection form
+                        Frame::group(ui.style())
+                            .fill(surface_color)
+                            .rounding(Rounding::same(12.0))
+                            .stroke(Stroke::new(1.0, border_color))
+                            .inner_margin(Margin::same(30.0))
+                            .show(ui, |ui| {
+                                ui.set_max_width(420.0);
+                                let title = if self.editing_profile_idx.is_some() { "Edit Connection" } else { "Add Connection" };
+                                ui.heading(egui::RichText::new(title).strong().size(20.0));
+                                ui.add_space(16.0);
 
-                            egui::Grid::new("login_grid").num_columns(2).spacing([15.0, 15.0]).show(ui, |ui| {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Host:"); });
-                                if ui.add(egui::TextEdit::singleline(&mut self.host).desired_width(240.0)).changed() { self.auth_error = None; }
-                                ui.end_row();
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Port:"); });
-                                if ui.add(egui::TextEdit::singleline(&mut self.port).desired_width(240.0)).changed() { self.auth_error = None; }
-                                ui.end_row();
-                                if self.backend_type == BackendType::Soju {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Nick:"); });
-                                    if ui.add(egui::TextEdit::singleline(&mut self.irc_nick).desired_width(240.0)).changed() { self.auth_error = None; }
+                                egui::Grid::new("add_conn_grid").num_columns(2).spacing([12.0, 12.0]).show(ui, |ui| {
+                                    ui.label("Label:");
+                                    ui.add(egui::TextEdit::singleline(&mut self.editing_profile.label).desired_width(240.0));
                                     ui.end_row();
-                                }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Password:"); });
+                                    ui.label("Backend:");
+                                    ui.horizontal(|ui| {
+                                        ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::WeeChat, "WeeChat Relay");
+                                        ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::Soju, "Soju IRC");
+                                    });
+                                    ui.end_row();
+                                    ui.label("Host:");
+                                    ui.add(egui::TextEdit::singleline(&mut self.editing_profile.host).desired_width(240.0));
+                                    ui.end_row();
+                                    ui.label("Port:");
+                                    ui.add(egui::TextEdit::singleline(&mut self.editing_profile.port).desired_width(240.0));
+                                    ui.end_row();
+                                    if self.editing_profile.backend_type == BackendType::Soju {
+                                        ui.label("Nick:");
+                                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.nick).desired_width(240.0));
+                                        ui.end_row();
+                                    }
+                                    ui.label("Password:");
+                                    ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).desired_width(240.0));
+                                    ui.end_row();
+                                });
+
+                                ui.add_space(12.0);
                                 ui.horizontal(|ui| {
-                                    if ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(200.0)).changed() { self.auth_error = None; }
-                                    if self.password_from_keyring {
-                                        ui.label(egui::RichText::new("(keyring)").small().color(ui.visuals().weak_text_color()));
+                                    ui.checkbox(&mut self.editing_profile.use_ssl, "Use SSL");
+                                    if self.editing_profile.use_ssl {
+                                        ui.add_space(12.0);
+                                        ui.checkbox(&mut self.editing_profile.accept_invalid_certs, "Accept self-signed");
                                     }
                                 });
-                                ui.end_row();
-                            });
-                            
-                            ui.add_space(15.0);
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.use_ssl, "Use SSL");
-                                if self.use_ssl {
-                                    ui.add_space(20.0);
-                                    ui.checkbox(&mut self.accept_invalid_certs, "Accept self-signed certificates");
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.auto_reconnect, "Auto-reconnect");
-                            });
-                            ui.horizontal(|ui| {
-                                if ui.checkbox(&mut self.save_password, "Remember password").changed() && !self.save_password {
-                                    let _ = crate::ui::secure_storage::delete(&self.host, &self.port);
-                                    self.password_from_keyring = false;
-                                }
-                                if self.password_from_keyring {
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
                                     ui.add_space(12.0);
-                                    if ui.small_button("Forget").clicked() {
-                                        let _ = crate::ui::secure_storage::delete(&self.host, &self.port);
-                                        self.password.clear();
-                                        self.password_from_keyring = false;
-                                        self.save_password = false;
+                                    ui.checkbox(&mut self.editing_profile.save_password, "Save password");
+                                });
+
+                                ui.add_space(20.0);
+                                ui.horizontal(|ui| {
+                                    let save_btn = egui::Button::new(egui::RichText::new("Save").strong().color(Color32::WHITE))
+                                        .fill(accent_color)
+                                        .min_size(Vec2::new(100.0, 36.0));
+                                    if ui.add(save_btn).clicked() {
+                                        // Save password to keyring if requested
+                                        if self.editing_profile.save_password && !self.editing_password.is_empty() {
+                                            let key = self.editing_profile.keyring_host_key();
+                                            let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_password);
+                                        }
+                                        let profile = self.editing_profile.clone();
+                                        if let Some(idx) = self.editing_profile_idx {
+                                            if idx < self.profiles.len() {
+                                                self.profiles[idx] = profile;
+                                            }
+                                        } else {
+                                            self.profiles.push(profile);
+                                        }
+                                        self.show_add_connection = false;
+                                        self.editing_profile = ConnectionProfile::default();
+                                        self.editing_password.clear();
+                                        self.editing_profile_idx = None;
                                     }
+                                    ui.add_space(12.0);
+                                    if ui.button("Cancel").clicked() {
+                                        self.show_add_connection = false;
+                                        self.editing_profile = ConnectionProfile::default();
+                                        self.editing_password.clear();
+                                        self.editing_profile_idx = None;
+                                    }
+                                });
+                            });
+                    } else if self.profiles.is_empty() {
+                        // No connections configured
+                        Frame::group(ui.style())
+                            .fill(surface_color)
+                            .rounding(Rounding::same(12.0))
+                            .stroke(Stroke::new(1.0, border_color))
+                            .inner_margin(Margin::same(40.0))
+                            .show(ui, |ui| {
+                                ui.set_max_width(360.0);
+                                ui.heading(egui::RichText::new("No connections configured").strong().size(20.0));
+                                ui.add_space(12.0);
+                                ui.label(egui::RichText::new("Add a connection to get started.").color(text_secondary));
+                                ui.add_space(20.0);
+                                let btn = egui::Button::new(egui::RichText::new("+ Add Connection").strong().color(Color32::WHITE))
+                                    .fill(accent_color)
+                                    .min_size(Vec2::new(160.0, 40.0));
+                                if ui.add(btn).clicked() {
+                                    self.editing_profile = ConnectionProfile::default();
+                                    self.editing_password.clear();
+                                    self.editing_profile_idx = None;
+                                    self.show_add_connection = true;
                                 }
                             });
-                            ui.add_space(25.0);
+                    } else {
+                        // Connection list
+                        Frame::group(ui.style())
+                            .fill(surface_color)
+                            .rounding(Rounding::same(12.0))
+                            .stroke(Stroke::new(1.0, border_color))
+                            .inner_margin(Margin::same(24.0))
+                            .show(ui, |ui| {
+                                ui.set_max_width(480.0);
+                                ui.heading(egui::RichText::new("Connections").strong().size(20.0));
+                                ui.add_space(16.0);
 
-                            ui.horizontal(|ui| {
-                                let btn_label = if self.connecting_pending { "Connecting…" } else { "Connect" };
-                                let btn = egui::Button::new(egui::RichText::new(btn_label).strong().color(Color32::WHITE))
-                                    .fill(if self.connecting_pending { accent_color.linear_multiply(0.5) } else { accent_color })
-                                    .min_size(Vec2::new(120.0, 40.0));
-                                if ui.add_enabled(!self.connecting_pending, btn).clicked() {
-                                    if self.save_password && !self.password.is_empty() {
-                                        let _ = crate::ui::secure_storage::save(&self.host, &self.port, &self.password);
-                                        self.password_from_keyring = true;
-                                    }
-                                    let port = self.port.parse().unwrap_or(9001);
-                                    self.auth_error = None;
-                                    self.connecting_pending = true;
-                                    self.connection_status = "Connecting...".to_string();
-                                    self.connection_log.clear();
-                                    self.connection_attempts = 0;
-                                    let proto = if self.use_ssl { "wss" } else { "ws" };
-                                    self.log_conn(format!("Connecting to {}://{}:{}/api", proto, self.host, port));
-                                    self.log_conn(format!("SSL/TLS: {}", if self.use_ssl { "enabled" } else { "disabled" }));
-                                    self.log_conn("Auth method: base64url bearer token over Sec-WebSocket-Protocol header");
-                                    let mut backend: Box<dyn crate::relay::backend::BackendClient> = match self.backend_type {
-                                        BackendType::Soju => {
-                                            let config = crate::relay::irc::IrcConfig {
-                                                host: self.host.clone(),
-                                                port,
-                                                nick: if self.irc_nick.is_empty() { "user".to_string() } else { self.irc_nick.clone() },
-                                                password: self.password.clone(),
-                                                use_ssl: self.use_ssl,
-                                                accept_invalid_certs: self.accept_invalid_certs,
-                                            };
-                                            Box::new(crate::relay::irc::IrcClient::new(config, self.event_tx.clone(), ctx.clone()))
-                                        }
-                                        BackendType::WeeChat => {
-                                            let config = WeeChatConfig {
-                                                host: self.host.clone(),
-                                                port,
-                                                password: self.password.clone(),
-                                                use_ssl: self.use_ssl,
-                                                accept_invalid_certs: self.accept_invalid_certs,
-                                            };
-                                            Box::new(WeeChatClient::new(config, self.event_tx.clone(), ctx.clone()))
-                                        }
+                                for (idx, profile) in self.profiles.iter().enumerate() {
+                                    let prefix = profile.prefix();
+                                    let conn_opt = self.connections.iter().find(|c| c.prefix == prefix);
+                                    let is_connected = conn_opt.map(|c| c.client.is_connected()).unwrap_or(false);
+                                    let is_pending = conn_opt.map(|c| c.connecting_pending).unwrap_or(false);
+                                    let has_error = conn_opt.and_then(|c| c.auth_error.as_ref()).is_some();
+
+                                    let dot_color = if is_connected && !is_pending {
+                                        Color32::from_rgb(50, 205, 50)
+                                    } else if is_pending {
+                                        Color32::from_rgb(255, 165, 0)
+                                    } else if has_error {
+                                        Color32::from_rgb(220, 60, 60)
+                                    } else {
+                                        Color32::from_gray(120)
                                     };
-                                    backend.connect();
-                                    self.client = Some(backend);
+
+                                    let badge_text = match profile.backend_type {
+                                        BackendType::WeeChat => "WeeChat",
+                                        BackendType::Soju => "IRC",
+                                    };
+
+                                    egui::Frame::none()
+                                        .fill(if is_light { Color32::from_gray(230) } else { Color32::from_rgb(40, 40, 50) })
+                                        .rounding(Rounding::same(8.0))
+                                        .inner_margin(Margin::symmetric(12.0, 8.0))
+                                        .show(ui, |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("●").color(dot_color).size(12.0));
+                                                ui.label(egui::RichText::new(&profile.label).strong());
+                                                ui.label(egui::RichText::new(badge_text).small().color(accent_color));
+                                                ui.label(egui::RichText::new(format!("{}:{}", profile.host, profile.port)).small().color(text_muted));
+
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.small_button("✕").on_hover_text("Delete").clicked() {
+                                                        pending_delete_profile = Some(idx);
+                                                    }
+                                                    if ui.small_button("✎").on_hover_text("Edit").clicked() {
+                                                        pending_edit_profile = Some(idx);
+                                                    }
+                                                    if is_connected || is_pending {
+                                                        if ui.button("Disconnect").clicked() {
+                                                            pending_disconnect = Some(prefix.clone());
+                                                        }
+                                                    } else {
+                                                        let btn_label = if is_pending { "Connecting…" } else { "Connect" };
+                                                        if ui.add_enabled(!is_pending, egui::Button::new(btn_label)).clicked() {
+                                                            // Load password
+                                                            let password = if profile.save_password {
+                                                                let key = profile.keyring_host_key();
+                                                                crate::ui::secure_storage::load_by_key(&key).unwrap_or_default()
+                                                            } else {
+                                                                String::new()
+                                                            };
+                                                            pending_connect = Some((prefix.clone(), password));
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                            if let Some(err) = conn_opt.and_then(|c| c.auth_error.as_ref()) {
+                                                ui.label(egui::RichText::new(format!("⚠ {}", err)).color(Color32::from_rgb(220, 80, 80)).small());
+                                            }
+                                        });
+                                    ui.add_space(4.0);
+                                }
+
+                                ui.add_space(8.0);
+                                let add_btn = egui::Button::new(egui::RichText::new("+ Add Connection").color(accent_color))
+                                    .fill(Color32::TRANSPARENT)
+                                    .stroke(Stroke::new(1.0, accent_color));
+                                if ui.add(add_btn).clicked() {
+                                    self.editing_profile = ConnectionProfile::default();
+                                    self.editing_password.clear();
+                                    self.editing_profile_idx = None;
+                                    self.show_add_connection = true;
                                 }
                             });
-
-                            ui.add_space(15.0);
-                            if let Some(err) = &self.auth_error.clone() {
-                                ui.label(egui::RichText::new(format!("⚠ {}", err)).color(Color32::from_rgb(220, 80, 80)));
-                            } else if self.connecting_pending {
-                                ui.label(egui::RichText::new("Connecting…").color(accent_color));
-                            } else if !self.connection_status.is_empty() && self.connection_status.starts_with("Error") {
-                                ui.label(egui::RichText::new(&self.connection_status.clone()).color(Color32::from_rgb(220, 80, 80)));
-                            }
-                        });
+                    }
                 });
             } else if let Some(_full_name) = current_buffer_full_name {
                 ui.vertical(|ui| {
@@ -1410,18 +1638,17 @@ impl eframe::App for WeeChatApp {
                                         let sections = ANSIParser::parse(&current_buffer_topic, topic_font, &self.theme);
                                         let mut job = LayoutJob::default();
                                         for s in sections { job.append(&s.text, 0.0, s.format); }
-                                        ui.add(Label::new(job).wrap(true)); 
+                                        ui.add(Label::new(job).wrap(true));
                                     }
                                 });
                             });
                         ui.add_space(-1.0);
                         ui.separator();
                     }
-                    
+
                     ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 1.0;
                         Frame::none().inner_margin(Margin::same(16.0)).show(ui, |ui| {
-                            // "Load more" button — shown at the top when there may be older lines.
                             if let (Some(buf_id), Some(messages)) = (current_buffer_id.as_ref(), current_buffer_messages.as_ref()) {
                                 if messages.len() >= INITIAL_LINES {
                                     ui.add_space(4.0);
@@ -1471,7 +1698,6 @@ impl eframe::App for WeeChatApp {
                                         let divider_color = Color32::from_rgb(200, 50, 50);
                                         ui.add_space(8.0);
                                         if elapsed < std::time::Duration::from_secs(2) {
-                                            // Text phase — schedule repaint for the transition.
                                             let remaining = std::time::Duration::from_secs(2) - elapsed;
                                             ctx.request_repaint_after(remaining);
                                             ui.horizontal(|ui| {
@@ -1481,7 +1707,6 @@ impl eframe::App for WeeChatApp {
                                                 ui.separator();
                                             });
                                         } else {
-                                            // Line phase — plain red rule.
                                             ui.scope(|ui| {
                                                 ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, divider_color);
                                                 ui.separator();
@@ -1493,7 +1718,6 @@ impl eframe::App for WeeChatApp {
 
                                     let msg_sections = ANSIParser::parse(&line.message, font_id.clone(), &self.theme);
 
-                                    // Collect image and preview URLs for display below
                                     let image_urls_in_line: Vec<String> = if self.show_inline_images {
                                         msg_sections.iter()
                                             .filter_map(|s| s.url.as_ref())
@@ -1513,9 +1737,6 @@ impl eframe::App for WeeChatApp {
                                         Vec::new()
                                     };
 
-                                    // Two-part row: fixed left anchor (timestamp + prefix) keeps
-                                    // wrapped message lines from bleeding back into the timestamp column.
-                                    // TOP alignment ensures timestamp/nick always share the first text line.
                                     let row_bg = if line.highlight {
                                         let c = Color32::from(self.theme.ansi[3]);
                                         Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 28)
@@ -1537,8 +1758,6 @@ impl eframe::App for WeeChatApp {
                                         for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.format); }
                                         ui.add(Label::new(prefix_job).wrap(false));
 
-                                        // Message column: takes all remaining width. horizontal_wrapped
-                                        // inside this vertical wraps back to the column's left edge, not x=0.
                                         let msg_col_width = ui.available_width();
                                         ui.vertical(|ui| {
                                             ui.set_min_width(msg_col_width);
@@ -1639,7 +1858,6 @@ impl eframe::App for WeeChatApp {
                                                 }
                                             });
 
-                                            // Image previews (inside message column — indented correctly)
                                             if self.show_inline_images {
                                                 for url in &image_urls_in_line {
                                                     if self.image_expanded.contains(url) {
@@ -1663,7 +1881,6 @@ impl eframe::App for WeeChatApp {
                                                 }
                                             }
 
-                                            // Link preview cards (inside message column — indented correctly)
                                             if self.show_link_previews {
                                                 for url in &preview_urls_in_line {
                                                     if !self.preview_expanded.contains(url) { continue; }
@@ -1735,25 +1952,81 @@ impl eframe::App for WeeChatApp {
             }
         });
 
+        // Process deferred actions after borrow of self is released from closures
+        if let Some((prefix, password)) = pending_connect {
+            // Find the profile for this prefix
+            let profile = self.profiles.iter().find(|p| p.prefix() == prefix).cloned();
+            if let Some(profile) = profile {
+                self.do_connect(&profile, password, ctx);
+            }
+        }
+
+        if let Some(prefix) = pending_disconnect {
+            if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == prefix) {
+                conn.client.disconnect();
+                conn.status = "Disconnected".to_string();
+                conn.is_connecting = false;
+                conn.connecting_pending = false;
+            }
+            // Remove buffers belonging to this connection
+            let pfx = format!("{}/", prefix);
+            self.buffers.retain(|b| !b.id.starts_with(&pfx));
+            if let Some(sel) = &self.selected_buffer_id {
+                if sel.starts_with(&pfx) {
+                    self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
+                }
+            }
+            self.connections.retain(|c| c.prefix != prefix);
+        }
+
+        if let Some(idx) = pending_delete_profile {
+            if idx < self.profiles.len() {
+                let profile = self.profiles.remove(idx);
+                // Also disconnect if active
+                let prefix = profile.prefix();
+                let pfx = format!("{}/", prefix);
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == prefix) {
+                    conn.client.disconnect();
+                }
+                self.connections.retain(|c| c.prefix != prefix);
+                self.buffers.retain(|b| !b.id.starts_with(&pfx));
+                if let Some(sel) = &self.selected_buffer_id {
+                    if sel.starts_with(&pfx) {
+                        self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
+                    }
+                }
+            }
+        }
+
+        if let Some(idx) = pending_edit_profile {
+            if idx < self.profiles.len() {
+                self.editing_profile = self.profiles[idx].clone();
+                self.editing_password = if self.profiles[idx].save_password {
+                    let key = self.profiles[idx].keyring_host_key();
+                    crate::ui::secure_storage::load_by_key(&key).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                self.editing_profile_idx = Some(idx);
+                self.show_add_connection = true;
+            }
+        }
+
         if let Some((buf_id, count)) = pending_load_more {
             self.loading_more_buffer_id = Some(buf_id.clone());
-            if let Some(client) = &self.client {
-                // For IRC backends use cursor-based history; for WeeChat use count-based.
+            if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
                 let oldest_ts = self.buffers.iter()
                     .find(|b| b.id == buf_id)
                     .and_then(|b| b.messages.front())
                     .map(|l| l.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
                 if let Some(ts) = oldest_ts {
-                    client.fetch_lines_before(&buf_id, &ts);
+                    client.fetch_lines_before(&raw_id, &ts);
                 }
-                client.fetch_lines(&buf_id, count);
+                client.fetch_lines(&raw_id, count);
             }
         }
 
-        // Safety-net: ensure we poll for relay events even if a background repaint
-        // was missed (e.g. during sleep or OS-level throttling). 100 ms cap keeps
-        // CPU near zero while guaranteeing at most a 100 ms delay on any message.
-        if self.client.is_some() {
+        if any_connected {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }

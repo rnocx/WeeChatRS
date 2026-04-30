@@ -306,18 +306,59 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
                 return events;
             }
 
+            // CTCP detection: \x01COMMAND[ params]\x01, but not ACTION (handled below)
+            let is_ctcp = text.starts_with('\x01') && text.ends_with('\x01')
+                && !text.starts_with("\x01ACTION");
+
+            if is_ctcp {
+                if msg.command == "NOTICE" {
+                    // CTCP replies (VERSION, PING, etc.) — pure protocol noise, drop silently
+                    return events;
+                }
+                // CTCP requests (PRIVMSG): auto-respond to PING and VERSION, ignore the rest
+                let inner = text.trim_matches('\x01');
+                let (ctcp_cmd, ctcp_arg) = inner.split_once(' ').unwrap_or((inner, ""));
+                match ctcp_cmd.to_uppercase().as_str() {
+                    "PING" => {
+                        session.whois_lines.push(format!("NOTICE {} :\x01PING {}\x01", nick, ctcp_arg));
+                    }
+                    "VERSION" => {
+                        session.whois_lines.push(format!(
+                            "NOTICE {} :\x01VERSION weechat-gui {}\x01",
+                            nick,
+                            env!("CARGO_PKG_VERSION")
+                        ));
+                    }
+                    _ => {}
+                }
+                return events;
+            }
+
+            // Server-originated message: prefix has no '!' (e.g. irc.server.net)
+            let is_server_source = !msg.prefix.as_deref().unwrap_or("").contains('!');
+
             let buffer_id = if is_channel(&target) {
                 target.to_lowercase()
+            } else if is_server_source {
+                // Route server NOTICEs to first joined channel rather than creating a DM
+                session.joined.iter().find(|id| is_channel(id)).cloned()
+                    .unwrap_or_else(|| session.joined.iter().next().cloned().unwrap_or_default())
             } else if nick.eq_ignore_ascii_case(&session.our_nick) {
                 target.to_lowercase()
             } else {
                 nick.to_lowercase()
             };
 
+            if buffer_id.is_empty() { return events; }
+
             let highlight = text.to_lowercase().contains(&session.our_nick.to_lowercase())
                 || target.eq_ignore_ascii_case(&session.our_nick);
 
-            let prefix = if msg.command == "NOTICE" { format!("-{}-", nick) } else { nick.clone() };
+            let prefix = if msg.command == "NOTICE" {
+                format!("-{}-", nick)
+            } else {
+                format!("{}{}\x1B[0m", nick_color_ansi(&nick), nick)
+            };
 
             let display_text = if let Some(inner) = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')) {
                 format!("* {} {}", nick, inner)
@@ -333,7 +374,8 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
                 }
             }
 
-            if !is_channel(&target) && !session.joined.contains(&buffer_id) {
+            // Only open a new DM buffer for real nick-to-nick messages, not server sources
+            if !is_channel(&target) && !is_server_source && !session.joined.contains(&buffer_id) {
                 session.joined.insert(buffer_id.clone());
                 let display_name = if nick.eq_ignore_ascii_case(&session.our_nick) { target.clone() } else { nick.clone() };
                 events.push(BackendEvent::BufferOpened(session.alloc_buffer(&buffer_id, &display_name, "private")));
@@ -583,12 +625,40 @@ pub fn spawn(
                                         break 'conn;
                                     }
                                     Some(IrcCommand::SendMessage { buffer_id, text }) => {
-                                        let irc_line = if let Some(cmd_text) = text.strip_prefix('/') {
-                                            format!("{}\r\n", cmd_text)
+                                        // /query <nick> — client-side command: open a DM buffer, nothing to send
+                                        if let Some(rest) = text.strip_prefix("/query ").or_else(|| text.strip_prefix("/QUERY ")) {
+                                            let target_nick = rest.trim().split_whitespace().next().unwrap_or("").to_string();
+                                            if !target_nick.is_empty() {
+                                                let buf_id = target_nick.to_lowercase();
+                                                if !session.joined.contains(&buf_id) {
+                                                    session.joined.insert(buf_id.clone());
+                                                    let buf = session.alloc_buffer(&buf_id, &target_nick, "private");
+                                                    send!(BackendEvent::BufferOpened(buf));
+                                                }
+                                            }
+                                        } else if let Some(cmd_text) = text.strip_prefix('/') {
+                                            let _ = write_half.write_all(format!("{}\r\n", cmd_text).as_bytes()).await;
                                         } else {
-                                            format!("PRIVMSG {} :{}\r\n", buffer_id, text)
-                                        };
-                                        let _ = write_half.write_all(irc_line.as_bytes()).await;
+                                            let _ = write_half.write_all(format!("PRIVMSG {} :{}\r\n", buffer_id, text).as_bytes()).await;
+                                            // Ensure a DM buffer exists for outgoing messages to non-channels
+                                            if !is_channel(&buffer_id) && !session.joined.contains(&buffer_id) {
+                                                session.joined.insert(buffer_id.clone());
+                                                let buf = session.alloc_buffer(&buffer_id, &buffer_id, "private");
+                                                send!(BackendEvent::BufferOpened(buf));
+                                            }
+                                            // Server won't echo our own PRIVMSG without echo-message CAP
+                                            line_counter += 1;
+                                            let display = if let Some(inner) = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')) {
+                                                format!("* {} {}", session.our_nick, inner)
+                                            } else {
+                                                text.clone()
+                                            };
+                                            let colored_nick = format!("{}{}\x1B[0m", nick_color_ansi(&session.our_nick), &session.our_nick);
+                                            send!(BackendEvent::LineAdded {
+                                                buffer_id,
+                                                line: make_line(&line_counter.to_string(), &colored_nick, &display, Utc::now(), false),
+                                            });
+                                        }
                                     }
                                     Some(IrcCommand::FetchNicks { buffer_id }) => {
                                         let _ = write_half.write_all(format!("NAMES {}\r\n", buffer_id).as_bytes()).await;

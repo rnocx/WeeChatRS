@@ -132,18 +132,21 @@ impl WeeChatApp {
 
         let is_command = msg.starts_with('/');
 
-        if let Some(client) = &self.client {
-            if let Some(buffer_id) = self.selected_buffer_id.clone() {
-                client.send_message(&buffer_id, &msg);
+        // Determine pending_buffer_switch before the borrow via client_for_buffer
+        if is_command {
+            if msg.starts_with("/query ") {
+                self.pending_buffer_switch = msg[7..].split_whitespace().next().map(|s| s.to_string());
+            } else if msg.starts_with("/join ") {
+                self.pending_buffer_switch = msg[6..].split_whitespace().next().map(|s| s.to_string());
             }
+        }
 
-            if is_command {
-                if msg.starts_with("/query ") {
-                    self.pending_buffer_switch = msg[7..].split_whitespace().next().map(|s| s.to_string());
-                } else if msg.starts_with("/join ") {
-                    self.pending_buffer_switch = msg[6..].split_whitespace().next().map(|s| s.to_string());
+        if let Some(buffer_id) = self.selected_buffer_id.clone() {
+            if let Some((client, raw_id)) = self.client_for_buffer(&buffer_id) {
+                client.send_message(&raw_id, &msg);
+                if is_command {
+                    client.fetch_buffer_list();
                 }
-                client.fetch_buffer_list();
             }
         }
 
@@ -166,17 +169,17 @@ impl WeeChatApp {
             self.pending_buffer_switch = Some(command[6..].trim().to_string());
         }
 
-        if let Some(client) = &self.client {
-            if let Some(buffer_id) = self.selected_buffer_id.clone() {
-                client.send_message(&buffer_id, command);
+        if let Some(buffer_id) = self.selected_buffer_id.clone() {
+            if let Some((client, raw_id)) = self.client_for_buffer(&buffer_id) {
+                client.send_message(&raw_id, command);
+                client.fetch_buffer_list();
             }
-            client.fetch_buffer_list();
         }
     }
 
     pub(crate) fn send_command_to_buffer(&mut self, buffer_id: &str, command: &str) {
-        if let Some(client) = &self.client {
-            client.send_message(buffer_id, command);
+        if let Some((client, raw_id)) = self.client_for_buffer(buffer_id) {
+            client.send_message(&raw_id, command);
             client.fetch_buffer_list();
         }
     }
