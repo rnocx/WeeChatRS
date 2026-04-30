@@ -90,4 +90,11 @@ impl BackendClient for IrcClient {
     fn fetch_buffer_list(&self) {
         // IRC buffers are discovered passively via JOIN
     }
+
+    fn fetch_lines_before(&self, buffer_id: &str, before_ts: &str) {
+        let _ = self.cmd_tx.send(IrcCommand::FetchBefore {
+            buffer_id: buffer_id.to_string(),
+            before_ts: before_ts.to_string(),
+        });
+    }
 }
