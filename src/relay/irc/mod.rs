@@ -77,8 +77,10 @@ impl BackendClient for IrcClient {
         });
     }
 
-    fn mark_read(&self, _buffer_id: &str) {
-        // soju.im/read-marker: future Phase 6
+    fn mark_read(&self, buffer_id: &str) {
+        let _ = self.cmd_tx.send(IrcCommand::MarkRead {
+            buffer_id: buffer_id.to_string(),
+        });
     }
 
     fn is_connected(&self) -> bool {

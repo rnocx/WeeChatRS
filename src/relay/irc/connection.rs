@@ -22,6 +22,7 @@ pub enum IrcCommand {
     SendMessage { buffer_id: String, text: String },
     FetchNicks { buffer_id: String },
     FetchBufferList,
+    MarkRead { buffer_id: String },
     Disconnect,
 }
 
@@ -447,6 +448,56 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
             events.push(BackendEvent::LineAdded { buffer_id: channel, line });
         }
 
+        // ── BOUNCER (soju.im/bouncer-networks) ───────────────────────────
+        "BOUNCER" => {
+            // :server BOUNCER NETWORK LIST id=<id>;name=<name>;state=<state>
+            // :server BOUNCER NETWORK LIST * :end of network list
+            let sub = msg.param(0).unwrap_or("").to_uppercase();
+            if sub == "NETWORK" {
+                let action = msg.param(1).unwrap_or("").to_uppercase();
+                if action == "LIST" {
+                    let attrs_str = msg.param(2).unwrap_or("");
+                    // '*' signals end of list
+                    if attrs_str == "*" { return events; }
+
+                    // Parse semicolon-separated key=value attrs
+                    let mut id = String::new();
+                    let mut name = String::new();
+                    let mut state = String::new();
+                    for pair in attrs_str.split(';') {
+                        if let Some((k, v)) = pair.split_once('=') {
+                            match k {
+                                "id"    => id    = v.to_string(),
+                                "name"  => name  = v.to_string(),
+                                "state" => state = v.to_string(),
+                                _ => {}
+                            }
+                        }
+                    }
+                    if name.is_empty() { name = id.clone(); }
+
+                    // Create a server-type buffer for each network
+                    let buf_id = format!("net/{}", id);
+                    let display = if state == "connected" {
+                        format!("[{}]", name)
+                    } else {
+                        format!("[{}] ({})", name, state)
+                    };
+                    let buf = session.alloc_buffer(&buf_id, &display, "server");
+                    events.push(BackendEvent::BufferOpened(buf));
+                }
+            }
+        }
+
+        // ── MARKREAD (soju.im/read-marker) ───────────────────────────────
+        "MARKREAD" => {
+            // :server MARKREAD #channel timestamp=<ISO8601>
+            // We receive this when another client updates the read marker.
+            // For now we just acknowledge it; future: sync unread counts.
+            let _target = msg.param(0).unwrap_or("");
+            let _stamp  = msg.param(1).unwrap_or("");
+        }
+
         // ── ERROR ─────────────────────────────────────────────────────────
         "ERROR" => {
             let text = msg.param(0).unwrap_or("Unknown error").to_string();
@@ -626,6 +677,16 @@ pub fn spawn(
                                     }
                                     Some(IrcCommand::FetchBufferList) => {
                                         // IRC discovers buffers via JOINs passively
+                                    }
+                                    Some(IrcCommand::MarkRead { buffer_id }) => {
+                                        if session.negotiated_caps.contains("soju.im/read-marker") {
+                                            let now = chrono::Utc::now()
+                                                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                                                .to_string();
+                                            let _ = ws_tx.send(Message::Text(
+                                                format!("MARKREAD {} timestamp={}\r\n", buffer_id, now).into()
+                                            )).await;
+                                        }
                                     }
                                 }
                             }
