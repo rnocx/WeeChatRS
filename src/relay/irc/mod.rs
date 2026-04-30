@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod connection;
 
 use crate::relay::backend::{BackendClient, BackendEvent};
