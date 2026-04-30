@@ -236,7 +236,7 @@ impl BackendClient for WeeChatClient {
         self.send_api(
             "POST /api/input",
             None,
-            Some(json!({ "buffer_id": buffer_id, "input": text })),
+            Some(json!({ "buffer_id": buffer_id.parse::<i64>().unwrap_or(0), "input": text })),
         );
     }
 
