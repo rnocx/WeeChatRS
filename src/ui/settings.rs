@@ -1,5 +1,5 @@
 use crate::ui::theme::{AppTheme, ThemeColor};
-use crate::ui::app::WeeChatApp;
+use crate::ui::app::{WeeChatApp, ConnectionProfile, BackendType};
 use crate::ui::fonts;
 use egui::{Color32, Vec2, RichText, ScrollArea, Frame, Rounding, Margin, Stroke};
 use egui::color_picker::{color_edit_button_srgba, Alpha};
@@ -66,6 +66,209 @@ impl WeeChatApp {
                     ui.add_space(6.0);
 
                     ScrollArea::vertical().show(ui, |ui| {
+                        // ── Connections ────────────────────────────────────────
+                        ui.label(RichText::new("Connections").strong());
+                        ui.add_space(6.0);
+
+                        // Collect pending actions to avoid borrow-checker conflicts
+                        let mut do_connect_idx: Option<usize> = None;
+                        let mut do_disconnect: Option<String> = None;
+                        let mut do_delete: Option<usize> = None;
+                        let mut do_edit: Option<usize> = None;
+                        let mut toggle_add = false;
+
+                        if self.settings_show_add {
+                            // ── Add / Edit form ──────────────────────────────
+                            Frame::none()
+                                .fill(if is_light { Color32::from_gray(225) } else { Color32::from_rgb(32, 32, 42) })
+                                .rounding(Rounding::same(8.0))
+                                .stroke(Stroke::new(1.0, accent_color.linear_multiply(0.4)))
+                                .inner_margin(Margin::same(14.0))
+                                .show(ui, |ui| {
+                                    let title = if self.editing_profile_idx.is_some() { "Edit Connection" } else { "New Connection" };
+                                    ui.label(RichText::new(title).strong());
+                                    ui.add_space(8.0);
+
+                                    egui::Grid::new("settings_add_conn_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                                        ui.label("Label:");
+                                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.label).desired_width(200.0));
+                                        ui.end_row();
+                                        ui.label("Backend:");
+                                        ui.horizontal(|ui| {
+                                            ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::WeeChat, "WeeChat Relay");
+                                            ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::Soju, "Soju IRC");
+                                        });
+                                        ui.end_row();
+                                        ui.label("Host:");
+                                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.host).desired_width(200.0));
+                                        ui.end_row();
+                                        ui.label("Port:");
+                                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.port).desired_width(200.0));
+                                        ui.end_row();
+                                        if self.editing_profile.backend_type == BackendType::Soju {
+                                            ui.label("Nick:");
+                                            ui.add(egui::TextEdit::singleline(&mut self.editing_profile.nick).desired_width(200.0));
+                                            ui.end_row();
+                                        }
+                                        ui.label("Password:");
+                                        ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).desired_width(200.0));
+                                        ui.end_row();
+                                    });
+                                    ui.add_space(6.0);
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(&mut self.editing_profile.use_ssl, "SSL");
+                                        if self.editing_profile.use_ssl {
+                                            ui.checkbox(&mut self.editing_profile.accept_invalid_certs, "Accept self-signed");
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
+                                        ui.checkbox(&mut self.editing_profile.save_password, "Save password");
+                                    });
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        if ui.add(
+                                            egui::Button::new(RichText::new("Save").strong().color(Color32::WHITE))
+                                                .fill(accent_color).min_size(Vec2::new(80.0, 28.0))
+                                        ).clicked() {
+                                            if self.editing_profile.save_password && !self.editing_password.is_empty() {
+                                                let key = self.editing_profile.keyring_host_key();
+                                                let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_password);
+                                            }
+                                            let profile = self.editing_profile.clone();
+                                            if let Some(idx) = self.editing_profile_idx {
+                                                if idx < self.profiles.len() { self.profiles[idx] = profile; }
+                                            } else {
+                                                self.profiles.push(profile);
+                                            }
+                                            self.settings_show_add = false;
+                                            self.editing_profile = ConnectionProfile::default();
+                                            self.editing_password.clear();
+                                            self.editing_profile_idx = None;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            self.settings_show_add = false;
+                                            self.editing_profile = ConnectionProfile::default();
+                                            self.editing_password.clear();
+                                            self.editing_profile_idx = None;
+                                        }
+                                    });
+                                });
+                        } else {
+                            // ── Profile list ─────────────────────────────────
+                            for (idx, profile) in self.profiles.iter().enumerate() {
+                                let prefix = profile.prefix();
+                                let conn_opt = self.connections.iter().find(|c| c.prefix == prefix);
+                                let is_connected = conn_opt.map(|c| c.client.is_connected()).unwrap_or(false);
+                                let is_pending = conn_opt.map(|c| c.connecting_pending).unwrap_or(false);
+                                let has_error = conn_opt.and_then(|c| c.auth_error.as_ref()).is_some();
+                                let dot_color = if is_connected && !is_pending {
+                                    Color32::from_rgb(50, 205, 50)
+                                } else if is_pending {
+                                    Color32::from_rgb(255, 165, 0)
+                                } else if has_error {
+                                    Color32::from_rgb(220, 60, 60)
+                                } else {
+                                    Color32::from_gray(120)
+                                };
+
+                                Frame::none()
+                                    .fill(if is_light { Color32::from_gray(225) } else { Color32::from_rgb(32, 32, 42) })
+                                    .rounding(Rounding::same(6.0))
+                                    .inner_margin(Margin::symmetric(10.0, 6.0))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("●").color(dot_color).size(11.0));
+                                            ui.label(RichText::new(&profile.label).strong());
+                                            let badge = match profile.backend_type { BackendType::WeeChat => "WeeChat", BackendType::Soju => "IRC" };
+                                            ui.label(RichText::new(badge).small().color(accent_color));
+                                            ui.label(RichText::new(format!("{}:{}", profile.host, profile.port)).small().color(ui.visuals().weak_text_color()));
+
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.small_button("✕").on_hover_text("Delete").clicked() { do_delete = Some(idx); }
+                                                if ui.small_button("✎").on_hover_text("Edit").clicked() { do_edit = Some(idx); }
+                                                if is_connected || is_pending {
+                                                    if ui.button("Disconnect").clicked() { do_disconnect = Some(prefix.clone()); }
+                                                } else if self.settings_connect_idx == Some(idx) {
+                                                    // Password prompt inline
+                                                    ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).hint_text("Password…").desired_width(120.0));
+                                                    if ui.button("OK").clicked() { do_connect_idx = Some(idx); }
+                                                    if ui.button("✕").clicked() { self.settings_connect_idx = None; self.editing_password.clear(); }
+                                                } else {
+                                                    if ui.button("Connect").clicked() {
+                                                        // Check if password is saved; if so connect directly
+                                                        let key = profile.keyring_host_key();
+                                                        if let Some(pw) = crate::ui::secure_storage::load_by_key(&key) {
+                                                            self.editing_password = pw;
+                                                            do_connect_idx = Some(idx);
+                                                        } else {
+                                                            self.settings_connect_idx = Some(idx);
+                                                            self.editing_password.clear();
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        });
+                                        // Show error under the row
+                                        if let Some(err) = conn_opt.and_then(|c| c.auth_error.as_ref()) {
+                                            ui.label(RichText::new(format!("⚠ {}", err)).small().color(Color32::from_rgb(220, 80, 80)));
+                                        }
+                                    });
+                                ui.add_space(4.0);
+                            }
+
+                            if ui.add(
+                                egui::Button::new(RichText::new("+ Add Connection").color(accent_color))
+                                    .fill(Color32::TRANSPARENT)
+                                    .stroke(Stroke::new(1.0, accent_color))
+                                    .min_size(Vec2::new(0.0, 28.0))
+                            ).clicked() {
+                                toggle_add = true;
+                            }
+                        }
+
+                        // Process deferred actions
+                        if let Some(idx) = do_connect_idx {
+                            if idx < self.profiles.len() {
+                                let profile = self.profiles[idx].clone();
+                                let password = std::mem::take(&mut self.editing_password);
+                                self.settings_connect_idx = None;
+                                self.do_connect(&profile, password, ui.ctx());
+                            }
+                        }
+                        if let Some(prefix) = do_disconnect {
+                            if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == prefix) {
+                                conn.client.disconnect();
+                            }
+                        }
+                        if let Some(idx) = do_delete {
+                            if idx < self.profiles.len() {
+                                self.profiles.remove(idx);
+                                if self.settings_connect_idx == Some(idx) { self.settings_connect_idx = None; }
+                            }
+                        }
+                        if let Some(idx) = do_edit {
+                            if idx < self.profiles.len() {
+                                let key = self.profiles[idx].keyring_host_key();
+                                self.editing_profile = self.profiles[idx].clone();
+                                self.editing_password = crate::ui::secure_storage::load_by_key(&key).unwrap_or_default();
+                                self.editing_profile_idx = Some(idx);
+                                self.settings_show_add = true;
+                            }
+                        }
+                        if toggle_add {
+                            self.editing_profile = ConnectionProfile::default();
+                            self.editing_password.clear();
+                            self.editing_profile_idx = None;
+                            self.settings_show_add = true;
+                        }
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // ── General settings ───────────────────────────────────
                         ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                             ui.checkbox(&mut show_filtered_lines, "Show filtered lines");
                             ui.checkbox(&mut colored_nicks, "Colored nicknames in list");

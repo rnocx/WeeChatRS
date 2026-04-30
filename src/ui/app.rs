@@ -364,7 +364,9 @@ pub struct WeeChatApp {
     pub(crate) editing_profile: ConnectionProfile,
     pub(crate) editing_password: String,
     pub(crate) editing_profile_idx: Option<usize>,
-    pub(crate) show_add_connection: bool,
+    pub(crate) show_add_connection: bool,     // central-panel landing form
+    pub(crate) settings_show_add: bool,       // add/edit form inside the settings panel
+    pub(crate) settings_connect_idx: Option<usize>, // index awaiting password before connect
 
     pub(crate) buffers: Vec<Buffer>,
     pub(crate) selected_buffer_id: Option<String>,
@@ -499,6 +501,8 @@ impl WeeChatApp {
             editing_password: String::new(),
             editing_profile_idx: None,
             show_add_connection: false,
+            settings_show_add: false,
+            settings_connect_idx: None,
             buffers: Vec::new(),
             selected_buffer_id: None,
             input_text: String::new(),
@@ -1394,7 +1398,7 @@ impl eframe::App for WeeChatApp {
                             });
                     });
                 });
-            } else if !any_connected || self.show_add_connection {
+            } else if self.profiles.is_empty() && !any_connected {
                 // Connection panel
                 ui.vertical_centered(|ui| {
                     ui.add_space(ctx.available_rect().height() * 0.1);
