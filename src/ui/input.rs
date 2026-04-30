@@ -133,15 +133,8 @@ impl WeeChatApp {
         let is_command = msg.starts_with('/');
 
         if let Some(client) = &self.client {
-            if let Some(buffer) = self.selected_buffer_id.as_ref()
-                .and_then(|id| self.buffers.iter().find(|b| &b.id == id))
-            {
-                if let Ok(numeric_id) = buffer.id.parse::<i64>() {
-                    client.send_api("POST /api/input", None, Some(serde_json::json!({
-                        "buffer_id": numeric_id,
-                        "command": msg
-                    })));
-                }
+            if let Some(buffer_id) = self.selected_buffer_id.clone() {
+                client.send_message(&buffer_id, &msg);
             }
 
             if is_command {
@@ -150,7 +143,7 @@ impl WeeChatApp {
                 } else if msg.starts_with("/join ") {
                     self.pending_buffer_switch = msg[6..].split_whitespace().next().map(|s| s.to_string());
                 }
-                client.send_api("GET /api/buffers", Some("_list_buffers"), None);
+                client.fetch_buffer_list();
             }
         }
 
@@ -174,29 +167,17 @@ impl WeeChatApp {
         }
 
         if let Some(client) = &self.client {
-            if let Some(buffer) = self.selected_buffer_id.as_ref()
-                .and_then(|id| self.buffers.iter().find(|b| &b.id == id))
-            {
-                if let Ok(numeric_id) = buffer.id.parse::<i64>() {
-                    client.send_api("POST /api/input", None, Some(serde_json::json!({
-                        "buffer_id": numeric_id,
-                        "command": command
-                    })));
-                }
+            if let Some(buffer_id) = self.selected_buffer_id.clone() {
+                client.send_message(&buffer_id, command);
             }
-            client.send_api("GET /api/buffers", Some("_list_buffers"), None);
+            client.fetch_buffer_list();
         }
     }
 
     pub(crate) fn send_command_to_buffer(&mut self, buffer_id: &str, command: &str) {
         if let Some(client) = &self.client {
-            if let Ok(numeric_id) = buffer_id.parse::<i64>() {
-                client.send_api("POST /api/input", None, Some(serde_json::json!({
-                    "buffer_id": numeric_id,
-                    "command": command
-                })));
-            }
-            client.send_api("GET /api/buffers", Some("_list_buffers"), None);
+            client.send_message(buffer_id, command);
+            client.fetch_buffer_list();
         }
     }
 }

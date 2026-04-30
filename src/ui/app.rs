@@ -1,4 +1,6 @@
-use crate::relay::client::{RelayClient, RelayEvent};
+use crate::relay::backend::{BackendClient, BackendEvent};
+use crate::relay::weechat::{WeeChatClient, WeeChatConfig};
+use crate::relay::client::RelayEvent; // still used by event_handler
 use crate::relay::models::*;
 use crate::ui::ansi::ANSIParser;
 use crate::ui::theme::AppTheme;
@@ -174,8 +176,17 @@ fn apply_drag_reorder(buffers: &mut Vec<Buffer>, drag_id: &str, drop_before_id: 
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub enum BackendType {
+    #[default]
+    WeeChat,
+    Soju,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub backend_type: BackendType,
     pub host: String,
     pub port: String,
     pub use_ssl: bool,
@@ -258,6 +269,7 @@ impl Default for AppSettings {
             nicklist_width: 0.0,
             buffers_width: 0.0,
             accept_invalid_certs: false,
+            backend_type: BackendType::WeeChat,
         }
     }
 }
@@ -268,12 +280,13 @@ pub struct WeeChatApp {
     pub(crate) password: String,
     pub(crate) save_password: bool,
     pub(crate) password_from_keyring: bool,
+    pub(crate) backend_type: BackendType,
     pub(crate) use_ssl: bool,
     pub(crate) accept_invalid_certs: bool,
 
-    pub(crate) client: Option<RelayClient>,
-    pub(crate) event_rx: mpsc::UnboundedReceiver<RelayEvent>,
-    pub(crate) event_tx: mpsc::UnboundedSender<RelayEvent>,
+    pub(crate) client: Option<Box<dyn BackendClient>>,
+    pub(crate) event_rx: mpsc::UnboundedReceiver<BackendEvent>,
+    pub(crate) event_tx: mpsc::UnboundedSender<BackendEvent>,
     
     pub(crate) connection_status: String,
     pub(crate) is_connecting: bool,
@@ -376,7 +389,7 @@ pub(crate) struct CompletionState {
 
 impl WeeChatApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<BackendEvent>();
         let (image_tx, image_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
 
@@ -400,6 +413,7 @@ impl WeeChatApp {
             password: saved_password.unwrap_or_default(),
             save_password: settings.save_password,
             password_from_keyring,
+            backend_type: settings.backend_type,
             use_ssl: settings.use_ssl,
             accept_invalid_certs: settings.accept_invalid_certs,
             client: None,
@@ -505,12 +519,7 @@ impl WeeChatApp {
         if let Some(prev_id) = self.selected_buffer_id.clone() {
             if prev_id != id {
                 if let Some(client) = &self.client {
-                    if let Ok(numeric_id) = prev_id.parse::<i64>() {
-                        client.send_api("POST /api/input", None, Some(serde_json::json!({
-                            "buffer_id": numeric_id,
-                            "command": "/input hotlist_clear"
-                        })));
-                    }
+                    client.mark_read(&prev_id);
                 }
             }
         }
@@ -527,18 +536,12 @@ impl WeeChatApp {
             buffer.visit_start_marker_id = buffer.last_read_id.clone();
             let fetch_nicks = buffer.has_nicklist;
             if let Some(client) = &self.client {
-                client.send_api(&format!("GET /api/buffers/{}", id), Some(&format!("_buffer_info:{}", id)), None);
-                client.send_api(&format!("GET /api/buffers/{}/lines?lines=-{}", id, INITIAL_LINES), Some(&format!("_buffer_lines:{}", id)), None);
+                client.refresh_buffer(&id);
+                client.fetch_lines(&id, INITIAL_LINES);
                 if fetch_nicks {
-                    client.send_api(&format!("GET /api/buffers/{}/nicks", id), Some(&format!("_nicks:{}", id)), None);
+                    client.fetch_nicks(&id);
                 }
-                // Also clear hotlist on entry so it's covered if we entered directly.
-                if let Ok(numeric_id) = id.parse::<i64>() {
-                    client.send_api("POST /api/input", None, Some(serde_json::json!({
-                        "buffer_id": numeric_id,
-                        "command": "/input hotlist_clear"
-                    })));
-                }
+                client.mark_read(&id);
             }
         }
     }
@@ -558,6 +561,7 @@ impl WeeChatApp {
 impl eframe::App for WeeChatApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let settings = AppSettings {
+            backend_type: self.backend_type.clone(),
             host: self.host.clone(),
             port: self.port.clone(),
             use_ssl: self.use_ssl,
@@ -593,7 +597,16 @@ impl eframe::App for WeeChatApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(event) = self.event_rx.try_recv() {
-            self.handle_event(event);
+            match event {
+                // Tunnel: WeeChat relay responses still handled by the legacy handler.
+                BackendEvent::_WeeChat(resp) => self.handle_event(RelayEvent::Message(resp)),
+                BackendEvent::Connected => self.handle_event(RelayEvent::Connected),
+                BackendEvent::Disconnected => self.handle_event(RelayEvent::Disconnected),
+                BackendEvent::Error(e) => self.handle_event(RelayEvent::Error(e)),
+                BackendEvent::AuthError(e) => self.handle_event(RelayEvent::Error(e)),
+                // Generic BackendEvents not yet produced by WeeChat backend — ignore for now.
+                _ => {}
+            }
         }
 
         while let Ok((url, result)) = self.image_rx.try_recv() {
@@ -803,7 +816,7 @@ impl eframe::App for WeeChatApp {
                             ui.label(egui::RichText::new(status_text).color(status_color).small());
                             
                             if ui.button("Disconnect").clicked() {
-                                if let Some(client) = &self.client {
+                                if let Some(client) = self.client.as_mut() {
                                     client.disconnect();
                                 }
                                 self.client = None;
@@ -1247,7 +1260,14 @@ impl eframe::App for WeeChatApp {
                             ui.set_max_width(400.0);
                             ui.heading(egui::RichText::new("Connect to WeeChatRS").strong().size(24.0));
                             ui.add_space(20.0);
-                            
+
+                            ui.horizontal(|ui| {
+                                ui.label("Backend:");
+                                ui.selectable_value(&mut self.backend_type, BackendType::WeeChat, "WeeChat Relay");
+                                ui.selectable_value(&mut self.backend_type, BackendType::Soju, "Soju IRC");
+                            });
+                            ui.add_space(10.0);
+
                             egui::Grid::new("login_grid").num_columns(2).spacing([15.0, 15.0]).show(ui, |ui| {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Host:"); });
                                 if ui.add(egui::TextEdit::singleline(&mut self.host).desired_width(240.0)).changed() { self.auth_error = None; }
@@ -1313,7 +1333,16 @@ impl eframe::App for WeeChatApp {
                                     self.log_conn(format!("Connecting to {}://{}:{}/api", proto, self.host, port));
                                     self.log_conn(format!("SSL/TLS: {}", if self.use_ssl { "enabled" } else { "disabled" }));
                                     self.log_conn("Auth method: base64url bearer token over Sec-WebSocket-Protocol header");
-                                    self.client = Some(RelayClient::connect(self.host.clone(), port, self.password.clone(), self.use_ssl, self.accept_invalid_certs, self.event_tx.clone(), ctx.clone()));
+                                    let config = WeeChatConfig {
+                                        host: self.host.clone(),
+                                        port,
+                                        password: self.password.clone(),
+                                        use_ssl: self.use_ssl,
+                                        accept_invalid_certs: self.accept_invalid_certs,
+                                    };
+                                    let mut backend = WeeChatClient::new(config, self.event_tx.clone(), ctx.clone());
+                                    backend.connect();
+                                    self.client = Some(Box::new(backend));
                                 }
                             });
 
@@ -1693,11 +1722,7 @@ impl eframe::App for WeeChatApp {
         if let Some((buf_id, count)) = pending_load_more {
             self.loading_more_buffer_id = Some(buf_id.clone());
             if let Some(client) = &self.client {
-                client.send_api(
-                    &format!("GET /api/buffers/{}/lines?lines=-{}", buf_id, count),
-                    Some(&format!("_buffer_lines:{}", buf_id)),
-                    None,
-                );
+                client.fetch_lines(&buf_id, count);
             }
         }
 
