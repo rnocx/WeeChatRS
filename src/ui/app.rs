@@ -480,6 +480,10 @@ impl WeeChatApp {
         );
     }
 
+    pub(crate) fn is_twemoji_url(url: &str) -> bool {
+        url.contains("cdnjs.cloudflare.com/ajax/libs/twemoji")
+    }
+
     pub(crate) fn is_image_url(url: &str) -> bool {
         let path = url.split('?').next().unwrap_or(url).to_lowercase();
         matches!(
@@ -804,7 +808,7 @@ impl eframe::App for WeeChatApp {
             if self.buffers_width == 0.0 {
                 let buf_font_id = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
                 let char_w = ctx.fonts(|f| f.glyph_width(&buf_font_id, 'W'));
-                self.buffers_width = char_w * 40.0 + 20.0; // 40 chars + 2×10px inner margin
+                self.buffers_width = char_w * 20.0 + 20.0; // 20 chars + 2×10px inner margin
             }
             let buffers_resp = egui::SidePanel::left("buffers_panel")
                 .resizable(true)
@@ -1069,7 +1073,7 @@ impl eframe::App for WeeChatApp {
             // Initialise width to 12 characters wide on first launch (sentinel 0.0 means unset).
             if self.nicklist_width == 0.0 {
                 let char_w = ctx.fonts(|f| f.glyph_width(&font_id, 'W'));
-                self.nicklist_width = char_w * 25.0 + 20.0; // 25 chars + 2×10px inner margin
+                self.nicklist_width = char_w * 15.0 + 20.0; // 15 chars + 2×10px inner margin
             }
             let nicks_resp = egui::SidePanel::right("nicks_panel")
                 .resizable(true)
@@ -1436,7 +1440,7 @@ impl eframe::App for WeeChatApp {
                                     let image_urls_in_line: Vec<String> = if self.show_inline_images {
                                         msg_sections.iter()
                                             .filter_map(|s| s.url.as_ref())
-                                            .filter(|u| Self::is_image_url(u))
+                                            .filter(|u| Self::is_image_url(u) && !Self::is_twemoji_url(u))
                                             .cloned()
                                             .collect()
                                     } else {
@@ -1445,7 +1449,7 @@ impl eframe::App for WeeChatApp {
                                     let preview_urls_in_line: Vec<String> = if self.show_link_previews {
                                         msg_sections.iter()
                                             .filter_map(|s| s.url.as_ref())
-                                            .filter(|u| !Self::is_image_url(u))
+                                            .filter(|u| !Self::is_image_url(u) && !Self::is_twemoji_url(u))
                                             .cloned()
                                             .collect()
                                     } else {
@@ -1532,9 +1536,44 @@ impl eframe::App for WeeChatApp {
                                                             }
                                                         }
                                                     } else {
-                                                        let mut job = LayoutJob::default();
-                                                        job.append(&s.text, 0.0, s.format.clone());
-                                                        ui.add(Label::new(job).wrap(true));
+                                                        let emoji_size = font_id.size + 2.0;
+                                                        for span in crate::ui::emoji::split_emoji(&s.text) {
+                                                            match span {
+                                                                crate::ui::emoji::TextSpan::Text(t) => {
+                                                                    let mut job = LayoutJob::default();
+                                                                    job.append(&t, 0.0, s.format.clone());
+                                                                    ui.add(Label::new(job).wrap(true));
+                                                                }
+                                                                crate::ui::emoji::TextSpan::Emoji(e) => {
+                                                                    let eurl = crate::ui::emoji::emoji_to_twemoji_url(&e);
+                                                                    if !self.image_cache.contains_key(&eurl) {
+                                                                        self.image_cache.insert(eurl.clone(), ImageState::Loading);
+                                                                        let tx = self.image_tx.clone();
+                                                                        let url_owned = eurl.clone();
+                                                                        tokio::spawn(async move {
+                                                                            let result: Result<Vec<u8>, String> = async {
+                                                                                let bytes = reqwest::get(&url_owned).await
+                                                                                    .map_err(|e| e.to_string())?
+                                                                                    .bytes().await
+                                                                                    .map_err(|e| e.to_string())?;
+                                                                                Ok(bytes.to_vec())
+                                                                            }.await;
+                                                                            let _ = tx.send((url_owned, result));
+                                                                        });
+                                                                    }
+                                                                    match self.image_cache.get(&eurl) {
+                                                                        Some(ImageState::Loaded(texture)) => {
+                                                                            ui.add(egui::Image::new((texture.id(), egui::Vec2::splat(emoji_size))));
+                                                                        }
+                                                                        _ => {
+                                                                            let mut job = LayoutJob::default();
+                                                                            job.append(&e, 0.0, s.format.clone());
+                                                                            ui.add(Label::new(job).wrap(true));
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             });
