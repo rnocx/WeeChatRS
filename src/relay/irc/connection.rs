@@ -23,6 +23,7 @@ pub enum IrcCommand {
     FetchNicks { buffer_id: String },
     FetchBufferList,
     MarkRead { buffer_id: String },
+    FetchBefore { buffer_id: String, before_ts: String },
     Disconnect,
 }
 
@@ -43,6 +44,8 @@ struct Session {
     next_number: i32,
     /// Accumulating NAMES lists (lowercased channel → nicks).
     names_buf: HashMap<String, Vec<Nick>>,
+    /// Open BATCH blocks: ref → (buffer_id, accumulated lines).
+    batch_buf: HashMap<String, (String, Vec<Line>)>,
     /// Outbound raw IRC lines queued during handshake, drained after WS ready.
     write_buf: Vec<String>,
 }
@@ -59,6 +62,7 @@ impl Session {
             joined: HashSet::new(),
             next_number: 1,
             names_buf: HashMap::new(),
+            batch_buf: HashMap::new(),
             write_buf: Vec::new(),
         }
     }
@@ -366,6 +370,28 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
             }
         }
 
+        // ── BATCH ─────────────────────────────────────────────────────────
+        "BATCH" => {
+            let ref_param = msg.param(0).unwrap_or("");
+            if let Some(batch_ref) = ref_param.strip_prefix('+') {
+                // Opening a batch: BATCH +<ref> chathistory <target>
+                let kind = msg.param(1).unwrap_or("");
+                if kind == "chathistory" {
+                    let target = msg.param(2).unwrap_or("").to_lowercase();
+                    session.batch_buf.insert(batch_ref.to_string(), (target, Vec::new()));
+                }
+            } else if let Some(batch_ref) = ref_param.strip_prefix('-') {
+                // Closing a batch — emit collected lines as LinesLoaded (prepend)
+                if let Some((buffer_id, lines)) = session.batch_buf.remove(batch_ref) {
+                    events.push(BackendEvent::LinesLoaded {
+                        buffer_id,
+                        lines,
+                        is_prepend: true,
+                    });
+                }
+            }
+        }
+
         // ── PRIVMSG / NOTICE ──────────────────────────────────────────────
         "PRIVMSG" | "NOTICE" => {
             let target = msg.param(0).unwrap_or("").to_string();
@@ -399,7 +425,17 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
             };
 
             *line_counter += 1;
-            let line = make_line(&line_counter.to_string(), &prefix, &display_text, ts, highlight);
+            let id = line_counter.to_string();
+            let line = make_line(&id, &prefix, &display_text, ts, highlight);
+
+            // If this message belongs to an open batch, accumulate it there
+            if let Some(batch_ref) = msg.tag("batch") {
+                if let Some((_buf, lines)) = session.batch_buf.get_mut(batch_ref) {
+                    lines.push(line);
+                    return events;
+                }
+            }
+
             events.push(BackendEvent::LineAdded { buffer_id, line });
         }
 
@@ -685,6 +721,13 @@ pub fn spawn(
                                                 .to_string();
                                             let _ = ws_tx.send(Message::Text(
                                                 format!("MARKREAD {} timestamp={}\r\n", buffer_id, now).into()
+                                            )).await;
+                                        }
+                                    }
+                                    Some(IrcCommand::FetchBefore { buffer_id, before_ts }) => {
+                                        if session.negotiated_caps.contains("chathistory") {
+                                            let _ = ws_tx.send(Message::Text(
+                                                format!("CHATHISTORY BEFORE {} timestamp={} 100\r\n", buffer_id, before_ts).into()
                                             )).await;
                                         }
                                     }

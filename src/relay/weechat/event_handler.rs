@@ -170,6 +170,9 @@ impl WeeChatApp {
                         }
                     }
                 }
+                if self.loading_more_buffer_id.as_deref() == Some(&buffer_id) {
+                    self.loading_more_buffer_id = None;
+                }
             }
             BackendEvent::BufferHidden { buffer_id, hidden } => {
                 if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {

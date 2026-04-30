@@ -1738,6 +1738,14 @@ impl eframe::App for WeeChatApp {
         if let Some((buf_id, count)) = pending_load_more {
             self.loading_more_buffer_id = Some(buf_id.clone());
             if let Some(client) = &self.client {
+                // For IRC backends use cursor-based history; for WeeChat use count-based.
+                let oldest_ts = self.buffers.iter()
+                    .find(|b| b.id == buf_id)
+                    .and_then(|b| b.messages.front())
+                    .map(|l| l.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
+                if let Some(ts) = oldest_ts {
+                    client.fetch_lines_before(&buf_id, &ts);
+                }
                 client.fetch_lines(&buf_id, count);
             }
         }

@@ -111,4 +111,9 @@ pub trait BackendClient: Send {
     /// Subscribe to server-push events. WeeChat uses POST /api/sync; IRC has
     /// no equivalent; default is a no-op.
     fn sync_subscriptions(&self) {}
+
+    /// Request lines older than a given anchor timestamp (ISO 8601).
+    /// Used by IRC backends for CHATHISTORY BEFORE; WeeChat uses fetch_lines.
+    /// Default is a no-op.
+    fn fetch_lines_before(&self, _buffer_id: &str, _before_ts: &str) {}
 }
