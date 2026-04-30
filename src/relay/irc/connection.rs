@@ -46,6 +46,12 @@ struct Session {
     names_buf: HashMap<String, Vec<Nick>>,
     /// Open BATCH blocks: ref → (buffer_id, accumulated lines).
     batch_buf: HashMap<String, (String, Vec<Line>)>,
+    /// WHO reply accumulation: channel → nicks.
+    who_buf: HashMap<String, Vec<Nick>>,
+    /// Nick being WHOISed (from 311).
+    whois_target: Option<String>,
+    /// Lines accumulated for a WHOIS response.
+    whois_lines: Vec<String>,
     /// Outbound raw IRC lines queued during handshake, drained after WS ready.
     write_buf: Vec<String>,
 }
@@ -63,6 +69,9 @@ impl Session {
             next_number: 1,
             names_buf: HashMap::new(),
             batch_buf: HashMap::new(),
+            who_buf: HashMap::new(),
+            whois_target: None,
+            whois_lines: Vec::new(),
             write_buf: Vec::new(),
         }
     }
@@ -248,8 +257,10 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
                 session.joined.insert(chan_lower.clone());
                 let buf = session.alloc_buffer(&chan_lower, &channel, "channel");
                 events.push(BackendEvent::BufferOpened(buf));
-                // Request NAMES (soju delivers them automatically, but ask anyway)
+                // Request NAMES for the nicklist
                 session.write_buf.push(format!("NAMES {}", channel));
+                // WHO gives us away status and prefixes beyond what NAMES provides
+                session.write_buf.push(format!("WHO {}", channel));
                 // Request chathistory if negotiated
                 if session.negotiated_caps.contains("chathistory") {
                     session.write_buf.push(format!("CHATHISTORY LATEST {} * 100", channel));
@@ -398,6 +409,12 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
             let text = msg.param(1).unwrap_or("").to_string();
             let nick = msg.nick().unwrap_or("*").to_string();
             let ts = timestamp_from_msg(msg);
+
+            // Server NOTICEs before registration surface in the connection log
+            if msg.command == "NOTICE" && !session.registered {
+                events.push(BackendEvent::Error(format!("[server] {}", text)));
+                return events;
+            }
 
             let buffer_id = if is_channel(&target) {
                 target.to_lowercase()
@@ -557,6 +574,93 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64) ->
             let base = session.our_nick.trim_end_matches('_').to_string();
             session.our_nick = format!("{}_", base);
             session.write_buf.push(format!("NICK {}", session.our_nick));
+        }
+
+        // ── Auth error numerics ───────────────────────────────────────────
+        // 464 ERR_PASSWDMISMATCH, 465 ERR_YOUREBANNEDCREEP, 432 ERR_ERRONEUSNICKNAME
+        "464" | "465" => {
+            let reason = msg.params.last().map(String::as_str).unwrap_or("Password incorrect");
+            events.push(BackendEvent::AuthError(reason.to_string()));
+        }
+        "432" => {
+            let reason = msg.params.last().map(String::as_str).unwrap_or("Erroneous nickname");
+            events.push(BackendEvent::AuthError(reason.to_string()));
+        }
+
+        // ── 352 RPL_WHOREPLY ──────────────────────────────────────────────
+        // :server 352 our_nick #channel user host server nick H :0 realname
+        "352" => {
+            let channel  = msg.param(1).unwrap_or("").to_lowercase();
+            let nick     = msg.param(5).unwrap_or("").to_string();
+            let flags    = msg.param(6).unwrap_or(""); // H=here G=gone
+            let realname = msg.params.last().map(String::as_str).unwrap_or("");
+            let realname = realname.splitn(2, ' ').nth(1).unwrap_or(realname); // strip hop count
+            let away     = flags.contains('G');
+
+            // Update nick prefix with away marker if needed (@ and + from WHO flags)
+            let prefix = if flags.contains('@') { "@" }
+                         else if flags.contains('+') { "+" }
+                         else { "" };
+
+            let bucket = session.who_buf.entry(channel).or_default();
+            if let Some(existing) = bucket.iter_mut().find(|n| n.name == nick) {
+                existing.prefix = prefix.to_string();
+            } else {
+                bucket.push(Nick {
+                    name: nick.clone(),
+                    prefix: prefix.to_string(),
+                    color_ansi: nick_color_ansi(&nick),
+                });
+            }
+            let _ = (away, realname); // reserved for future away-notify display
+        }
+
+        // ── 315 RPL_ENDOFWHO ──────────────────────────────────────────────
+        "315" => {
+            let channel = msg.param(1).unwrap_or("").to_lowercase();
+            if let Some(nicks) = session.who_buf.remove(&channel) {
+                if !nicks.is_empty() {
+                    events.push(BackendEvent::NicklistLoaded { buffer_id: channel, nicks });
+                }
+            }
+        }
+
+        // ── 311/312/313/317/318/319 WHOIS ─────────────────────────────────
+        "311" => {
+            // :server 311 us nick user host * :realname
+            let nick     = msg.param(1).unwrap_or("").to_string();
+            let user     = msg.param(2).unwrap_or("").to_string();
+            let host     = msg.param(3).unwrap_or("").to_string();
+            let realname = msg.params.last().map(String::as_str).unwrap_or("").to_string();
+            session.whois_target = Some(nick.clone());
+            session.whois_lines.push(format!("[whois] {} ({}@{}) — {}", nick, user, host, realname));
+        }
+        "312" => {
+            let server  = msg.param(2).unwrap_or("").to_string();
+            let desc    = msg.params.last().map(String::as_str).unwrap_or("").to_string();
+            session.whois_lines.push(format!("[whois] server: {} ({})", server, desc));
+        }
+        "317" => {
+            let idle_secs = msg.param(2).unwrap_or("0").parse::<u64>().unwrap_or(0);
+            session.whois_lines.push(format!("[whois] idle: {}m {}s", idle_secs / 60, idle_secs % 60));
+        }
+        "319" => {
+            let channels = msg.params.last().map(String::as_str).unwrap_or("").to_string();
+            session.whois_lines.push(format!("[whois] channels: {}", channels));
+        }
+        "318" => {
+            // End of WHOIS — emit all collected lines to the active buffer
+            let target = session.whois_target.take().unwrap_or_default().to_lowercase();
+            let buf_id = if session.joined.contains(&target) {
+                target
+            } else {
+                session.joined.iter().next().cloned().unwrap_or_default()
+            };
+            for text in session.whois_lines.drain(..) {
+                *line_counter += 1;
+                let line = make_line(&line_counter.to_string(), "--", &text, Utc::now(), false);
+                events.push(BackendEvent::LineAdded { buffer_id: buf_id.clone(), line });
+            }
         }
 
         _ => {}
