@@ -20,24 +20,26 @@ impl WeeChatApp {
                 self.auth_error = None;
                 self.connection_status = "Connected".to_string();
                 self.log_conn("WebSocket handshake complete");
-                self.log_conn("Sending credentials via Sec-WebSocket-Protocol bearer token");
-                self.log_conn("Authentication accepted by relay");
-                self.log_conn("→ GET /api/buffers");
-                self.log_conn("→ POST /api/sync  {colors: ansi, input: false}");
+                match self.backend_type {
+                    crate::ui::app::BackendType::WeeChat => {
+                        self.log_conn("Sending credentials via Sec-WebSocket-Protocol bearer token");
+                        self.log_conn("Authentication accepted by relay");
+                        self.log_conn("→ GET /api/buffers");
+                        self.log_conn("→ POST /api/sync  {colors: ansi, input: false}");
+                    }
+                    crate::ui::app::BackendType::Soju => {
+                        self.log_conn("IRC registration complete (CAP/NICK/USER)");
+                        self.log_conn("Waiting for channel JOINs from soju…");
+                    }
+                }
                 self.log_conn("Connected");
                 self.buffers.clear();
-                // On a fresh connect (user clicked Connect) trust the relay's hotlist
-                // entirely — cleared_buffer_ids only applies within a session to avoid
-                // re-showing activity the user already dismissed during an in-progress
-                // connection drop/reconnect cycle.
                 if self.connection_attempts == 1 {
                     self.cleared_buffer_ids.clear();
                 }
                 if let Some(client) = &self.client {
                     client.fetch_buffer_list();
                     client.sync_subscriptions();
-                    // Hotlist is fetched from handle_buffer_list once buffers are populated,
-                    // so the activity state is never applied to an empty buffer list.
                 }
             }
             BackendEvent::Disconnected => {
@@ -98,6 +100,19 @@ impl WeeChatApp {
                 if !self.buffers.iter().any(|b| b.id == buf.id) {
                     self.buffers.push(buf);
                 }
+                // Resolve a pending /join or /query switch now that the buffer exists
+                if let Some(target) = self.pending_buffer_switch.take() {
+                    if let Some(found) = self.buffers.iter().find(|b|
+                        b.name == target
+                        || b.id == target
+                        || b.full_name.ends_with(&target)
+                    ) {
+                        let id = found.id.clone();
+                        self.select_buffer(id);
+                    } else {
+                        self.pending_buffer_switch = Some(target);
+                    }
+                }
             }
             BackendEvent::BufferClosed { buffer_id } => {
                 self.buffers.retain(|b| b.id != buffer_id);
@@ -123,7 +138,15 @@ impl WeeChatApp {
                     }
                 }
             }
-            BackendEvent::NicklistLoaded { buffer_id, nicks } => {
+            BackendEvent::NicklistLoaded { buffer_id, mut nicks } => {
+                // Sort: ops (@) first, voiced (+) second, rest alphabetical
+                nicks.sort_by(|a, b| {
+                    fn rank(p: &str) -> u8 {
+                        if p.contains('@') { 0 } else if p.contains('+') { 1 } else { 2 }
+                    }
+                    rank(&a.prefix).cmp(&rank(&b.prefix))
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
                 if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
                     buf.nicks = nicks;
                 }
