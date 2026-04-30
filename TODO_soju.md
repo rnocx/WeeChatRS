@@ -24,4 +24,6 @@
                   - /whois response display (show as system lines in active buffer)
                   - Handle 464/465/432 auth error codes → AuthError event
                   - Server NOTICE messages (pre-001) shown in connection log
-- [ ] Phase 10 — Live testing against soju + WeeChat relay regression check
+- [x] Phase 10 — Live testing against soju + WeeChat relay regression check
+                  - WeeChat relay: message sending confirmed working
+                  - WeeChat relay: incoming messages confirmed working
