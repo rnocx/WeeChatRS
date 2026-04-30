@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::IrcConfig;
 use crate::relay::backend::BackendEvent;
 use egui::Context as EguiContext;

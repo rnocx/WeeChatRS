@@ -4,6 +4,7 @@ use crate::relay::models::{Buffer, BufferActivity, Line, Nick};
 /// Neither WeeChat-specific nor IRC-specific — both backends translate
 /// their native protocol events into these variants.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum BackendEvent {
     /// Successfully authenticated and ready.
     Connected,
@@ -72,6 +73,7 @@ pub enum BackendEvent {
 
 /// Contract every backend must satisfy.
 /// The UI instantiates one of these and interacts only through this trait.
+#[allow(dead_code)]
 pub trait BackendClient: Send {
     /// Open the connection. Events flow back via the channel passed at construction.
     fn connect(&mut self);

@@ -1,6 +1,5 @@
 use crate::relay::backend::{BackendClient, BackendEvent};
 use crate::relay::weechat::{WeeChatClient, WeeChatConfig};
-use crate::relay::client::RelayEvent; // still used by event_handler
 use crate::relay::models::*;
 use crate::ui::ansi::ANSIParser;
 use crate::ui::theme::AppTheme;
@@ -597,16 +596,7 @@ impl eframe::App for WeeChatApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(event) = self.event_rx.try_recv() {
-            match event {
-                // Tunnel: WeeChat relay responses still handled by the legacy handler.
-                BackendEvent::_WeeChat(resp) => self.handle_event(RelayEvent::Message(resp)),
-                BackendEvent::Connected => self.handle_event(RelayEvent::Connected),
-                BackendEvent::Disconnected => self.handle_event(RelayEvent::Disconnected),
-                BackendEvent::Error(e) => self.handle_event(RelayEvent::Error(e)),
-                BackendEvent::AuthError(e) => self.handle_event(RelayEvent::Error(e)),
-                // Generic BackendEvents not yet produced by WeeChat backend — ignore for now.
-                _ => {}
-            }
+            self.handle_event(event);
         }
 
         while let Ok((url, result)) = self.image_rx.try_recv() {

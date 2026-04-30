@@ -1,4 +1,4 @@
-use crate::relay::client::RelayEvent;
+use crate::relay::backend::BackendEvent;
 use crate::relay::models::*;
 use crate::ui::app::{WeeChatApp, MAX_STORED_LINES};
 use chrono::{Utc, DateTime, Local};
@@ -12,27 +12,9 @@ fn ansi_re() -> &'static regex::Regex {
 }
 
 impl WeeChatApp {
-    pub(crate) fn handle_event(&mut self, event: RelayEvent) {
+    pub(crate) fn handle_event(&mut self, event: BackendEvent) {
         match event {
-            RelayEvent::Connecting => {
-                self.is_connecting = true;
-                self.connection_status = "Connecting...".to_string();
-                self.connection_attempts += 1;
-                if self.connection_attempts == 1 {
-                    self.log_conn("TCP connection + WebSocket handshake in progress…");
-                } else {
-                    let backoff = {
-                        let secs = 1u64 << (self.connection_attempts - 2).min(4);
-                        secs.min(30)
-                    };
-                    self.log_conn(format!(
-                        "Reconnect attempt {} (backoff was {}s)…",
-                        self.connection_attempts - 1,
-                        backoff
-                    ));
-                }
-            }
-            RelayEvent::Connected => {
+            BackendEvent::Connected => {
                 self.is_connecting = false;
                 self.connecting_pending = false;
                 self.auth_error = None;
@@ -58,7 +40,7 @@ impl WeeChatApp {
                     // so the activity state is never applied to an empty buffer list.
                 }
             }
-            RelayEvent::Disconnected => {
+            BackendEvent::Disconnected => {
                 self.is_connecting = false;
                 if self.connecting_pending {
                     self.connecting_pending = false;
@@ -81,7 +63,7 @@ impl WeeChatApp {
                     }
                 }
             }
-            RelayEvent::Error(e) => {
+            BackendEvent::AuthError(e) | BackendEvent::Error(e) => {
                 if self.connecting_pending {
                     let is_auth = e.contains("401") || e.contains("403")
                         || e.to_lowercase().contains("unauthorized")
@@ -109,9 +91,10 @@ impl WeeChatApp {
                     }
                 }
             }
-            RelayEvent::Message(resp) => {
+            BackendEvent::_WeeChat(resp) => {
                 self.process_response(resp);
             }
+            _ => {}
         }
     }
 
