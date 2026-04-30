@@ -192,6 +192,8 @@ pub struct AppSettings {
     pub show_server_headers: bool,
     pub show_inline_images: bool,
     pub show_link_previews: bool,
+    #[serde(default)]
+    pub emoji_rendering: bool,
     pub opacity: f32,
     #[serde(default)]
     pub show_hidden_buffers: bool,
@@ -243,6 +245,7 @@ impl Default for AppSettings {
             show_server_headers: true,
             show_inline_images: true,
             show_link_previews: true,
+            emoji_rendering: false,
             opacity: 1.0,
             show_hidden_buffers: false,
             buffer_order: Vec::new(),
@@ -292,6 +295,7 @@ pub struct WeeChatApp {
     pub(crate) show_server_headers: bool,
     pub(crate) show_inline_images: bool,
     pub(crate) show_link_previews: bool,
+    pub(crate) emoji_rendering: bool,
     pub(crate) opacity: f32,
     pub(crate) show_hidden_buffers: bool,
 
@@ -425,6 +429,7 @@ impl WeeChatApp {
             show_server_headers: settings.show_server_headers,
             show_inline_images: settings.show_inline_images,
             show_link_previews: settings.show_link_previews,
+            emoji_rendering: settings.emoji_rendering,
             opacity: settings.opacity,
             show_hidden_buffers: settings.show_hidden_buffers,
             image_cache: HashMap::new(),
@@ -572,6 +577,7 @@ impl eframe::App for WeeChatApp {
             show_server_headers: self.show_server_headers,
             show_inline_images: self.show_inline_images,
             show_link_previews: self.show_link_previews,
+            emoji_rendering: self.emoji_rendering,
             opacity: self.opacity,
             show_hidden_buffers: self.show_hidden_buffers,
             buffer_order: self.buffer_order.clone(),
@@ -1535,6 +1541,10 @@ impl eframe::App for WeeChatApp {
                                                                 }
                                                             }
                                                         }
+                                                    } else if !self.emoji_rendering {
+                                                        let mut job = LayoutJob::default();
+                                                        job.append(&s.text, 0.0, s.format.clone());
+                                                        ui.add(Label::new(job).wrap(true));
                                                     } else {
                                                         let emoji_size = font_id.size + 2.0;
                                                         for span in crate::ui::emoji::split_emoji(&s.text) {
