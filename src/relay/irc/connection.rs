@@ -705,7 +705,7 @@ pub fn spawn(
                 }
             };
 
-            send!(BackendEvent::Error(format!("Connecting to {}…", url_str)));
+            // No status event here — the UI already shows "Connecting…" via connecting_pending
 
             let mut request = match url.into_client_request() {
                 Ok(r) => r,
