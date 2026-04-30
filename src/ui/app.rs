@@ -364,9 +364,9 @@ pub struct WeeChatApp {
     pub(crate) editing_profile: ConnectionProfile,
     pub(crate) editing_password: String,
     pub(crate) editing_profile_idx: Option<usize>,
-    pub(crate) show_add_connection: bool,     // central-panel landing form
-    pub(crate) settings_show_add: bool,       // add/edit form inside the settings panel
-    pub(crate) settings_connect_idx: Option<usize>, // index awaiting password before connect
+    pub(crate) show_connections: bool,      // connections manager window
+    pub(crate) conn_show_add: bool,         // add/edit form inside connections window
+    pub(crate) conn_connect_idx: Option<usize>, // index awaiting password before connect
 
     pub(crate) buffers: Vec<Buffer>,
     pub(crate) selected_buffer_id: Option<String>,
@@ -500,9 +500,9 @@ impl WeeChatApp {
             editing_profile: ConnectionProfile::default(),
             editing_password: String::new(),
             editing_profile_idx: None,
-            show_add_connection: false,
-            settings_show_add: false,
-            settings_connect_idx: None,
+            show_connections: false,
+            conn_show_add: false,
+            conn_connect_idx: None,
             buffers: Vec::new(),
             selected_buffer_id: None,
             input_text: String::new(),
@@ -650,7 +650,10 @@ impl WeeChatApp {
 
         let (per_conn_tx, per_conn_rx) = mpsc::unbounded_channel::<BackendEvent>();
         let port = profile.port.parse::<u16>().unwrap_or(9001);
-        let proto = if profile.use_ssl { "wss" } else { "ws" };
+        let (proto, path) = match profile.backend_type {
+            BackendType::Soju    => (if profile.use_ssl { "ircs" } else { "irc" }, ""),
+            BackendType::WeeChat => (if profile.use_ssl { "wss"  } else { "ws"  }, "/api"),
+        };
 
         let mut client: Box<dyn BackendClient> = match profile.backend_type {
             BackendType::Soju => {
@@ -694,7 +697,7 @@ impl WeeChatApp {
         };
 
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-        conn.connection_log.push_back(format!("[{}]  Connecting to {}://{}:{}/api", ts, proto, profile.host, port));
+        conn.connection_log.push_back(format!("[{}]  Connecting to {}://{}:{}{}", ts, proto, profile.host, port, path));
         let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
         conn.connection_log.push_back(format!("[{}]  SSL/TLS: {}", ts2, if profile.use_ssl { "enabled" } else { "disabled" }));
 
@@ -935,6 +938,11 @@ impl eframe::App for WeeChatApp {
 
                         if ui.button(egui::RichText::new("⚙").size(16.0)).on_hover_text("Settings").clicked() {
                             self.show_settings = !self.show_settings;
+                            self.show_connections = false;
+                        }
+                        if ui.button(egui::RichText::new("🔌").size(14.0)).on_hover_text("Connections").clicked() {
+                            self.show_connections = !self.show_connections;
+                            self.show_settings = false;
                         }
                         let log_icon = if self.connection_log_unread {
                             egui::RichText::new("⬡").size(16.0).color(Color32::from_rgb(255, 165, 0))
@@ -945,6 +953,7 @@ impl eframe::App for WeeChatApp {
                             self.show_connection_log = !self.show_connection_log;
                             self.connection_log_unread = false;
                             self.show_settings = false;
+                            self.show_connections = false;
                         }
                         // Show status indicators for each active connection
                         for conn in &self.connections {
@@ -999,8 +1008,15 @@ impl eframe::App for WeeChatApp {
 
                     let mut row_rects: Vec<(egui::Rect, String)> = Vec::new();
 
+                    // Build a lookup from connection prefix → friendly label for headers
+                    let conn_label_map: std::collections::HashMap<String, String> = self.connections.iter()
+                        .map(|c| (c.prefix.clone(), c.label.clone()))
+                        .collect();
+                    let multi_conn = conn_label_map.len() > 1;
+
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
+                        let mut last_conn_prefix: Option<String> = None;
                         for buffer in &self.buffers {
                             if buffer.hidden && !self.show_hidden_buffers {
                                 continue;
@@ -1009,6 +1025,25 @@ impl eframe::App for WeeChatApp {
                             let is_root = buffer.kind == "server" || buffer.kind == "core";
                             let is_child = buffer.kind == "channel" || buffer.kind == "private";
                             let in_dragged_group = dragged_group_ids.contains(&buffer.id);
+
+                            // Connection header — only shown when ≥2 connections are active
+                            if multi_conn {
+                                let buf_conn_prefix = buffer.id.split('/').next().unwrap_or("").to_string();
+                                if last_conn_prefix.as_deref() != Some(&buf_conn_prefix) {
+                                    if last_conn_prefix.is_some() { ui.add_space(6.0); }
+                                    let header_label = conn_label_map.get(&buf_conn_prefix)
+                                        .cloned()
+                                        .unwrap_or_else(|| buf_conn_prefix.clone());
+                                    ui.label(
+                                        egui::RichText::new(header_label.to_uppercase())
+                                            .strong()
+                                            .color(accent_color)
+                                            .size(10.0)
+                                    );
+                                    ui.add_space(2.0);
+                                    last_conn_prefix = Some(buf_conn_prefix);
+                                }
+                            }
 
                             if self.show_server_headers && is_root {
                                 ui.add_space(8.0);
@@ -1312,16 +1347,14 @@ impl eframe::App for WeeChatApp {
         }
 
         // Collect pending connect/disconnect actions from the connection panel
-        let mut pending_connect: Option<(String, String)> = None; // (prefix, password)
-        let mut pending_disconnect: Option<String> = None; // prefix
-        let mut pending_delete_profile: Option<usize> = None;
-        let mut pending_edit_profile: Option<usize> = None;
 
         egui::CentralPanel::default()
             .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(0.0)))
             .show(ctx, |ui| {
             if self.show_settings {
                 self.show_settings_window(ui, accent_color, is_light);
+            } else if self.show_connections {
+                self.show_connections_window(ui, accent_color, is_light);
             } else if self.show_connection_log {
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.show_connection_log = false;
@@ -1399,210 +1432,31 @@ impl eframe::App for WeeChatApp {
                     });
                 });
             } else if self.profiles.is_empty() && !any_connected {
-                // Connection panel
+                // No profiles yet — show a minimal landing page that opens the connections window
                 ui.vertical_centered(|ui| {
-                    ui.add_space(ctx.available_rect().height() * 0.1);
-
-                    if self.show_add_connection {
-                        // Add/Edit connection form
-                        Frame::group(ui.style())
-                            .fill(surface_color)
-                            .rounding(Rounding::same(12.0))
-                            .stroke(Stroke::new(1.0, border_color))
-                            .inner_margin(Margin::same(30.0))
-                            .show(ui, |ui| {
-                                ui.set_max_width(420.0);
-                                let title = if self.editing_profile_idx.is_some() { "Edit Connection" } else { "Add Connection" };
-                                ui.heading(egui::RichText::new(title).strong().size(20.0));
-                                ui.add_space(16.0);
-
-                                egui::Grid::new("add_conn_grid").num_columns(2).spacing([12.0, 12.0]).show(ui, |ui| {
-                                    ui.label("Label:");
-                                    ui.add(egui::TextEdit::singleline(&mut self.editing_profile.label).desired_width(240.0));
-                                    ui.end_row();
-                                    ui.label("Backend:");
-                                    ui.horizontal(|ui| {
-                                        ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::WeeChat, "WeeChat Relay");
-                                        ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::Soju, "Soju IRC");
-                                    });
-                                    ui.end_row();
-                                    ui.label("Host:");
-                                    ui.add(egui::TextEdit::singleline(&mut self.editing_profile.host).desired_width(240.0));
-                                    ui.end_row();
-                                    ui.label("Port:");
-                                    ui.add(egui::TextEdit::singleline(&mut self.editing_profile.port).desired_width(240.0));
-                                    ui.end_row();
-                                    if self.editing_profile.backend_type == BackendType::Soju {
-                                        ui.label("Nick:");
-                                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.nick).desired_width(240.0));
-                                        ui.end_row();
-                                    }
-                                    ui.label("Password:");
-                                    ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).desired_width(240.0));
-                                    ui.end_row();
-                                });
-
-                                ui.add_space(12.0);
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut self.editing_profile.use_ssl, "Use SSL");
-                                    if self.editing_profile.use_ssl {
-                                        ui.add_space(12.0);
-                                        ui.checkbox(&mut self.editing_profile.accept_invalid_certs, "Accept self-signed");
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
-                                    ui.add_space(12.0);
-                                    ui.checkbox(&mut self.editing_profile.save_password, "Save password");
-                                });
-
-                                ui.add_space(20.0);
-                                ui.horizontal(|ui| {
-                                    let save_btn = egui::Button::new(egui::RichText::new("Save").strong().color(Color32::WHITE))
-                                        .fill(accent_color)
-                                        .min_size(Vec2::new(100.0, 36.0));
-                                    if ui.add(save_btn).clicked() {
-                                        // Save password to keyring if requested
-                                        if self.editing_profile.save_password && !self.editing_password.is_empty() {
-                                            let key = self.editing_profile.keyring_host_key();
-                                            let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_password);
-                                        }
-                                        let profile = self.editing_profile.clone();
-                                        if let Some(idx) = self.editing_profile_idx {
-                                            if idx < self.profiles.len() {
-                                                self.profiles[idx] = profile;
-                                            }
-                                        } else {
-                                            self.profiles.push(profile);
-                                        }
-                                        self.show_add_connection = false;
-                                        self.editing_profile = ConnectionProfile::default();
-                                        self.editing_password.clear();
-                                        self.editing_profile_idx = None;
-                                    }
-                                    ui.add_space(12.0);
-                                    if ui.button("Cancel").clicked() {
-                                        self.show_add_connection = false;
-                                        self.editing_profile = ConnectionProfile::default();
-                                        self.editing_password.clear();
-                                        self.editing_profile_idx = None;
-                                    }
-                                });
-                            });
-                    } else if self.profiles.is_empty() {
-                        // No connections configured
-                        Frame::group(ui.style())
-                            .fill(surface_color)
-                            .rounding(Rounding::same(12.0))
-                            .stroke(Stroke::new(1.0, border_color))
-                            .inner_margin(Margin::same(40.0))
-                            .show(ui, |ui| {
-                                ui.set_max_width(360.0);
-                                ui.heading(egui::RichText::new("No connections configured").strong().size(20.0));
-                                ui.add_space(12.0);
-                                ui.label(egui::RichText::new("Add a connection to get started.").color(text_secondary));
-                                ui.add_space(20.0);
-                                let btn = egui::Button::new(egui::RichText::new("+ Add Connection").strong().color(Color32::WHITE))
-                                    .fill(accent_color)
-                                    .min_size(Vec2::new(160.0, 40.0));
-                                if ui.add(btn).clicked() {
-                                    self.editing_profile = ConnectionProfile::default();
-                                    self.editing_password.clear();
-                                    self.editing_profile_idx = None;
-                                    self.show_add_connection = true;
-                                }
-                            });
-                    } else {
-                        // Connection list
-                        Frame::group(ui.style())
-                            .fill(surface_color)
-                            .rounding(Rounding::same(12.0))
-                            .stroke(Stroke::new(1.0, border_color))
-                            .inner_margin(Margin::same(24.0))
-                            .show(ui, |ui| {
-                                ui.set_max_width(480.0);
-                                ui.heading(egui::RichText::new("Connections").strong().size(20.0));
-                                ui.add_space(16.0);
-
-                                for (idx, profile) in self.profiles.iter().enumerate() {
-                                    let prefix = profile.prefix();
-                                    let conn_opt = self.connections.iter().find(|c| c.prefix == prefix);
-                                    let is_connected = conn_opt.map(|c| c.client.is_connected()).unwrap_or(false);
-                                    let is_pending = conn_opt.map(|c| c.connecting_pending).unwrap_or(false);
-                                    let has_error = conn_opt.and_then(|c| c.auth_error.as_ref()).is_some();
-
-                                    let dot_color = if is_connected && !is_pending {
-                                        Color32::from_rgb(50, 205, 50)
-                                    } else if is_pending {
-                                        Color32::from_rgb(255, 165, 0)
-                                    } else if has_error {
-                                        Color32::from_rgb(220, 60, 60)
-                                    } else {
-                                        Color32::from_gray(120)
-                                    };
-
-                                    let badge_text = match profile.backend_type {
-                                        BackendType::WeeChat => "WeeChat",
-                                        BackendType::Soju => "IRC",
-                                    };
-
-                                    egui::Frame::none()
-                                        .fill(if is_light { Color32::from_gray(230) } else { Color32::from_rgb(40, 40, 50) })
-                                        .rounding(Rounding::same(8.0))
-                                        .inner_margin(Margin::symmetric(12.0, 8.0))
-                                        .show(ui, |ui| {
-                                            ui.set_min_width(ui.available_width());
-                                            ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("●").color(dot_color).size(12.0));
-                                                ui.label(egui::RichText::new(&profile.label).strong());
-                                                ui.label(egui::RichText::new(badge_text).small().color(accent_color));
-                                                ui.label(egui::RichText::new(format!("{}:{}", profile.host, profile.port)).small().color(text_muted));
-
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.small_button("✕").on_hover_text("Delete").clicked() {
-                                                        pending_delete_profile = Some(idx);
-                                                    }
-                                                    if ui.small_button("✎").on_hover_text("Edit").clicked() {
-                                                        pending_edit_profile = Some(idx);
-                                                    }
-                                                    if is_connected || is_pending {
-                                                        if ui.button("Disconnect").clicked() {
-                                                            pending_disconnect = Some(prefix.clone());
-                                                        }
-                                                    } else {
-                                                        let btn_label = if is_pending { "Connecting…" } else { "Connect" };
-                                                        if ui.add_enabled(!is_pending, egui::Button::new(btn_label)).clicked() {
-                                                            // Load password
-                                                            let password = if profile.save_password {
-                                                                let key = profile.keyring_host_key();
-                                                                crate::ui::secure_storage::load_by_key(&key).unwrap_or_default()
-                                                            } else {
-                                                                String::new()
-                                                            };
-                                                            pending_connect = Some((prefix.clone(), password));
-                                                        }
-                                                    }
-                                                });
-                                            });
-                                            if let Some(err) = conn_opt.and_then(|c| c.auth_error.as_ref()) {
-                                                ui.label(egui::RichText::new(format!("⚠ {}", err)).color(Color32::from_rgb(220, 80, 80)).small());
-                                            }
-                                        });
-                                    ui.add_space(4.0);
-                                }
-
-                                ui.add_space(8.0);
-                                let add_btn = egui::Button::new(egui::RichText::new("+ Add Connection").color(accent_color))
-                                    .fill(Color32::TRANSPARENT)
-                                    .stroke(Stroke::new(1.0, accent_color));
-                                if ui.add(add_btn).clicked() {
-                                    self.editing_profile = ConnectionProfile::default();
-                                    self.editing_password.clear();
-                                    self.editing_profile_idx = None;
-                                    self.show_add_connection = true;
-                                }
-                            });
-                    }
+                    ui.add_space(ctx.available_rect().height() * 0.2);
+                    Frame::group(ui.style())
+                        .fill(surface_color)
+                        .rounding(Rounding::same(12.0))
+                        .stroke(Stroke::new(1.0, border_color))
+                        .inner_margin(Margin::same(40.0))
+                        .show(ui, |ui| {
+                            ui.set_max_width(360.0);
+                            ui.heading(egui::RichText::new("No connections configured").strong().size(20.0));
+                            ui.add_space(12.0);
+                            ui.label(egui::RichText::new("Add a connection to get started.").color(text_secondary));
+                            ui.add_space(20.0);
+                            let btn = egui::Button::new(egui::RichText::new("+ Add Connection").strong().color(Color32::WHITE))
+                                .fill(accent_color)
+                                .min_size(Vec2::new(160.0, 40.0));
+                            if ui.add(btn).clicked() {
+                                self.show_connections = true;
+                                self.conn_show_add = true;
+                                self.editing_profile = ConnectionProfile::default();
+                                self.editing_password.clear();
+                                self.editing_profile_idx = None;
+                            }
+                        });
                 });
             } else if let Some(_full_name) = current_buffer_full_name {
                 ui.vertical(|ui| {
@@ -1955,66 +1809,6 @@ impl eframe::App for WeeChatApp {
                 ui.centered_and_justified(|ui| { ui.label(egui::RichText::new("Select a buffer to start chatting").color(text_muted).size(16.0)); });
             }
         });
-
-        // Process deferred actions after borrow of self is released from closures
-        if let Some((prefix, password)) = pending_connect {
-            // Find the profile for this prefix
-            let profile = self.profiles.iter().find(|p| p.prefix() == prefix).cloned();
-            if let Some(profile) = profile {
-                self.do_connect(&profile, password, ctx);
-            }
-        }
-
-        if let Some(prefix) = pending_disconnect {
-            if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == prefix) {
-                conn.client.disconnect();
-                conn.status = "Disconnected".to_string();
-                conn.is_connecting = false;
-                conn.connecting_pending = false;
-            }
-            // Remove buffers belonging to this connection
-            let pfx = format!("{}/", prefix);
-            self.buffers.retain(|b| !b.id.starts_with(&pfx));
-            if let Some(sel) = &self.selected_buffer_id {
-                if sel.starts_with(&pfx) {
-                    self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
-                }
-            }
-            self.connections.retain(|c| c.prefix != prefix);
-        }
-
-        if let Some(idx) = pending_delete_profile {
-            if idx < self.profiles.len() {
-                let profile = self.profiles.remove(idx);
-                // Also disconnect if active
-                let prefix = profile.prefix();
-                let pfx = format!("{}/", prefix);
-                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == prefix) {
-                    conn.client.disconnect();
-                }
-                self.connections.retain(|c| c.prefix != prefix);
-                self.buffers.retain(|b| !b.id.starts_with(&pfx));
-                if let Some(sel) = &self.selected_buffer_id {
-                    if sel.starts_with(&pfx) {
-                        self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
-                    }
-                }
-            }
-        }
-
-        if let Some(idx) = pending_edit_profile {
-            if idx < self.profiles.len() {
-                self.editing_profile = self.profiles[idx].clone();
-                self.editing_password = if self.profiles[idx].save_password {
-                    let key = self.profiles[idx].keyring_host_key();
-                    crate::ui::secure_storage::load_by_key(&key).unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                self.editing_profile_idx = Some(idx);
-                self.show_add_connection = true;
-            }
-        }
 
         if let Some((buf_id, count)) = pending_load_more {
             self.loading_more_buffer_id = Some(buf_id.clone());
