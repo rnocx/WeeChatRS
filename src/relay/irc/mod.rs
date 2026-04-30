@@ -1,6 +1,5 @@
-#![allow(dead_code)]
-
 pub mod connection;
+pub mod parser;
 
 use crate::relay::backend::{BackendClient, BackendEvent};
 use egui::Context as EguiContext;
@@ -69,7 +68,7 @@ impl BackendClient for IrcClient {
     }
 
     fn fetch_lines(&self, _buffer_id: &str, _count: usize) {
-        // Phase 5: request chathistory via IRCv3 draft/chathistory
+        // chathistory is requested automatically on JOIN
     }
 
     fn fetch_nicks(&self, buffer_id: &str) {
@@ -79,7 +78,7 @@ impl BackendClient for IrcClient {
     }
 
     fn mark_read(&self, _buffer_id: &str) {
-        // Phase 6: soju.im/read marker extension
+        // soju.im/read-marker: future Phase 6
     }
 
     fn is_connected(&self) -> bool {
@@ -87,6 +86,6 @@ impl BackendClient for IrcClient {
     }
 
     fn fetch_buffer_list(&self) {
-        let _ = self.cmd_tx.send(IrcCommand::FetchBufferList);
+        // IRC buffers are discovered passively via JOIN
     }
 }

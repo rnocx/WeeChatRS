@@ -94,7 +94,88 @@ impl WeeChatApp {
             BackendEvent::_WeeChat(resp) => {
                 self.process_response(resp);
             }
-            _ => {}
+            BackendEvent::BufferOpened(buf) => {
+                if !self.buffers.iter().any(|b| b.id == buf.id) {
+                    self.buffers.push(buf);
+                }
+            }
+            BackendEvent::BufferClosed { buffer_id } => {
+                self.buffers.retain(|b| b.id != buffer_id);
+                if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
+                    self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
+                }
+            }
+            BackendEvent::BuffersLoaded(bufs) => {
+                self.buffers = bufs;
+            }
+            BackendEvent::LineAdded { buffer_id, line } => {
+                use crate::ui::app::MAX_STORED_LINES;
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    if line.highlight {
+                        buf.activity = crate::relay::models::BufferActivity::Highlight;
+                        buf.unread_count = buf.unread_count.saturating_add(1);
+                    } else if matches!(buf.activity, crate::relay::models::BufferActivity::None) {
+                        buf.activity = crate::relay::models::BufferActivity::Message;
+                    }
+                    buf.messages.push_back(line);
+                    if buf.messages.len() > MAX_STORED_LINES {
+                        buf.messages.pop_front();
+                    }
+                }
+            }
+            BackendEvent::NicklistLoaded { buffer_id, nicks } => {
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    buf.nicks = nicks;
+                }
+            }
+            BackendEvent::NickAdded { buffer_id, nick } => {
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    if !buf.nicks.iter().any(|n| n.name == nick.name) {
+                        buf.nicks.push(nick);
+                    }
+                }
+            }
+            BackendEvent::NickRemoved { buffer_id, nick_name } => {
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    buf.nicks.retain(|n| !n.name.eq_ignore_ascii_case(&nick_name));
+                }
+            }
+            BackendEvent::TopicChanged { buffer_id, topic } => {
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    buf.topic = topic;
+                }
+            }
+            BackendEvent::ActivityChanged { buffer_id, activity, unread_count } => {
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    buf.activity = activity;
+                    buf.unread_count = unread_count;
+                }
+            }
+            BackendEvent::LinesLoaded { buffer_id, lines, is_prepend } => {
+                use crate::ui::app::MAX_STORED_LINES;
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    if is_prepend {
+                        for line in lines.into_iter().rev() {
+                            buf.messages.push_front(line);
+                        }
+                        while buf.messages.len() > MAX_STORED_LINES {
+                            buf.messages.pop_back();
+                        }
+                    } else {
+                        for line in lines {
+                            buf.messages.push_back(line);
+                        }
+                        while buf.messages.len() > MAX_STORED_LINES {
+                            buf.messages.pop_front();
+                        }
+                    }
+                }
+            }
+            BackendEvent::BufferHidden { buffer_id, hidden } => {
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    buf.hidden = hidden;
+                }
+            }
         }
     }
 
