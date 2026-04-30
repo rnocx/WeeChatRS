@@ -4786,6 +4786,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-native-tls",
  "tokio-tungstenite",
  "url",
  "winres",

@@ -27,6 +27,7 @@ fontdb = "0.22"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 native-tls = "0.2"
+tokio-native-tls = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
