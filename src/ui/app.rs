@@ -692,7 +692,13 @@ impl eframe::App for WeeChatApp {
         style.visuals.widgets.active.rounding = Rounding::same(8.0);
         ctx.set_style(style);
 
-        let accent_color = Color32::from_rgb(100, 149, 237);
+        // Cornflower blue for the Default theme; otherwise use the theme's ANSI blue (index 4).
+        // Default's ANSI 4 is pure dark blue which is too muddy for UI elements.
+        let accent_color = if self.theme.name == "Default" {
+            Color32::from_rgb(100, 149, 237)
+        } else {
+            Color32::from(self.theme.ansi[4])
+        };
         let base_bg = self.theme.background.map(Color32::from).unwrap_or(Color32::from_rgb(18, 18, 18));
         let alpha = (self.opacity * 255.0) as u8;
         let bg_color = Color32::from_rgba_unmultiplied(base_bg.r(), base_bg.g(), base_bg.b(), alpha);
