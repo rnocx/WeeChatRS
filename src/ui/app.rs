@@ -188,6 +188,8 @@ pub struct AppSettings {
     pub backend_type: BackendType,
     pub host: String,
     pub port: String,
+    #[serde(default)]
+    pub irc_nick: String,
     pub use_ssl: bool,
     pub show_filtered_lines: bool,
     pub colored_nicks: bool,
@@ -269,6 +271,7 @@ impl Default for AppSettings {
             buffers_width: 0.0,
             accept_invalid_certs: false,
             backend_type: BackendType::WeeChat,
+            irc_nick: String::new(),
         }
     }
 }
@@ -282,6 +285,7 @@ pub struct WeeChatApp {
     pub(crate) backend_type: BackendType,
     pub(crate) use_ssl: bool,
     pub(crate) accept_invalid_certs: bool,
+    pub(crate) irc_nick: String,
 
     pub(crate) client: Option<Box<dyn BackendClient>>,
     pub(crate) event_rx: mpsc::UnboundedReceiver<BackendEvent>,
@@ -415,6 +419,7 @@ impl WeeChatApp {
             backend_type: settings.backend_type,
             use_ssl: settings.use_ssl,
             accept_invalid_certs: settings.accept_invalid_certs,
+            irc_nick: settings.irc_nick,
             client: None,
             event_rx,
             event_tx,
@@ -590,6 +595,7 @@ impl eframe::App for WeeChatApp {
             font_path: self.font_path.clone(),
             muted_buffer_names: self.muted_buffer_names.clone(),
             accept_invalid_certs: self.accept_invalid_certs,
+            irc_nick: self.irc_nick.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -1265,6 +1271,11 @@ impl eframe::App for WeeChatApp {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Port:"); });
                                 if ui.add(egui::TextEdit::singleline(&mut self.port).desired_width(240.0)).changed() { self.auth_error = None; }
                                 ui.end_row();
+                                if self.backend_type == BackendType::Soju {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Nick:"); });
+                                    if ui.add(egui::TextEdit::singleline(&mut self.irc_nick).desired_width(240.0)).changed() { self.auth_error = None; }
+                                    ui.end_row();
+                                }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label("Password:"); });
                                 ui.horizontal(|ui| {
                                     if ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(200.0)).changed() { self.auth_error = None; }
@@ -1328,7 +1339,7 @@ impl eframe::App for WeeChatApp {
                                             let config = crate::relay::irc::IrcConfig {
                                                 host: self.host.clone(),
                                                 port,
-                                                nick: String::new(),
+                                                nick: if self.irc_nick.is_empty() { "user".to_string() } else { self.irc_nick.clone() },
                                                 password: self.password.clone(),
                                                 use_ssl: self.use_ssl,
                                                 accept_invalid_certs: self.accept_invalid_certs,
