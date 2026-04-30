@@ -623,6 +623,23 @@ impl WeeChatApp {
                 });
             }
 
+            // When multiple connections are present, group all buffers by connection prefix
+            // so each connection's buffers appear together in the sidebar.
+            let conn_count = {
+                let mut seen = std::collections::HashSet::new();
+                for b in &self.buffers {
+                    if let Some(p) = b.id.split('/').next() { seen.insert(p.to_string()); }
+                }
+                seen.len()
+            };
+            if conn_count > 1 {
+                self.buffers.sort_by(|a, b| {
+                    let pa = a.id.split('/').next().unwrap_or("");
+                    let pb = b.id.split('/').next().unwrap_or("");
+                    pa.cmp(pb)
+                });
+            }
+
             if let Some(target) = self.pending_buffer_switch.take() {
                 if let Some(found) = self.buffers.iter().find(|b| b.name == target || b.full_name.ends_with(&target)) {
                     let id = found.id.clone();
