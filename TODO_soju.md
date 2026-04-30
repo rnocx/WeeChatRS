@@ -19,10 +19,9 @@
                   - Nicklist sorted: ops → voiced → alphabetical
 
 ## Remaining
-- [ ] Phase 9 — Polish:
+- [x] Phase 9 — Polish:
                   - WHO #channel after join (richer nick info: away, realname)
-                  - /whois response display (show in a system line or status)
-                  - Nick colour consistency between DM and channel nicks
-                  - Handle 401/403/464 auth error codes → AuthError event
+                  - /whois response display (show as system lines in active buffer)
+                  - Handle 464/465/432 auth error codes → AuthError event
                   - Server NOTICE messages (pre-001) shown in connection log
 - [ ] Phase 10 — Live testing against soju + WeeChat relay regression check

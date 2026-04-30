@@ -118,8 +118,6 @@ impl BackendClient for WeeChatClient {
                     }
                 };
 
-                send!(BackendEvent::Error("Connecting…".into())); // reuse Error as status for now
-
                 let auth_string = format!("plain:{}", config.password);
                 let base64_auth = URL_SAFE_NO_PAD.encode(auth_string.as_bytes());
                 let auth_protocol = format!(
