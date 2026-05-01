@@ -1289,12 +1289,12 @@ impl eframe::App for WeeChatApp {
 
         let current_buf_has_nicklist = current_buf.map(|b| b.has_nicklist).unwrap_or(false);
         if self.show_nicklist && !is_query_or_core && current_buf_has_nicklist && any_connected && current_buffer_id.is_some() {
-            // Use a hardcoded default so we don't get stuck at min_width when fonts
-            // aren't fully initialized on the first frame the panel appears.
             if self.nicklist_width < 80.0 {
                 self.nicklist_width = 180.0;
             }
-            let nicks_resp = egui::SidePanel::right("nicks_panel")
+            // ID changed from "nicks_panel" to "nicks_panel_2" to bust any stuck
+            // stored state (egui persists panel widths; old state can be stuck at min).
+            let nicks_resp = egui::SidePanel::right("nicks_panel_2")
                 .resizable(true)
                 .default_width(self.nicklist_width)
                 .min_width(80.0)
