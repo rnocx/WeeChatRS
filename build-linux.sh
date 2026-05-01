@@ -1,28 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds x86_64 and aarch64 Linux binaries from macOS (or Linux).
-#
-# Requires:
-#   brew install zig
-#   cargo install cargo-zigbuild
-#
-# cargo-zigbuild uses Zig as a C cross-compiler, so no Linux toolchain or
-# Docker is needed. It also handles vendored C deps (e.g. openssl-sys).
+# Builds x86_64 and aarch64 Linux binaries using Docker.
+# Requires Docker with multi-platform support (docker buildx / QEMU for cross-arch).
 
 BINARY_NAME="weechat-rs"
 OUT_DIR="dist/linux"
 
-X86_TARGET="x86_64-unknown-linux-gnu"
-ARM64_TARGET="aarch64-unknown-linux-gnu"
-
 check_deps() {
-    if ! command -v zig &>/dev/null; then
-        echo "ERROR: 'zig' is not installed. Run: brew install zig"
-        exit 1
-    fi
-    if ! command -v cargo-zigbuild &>/dev/null; then
-        echo "ERROR: 'cargo-zigbuild' is not installed. Run: cargo install cargo-zigbuild"
+    if ! command -v docker &>/dev/null; then
+        echo "ERROR: docker not found"
         exit 1
     fi
 }
@@ -30,21 +17,31 @@ check_deps() {
 mkdir -p "${OUT_DIR}"
 check_deps
 
+extract_binary() {
+    local image="$1"
+    local src="$2"
+    local dest="$3"
+    local cid
+    cid=$(docker create "${image}" --entrypoint /bin/true)
+    docker cp "${cid}:${src}" "${dest}"
+    docker rm "${cid}" > /dev/null
+}
+
 build_x86() {
-    echo "==> Installing target ${X86_TARGET}..."
-    rustup target add "${X86_TARGET}"
-    echo "==> Building x86_64..."
-    cargo zigbuild --release --target "${X86_TARGET}"
-    cp "target/${X86_TARGET}/release/${BINARY_NAME}" "${OUT_DIR}/${BINARY_NAME}-x86_64-linux"
+    local image="weechat-rs-linux-x86_64-builder"
+    echo "==> Building Docker image (x86_64)..."
+    docker build -f docker/Dockerfile.linux-x86_64 -t "${image}" .
+    echo "==> Extracting x86_64 binary..."
+    extract_binary "${image}" "/weechat-rs-linux-x86_64" "${OUT_DIR}/${BINARY_NAME}-x86_64-linux"
     echo "    -> ${OUT_DIR}/${BINARY_NAME}-x86_64-linux"
 }
 
 build_arm64() {
-    echo "==> Installing target ${ARM64_TARGET}..."
-    rustup target add "${ARM64_TARGET}"
-    echo "==> Building aarch64..."
-    cargo zigbuild --release --target "${ARM64_TARGET}"
-    cp "target/${ARM64_TARGET}/release/${BINARY_NAME}" "${OUT_DIR}/${BINARY_NAME}-aarch64-linux"
+    local image="weechat-rs-linux-aarch64-builder"
+    echo "==> Building Docker image (aarch64)..."
+    docker build -f docker/Dockerfile.linux-aarch64 -t "${image}" .
+    echo "==> Extracting aarch64 binary..."
+    extract_binary "${image}" "/weechat-rs-linux-aarch64" "${OUT_DIR}/${BINARY_NAME}-aarch64-linux"
     echo "    -> ${OUT_DIR}/${BINARY_NAME}-aarch64-linux"
 }
 

@@ -34,6 +34,7 @@ notify-rust = "4.11"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+notify-rust = "4.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
