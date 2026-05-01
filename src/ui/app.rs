@@ -1288,64 +1288,66 @@ impl eframe::App for WeeChatApp {
         let any_connected = self.is_any_connected();
 
         let current_buf_has_nicklist = current_buf.map(|b| b.has_nicklist).unwrap_or(false);
-        if self.show_nicklist && !is_query_or_core && current_buf_has_nicklist && any_connected && current_buffer_id.is_some() {
+        // Always render the nicks panel when show_nicklist is on so egui's stored
+        // panel width is never lost. Conditionally populate content only for buffers
+        // that actually have a nicklist.
+        if self.show_nicklist && any_connected && current_buffer_id.is_some() {
             if self.nicklist_width < 80.0 {
                 self.nicklist_width = 180.0;
             }
-            // ID changed from "nicks_panel" to "nicks_panel_2" to bust any stuck
-            // stored state (egui persists panel widths; old state can be stuck at min).
             let nicks_resp = egui::SidePanel::right("nicks_panel_2")
                 .resizable(true)
                 .default_width(self.nicklist_width)
                 .min_width(80.0)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
-                    ui.add_space(8.0);
-                    ScrollArea::vertical().show(ui, |ui| {
-                        if let Some(nicks) = &current_buffer_nicks {
-                            for nick in nicks {
-                                let text = format!("{}{}", nick.prefix, nick.name);
-                                let input = if nick.away {
-                                    // Away nicks: render without colour, italic handled below
-                                    text.clone()
-                                } else if self.colored_nicks {
-                                    if self.theme.name == "Default" { format!("{}{}", nick.color_ansi, text) }
-                                    else {
-                                        let idx = Self::hash_nick(&nick.name);
-                                        let esc = if idx < 8 { format!("\x1B[{}m", 30 + idx) } else { format!("\x1B[{}m", 90 + idx - 8) };
-                                        format!("{}{}", esc, text)
+                    if current_buf_has_nicklist {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
+                        ui.add_space(8.0);
+                        ScrollArea::vertical().show(ui, |ui| {
+                            if let Some(nicks) = &current_buffer_nicks {
+                                for nick in nicks {
+                                    let text = format!("{}{}", nick.prefix, nick.name);
+                                    let input = if nick.away {
+                                        text.clone()
+                                    } else if self.colored_nicks {
+                                        if self.theme.name == "Default" { format!("{}{}", nick.color_ansi, text) }
+                                        else {
+                                            let idx = Self::hash_nick(&nick.name);
+                                            let esc = if idx < 8 { format!("\x1B[{}m", 30 + idx) } else { format!("\x1B[{}m", 90 + idx - 8) };
+                                            format!("{}{}", esc, text)
+                                        }
+                                    } else { text };
+                                    let sections = ANSIParser::parse(&input, font_id.clone(), &self.theme);
+                                    let mut job = LayoutJob::default();
+                                    for mut s in sections {
+                                        if nick.away {
+                                            s.format.color = egui::text::TextFormat {
+                                                color: text_muted,
+                                                italics: true,
+                                                ..s.format.clone()
+                                            }.color;
+                                            s.format.italics = true;
+                                        }
+                                        job.append(&s.text, 0.0, s.format);
                                     }
-                                } else { text };
-                                let sections = ANSIParser::parse(&input, font_id.clone(), &self.theme);
-                                let mut job = LayoutJob::default();
-                                for mut s in sections {
-                                    if nick.away {
-                                        s.format.color = egui::text::TextFormat {
-                                            color: text_muted,
-                                            italics: true,
-                                            ..s.format.clone()
-                                        }.color;
-                                        s.format.italics = true;
-                                    }
-                                    job.append(&s.text, 0.0, s.format);
-                                }
 
-                                let label_res = ui.add(Label::new(job).truncate(true).sense(egui::Sense::click()));
-                                label_res.context_menu(|ui| {
-                                    if ui.button(format!("Query {}", nick.name)).clicked() {
-                                        self.send_command(&format!("/query {}", nick.name));
-                                        ui.close_menu();
-                                    }
-                                    if ui.button(format!("Whois {}", nick.name)).clicked() {
-                                        self.send_command(&format!("/whois {}", nick.name));
-                                        ui.close_menu();
-                                    }
-                                });
+                                    let label_res = ui.add(Label::new(job).truncate(true).sense(egui::Sense::click()));
+                                    label_res.context_menu(|ui| {
+                                        if ui.button(format!("Query {}", nick.name)).clicked() {
+                                            self.send_command(&format!("/query {}", nick.name));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button(format!("Whois {}", nick.name)).clicked() {
+                                            self.send_command(&format!("/whois {}", nick.name));
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
                 });
             self.nicklist_width = nicks_resp.response.rect.width();
         }
