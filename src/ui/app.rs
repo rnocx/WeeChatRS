@@ -320,7 +320,7 @@ pub struct AppSettings {
 }
 
 fn default_true() -> bool { true }
-fn default_nicklist_width() -> f32 { 0.0 }
+fn default_nicklist_width() -> f32 { 180.0 }
 fn default_prefix_suffix() -> String { "│".to_string() }
 
 impl Default for AppSettings {
@@ -1289,14 +1289,15 @@ impl eframe::App for WeeChatApp {
 
         let current_buf_has_nicklist = current_buf.map(|b| b.has_nicklist).unwrap_or(false);
         if self.show_nicklist && !is_query_or_core && current_buf_has_nicklist && any_connected && current_buffer_id.is_some() {
-            if self.nicklist_width == 0.0 {
-                let char_w = ctx.fonts(|f| f.glyph_width(&font_id, 'W'));
-                self.nicklist_width = char_w * 15.0 + 20.0;
+            // Use a hardcoded default so we don't get stuck at min_width when fonts
+            // aren't fully initialized on the first frame the panel appears.
+            if self.nicklist_width < 80.0 {
+                self.nicklist_width = 180.0;
             }
             let nicks_resp = egui::SidePanel::right("nicks_panel")
                 .resizable(true)
                 .default_width(self.nicklist_width)
-                .min_width(60.0)
+                .min_width(80.0)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
