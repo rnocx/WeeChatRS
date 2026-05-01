@@ -955,8 +955,31 @@ pub fn spawn(
                                         break 'conn;
                                     }
                                     Some(IrcCommand::SendMessage { buffer_id, text }) => {
+                                        // /part and /close — leave channel or close DM buffer
+                                        let cmd_lower = text.trim().to_lowercase();
+                                        let is_part = cmd_lower == "/part" || cmd_lower.starts_with("/part ");
+                                        let is_close = cmd_lower == "/close";
+                                        if is_part || is_close {
+                                            if is_channel(&buffer_id) {
+                                                // Send PART with optional message from /part <msg>
+                                                let part_msg = if is_part {
+                                                    text.trim()["/part".len()..].trim().to_string()
+                                                } else {
+                                                    String::new()
+                                                };
+                                                if part_msg.is_empty() {
+                                                    let _ = write_half.write_all(format!("PART {}\r\n", buffer_id).as_bytes()).await;
+                                                } else {
+                                                    let _ = write_half.write_all(format!("PART {} :{}\r\n", buffer_id, part_msg).as_bytes()).await;
+                                                }
+                                                // Server will echo PART back which triggers BufferClosed
+                                            } else {
+                                                // DM/private buffer: close locally, no server message needed
+                                                session.joined.remove(&buffer_id);
+                                                send!(BackendEvent::BufferClosed { buffer_id });
+                                            }
                                         // /query <nick> — client-side command: open a DM buffer, nothing to send
-                                        if let Some(rest) = text.strip_prefix("/query ").or_else(|| text.strip_prefix("/QUERY ")) {
+                                        } else if let Some(rest) = text.strip_prefix("/query ").or_else(|| text.strip_prefix("/QUERY ")) {
                                             let target_nick = rest.trim().split_whitespace().next().unwrap_or("").to_string();
                                             if !target_nick.is_empty() {
                                                 let buf_id = target_nick.to_lowercase();
