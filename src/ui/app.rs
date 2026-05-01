@@ -1299,6 +1299,11 @@ impl eframe::App for WeeChatApp {
                 .min_width(80.0)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
+                    // Force content to fill the full panel width so that egui's
+                    // PanelState stores the actual panel width (not just content
+                    // min_rect), preventing the panel from snapping back to
+                    // content width after every resize.
+                    ui.set_min_width(ui.available_width());
                     if current_buf_has_nicklist {
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
