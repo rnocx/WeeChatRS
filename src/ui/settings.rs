@@ -21,6 +21,8 @@ impl WeeChatApp {
         let mut show_hidden_buffers = self.show_hidden_buffers;
         let mut emoji_rendering = self.emoji_rendering;
         let mut opacity = self.opacity;
+        let mut prefix_align_max = self.prefix_align_max;
+        let mut prefix_suffix = self.prefix_suffix.clone();
         let mut close = false;
         let mut reset_theme = false;
         let mut new_font: Option<(String, String)> = None;
@@ -71,6 +73,16 @@ impl WeeChatApp {
                             ui.checkbox(&mut show_filtered_lines, "Show filtered lines");
                             ui.checkbox(&mut colored_nicks, "Colored nicknames in list");
                             ui.checkbox(&mut show_timestamps, "Show timestamps");
+                            ui.horizontal(|ui| {
+                                ui.label("Nick column max width (chars):");
+                                ui.add(egui::DragValue::new(&mut prefix_align_max).clamp_range(0usize..=64usize).speed(1));
+                                ui.label(RichText::new("0 = auto").small().color(ui.visuals().weak_text_color()));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Nick/message separator:");
+                                ui.add(egui::TextEdit::singleline(&mut prefix_suffix).desired_width(40.0));
+                                ui.label(RichText::new("weechat.look.prefix_suffix").small().color(ui.visuals().weak_text_color()));
+                            });
                             ui.checkbox(&mut auto_reconnect, "Auto-reconnect on drop");
                             ui.checkbox(&mut show_titlebar, "Show Topic/Modes Titlebar");
                             ui.checkbox(&mut show_server_headers, "Show server group headers in buffer list");
@@ -274,6 +286,10 @@ impl WeeChatApp {
         self.show_hidden_buffers = show_hidden_buffers;
         self.emoji_rendering = emoji_rendering;
         self.opacity = opacity;
+        self.prefix_align_max = prefix_align_max;
+        if self.prefix_suffix != prefix_suffix {
+            self.prefix_suffix = prefix_suffix;
+        }
         if reset_theme { self.theme = AppTheme::default(); }
         if reset_font {
             self.font_name.clear();
@@ -342,7 +358,7 @@ impl WeeChatApp {
                                         ui.end_row();
                                         ui.label("Backend:");
                                         ui.horizontal(|ui| {
-                                            ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::WeeChat, "WeeChat Relay");
+                                            ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::WeeChat, "WeeChat");
                                             ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::Soju, "IRC");
                                         });
                                         ui.end_row();
