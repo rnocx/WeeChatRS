@@ -36,16 +36,11 @@ impl WeeChatApp {
                         crate::ui::app::BackendType::Soju => {
                             let ts = chrono::Local::now().format("%H:%M:%S").to_string();
                             conn.connection_log.push_back(format!("[{}]  IRC registration complete (CAP/NICK/USER)", ts));
-                            let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
-                            conn.connection_log.push_back(format!("[{}]  Waiting for channel JOINs from soju…", ts2));
                         }
                     }
                     let ts = chrono::Local::now().format("%H:%M:%S").to_string();
                     conn.connection_log.push_back(format!("[{}]  Connected", ts));
                     if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
-                    if conn.connection_attempts == 1 {
-                        self.cleared_buffer_ids.clear();
-                    }
                 }
                 // Remove stale buffers for this connection then re-fetch
                 let pfx = format!("{}/", conn_prefix);
@@ -138,6 +133,9 @@ impl WeeChatApp {
                     self.connection_log_unread = true;
                 }
             }
+            BackendEvent::ConnLog(msg) => {
+                self.log_conn_for(conn_prefix, msg);
+            }
             BackendEvent::_WeeChat(resp) => {
                 self.process_response(conn_prefix, resp);
             }
@@ -220,6 +218,14 @@ impl WeeChatApp {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
                     buf.nicks.retain(|n| !n.name.eq_ignore_ascii_case(&nick_name));
+                }
+            }
+            BackendEvent::NickAwayChanged { buffer_id, nick_name, away } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    if let Some(nick) = buf.nicks.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&nick_name)) {
+                        nick.away = away;
+                    }
                 }
             }
             BackendEvent::TopicChanged { buffer_id, topic } => {
@@ -382,6 +388,12 @@ impl WeeChatApp {
                     }
                 }
                 "buffer_hotlist_added" | "buffer_hotlist_updated" => {
+                    // New unread activity pushed while connected — remove from cleared set
+                    // so the real unread state is applied rather than being suppressed.
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
+                        self.cleared_buffer_ids.remove(&full_id);
+                    }
                     self.handle_hotlist(conn_prefix, resp);
                 }
                 "buffer_hotlist_removed" => {
@@ -800,7 +812,7 @@ impl WeeChatApp {
         } else {
             color.to_string()
         };
-        Some(Nick { name: name.to_string(), prefix: prefix.to_string(), color_ansi })
+        Some(Nick { name: name.to_string(), prefix: prefix.to_string(), color_ansi, away: false })
     }
 
     fn extract_nicks(&self, val: &Value, nicks: &mut Vec<Nick>) {

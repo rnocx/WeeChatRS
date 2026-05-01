@@ -190,6 +190,8 @@ pub struct ConnectionProfile {
     pub host: String,
     pub port: String,
     pub nick: String,
+    #[serde(default)]
+    pub sasl_username: String,
     pub use_ssl: bool,
     pub accept_invalid_certs: bool,
     pub auto_connect: bool,
@@ -218,6 +220,7 @@ impl Default for ConnectionProfile {
             host: "localhost".to_string(),
             port: "9001".to_string(),
             nick: String::new(),
+            sasl_username: String::new(),
             use_ssl: true,
             accept_invalid_certs: false,
             auto_connect: false,
@@ -237,7 +240,6 @@ pub struct ConnectionHandle {
     pub connecting_pending: bool,
     pub auth_error: Option<String>,
     pub auto_reconnect: bool,
-    pub connection_attempts: u32,
     pub connection_log: VecDeque<String>,
 }
 
@@ -477,6 +479,7 @@ impl WeeChatApp {
                 host: settings.host.clone(),
                 port: settings.port.clone(),
                 nick: settings.irc_nick.clone(),
+                sasl_username: String::new(),
                 use_ssl: settings.use_ssl,
                 accept_invalid_certs: settings.accept_invalid_certs,
                 auto_connect: false,
@@ -661,6 +664,7 @@ impl WeeChatApp {
                     host: profile.host.clone(),
                     port,
                     nick: if profile.nick.is_empty() { "user".to_string() } else { profile.nick.clone() },
+                    sasl_username: profile.sasl_username.clone(),
                     password: password.clone(),
                     use_ssl: profile.use_ssl,
                     accept_invalid_certs: profile.accept_invalid_certs,
@@ -692,7 +696,6 @@ impl WeeChatApp {
             connecting_pending: true,
             auth_error: None,
             auto_reconnect: self.auto_reconnect,
-            connection_attempts: 1,
             connection_log: VecDeque::new(),
         };
 
@@ -1277,7 +1280,10 @@ impl eframe::App for WeeChatApp {
                         if let Some(nicks) = &current_buffer_nicks {
                             for nick in nicks {
                                 let text = format!("{}{}", nick.prefix, nick.name);
-                                let input = if self.colored_nicks {
+                                let input = if nick.away {
+                                    // Away nicks: render without colour, italic handled below
+                                    text.clone()
+                                } else if self.colored_nicks {
                                     if self.theme.name == "Default" { format!("{}{}", nick.color_ansi, text) }
                                     else {
                                         let idx = Self::hash_nick(&nick.name);
@@ -1287,7 +1293,17 @@ impl eframe::App for WeeChatApp {
                                 } else { text };
                                 let sections = ANSIParser::parse(&input, font_id.clone(), &self.theme);
                                 let mut job = LayoutJob::default();
-                                for s in sections { job.append(&s.text, 0.0, s.format); }
+                                for mut s in sections {
+                                    if nick.away {
+                                        s.format.color = egui::text::TextFormat {
+                                            color: text_muted,
+                                            italics: true,
+                                            ..s.format.clone()
+                                        }.color;
+                                        s.format.italics = true;
+                                    }
+                                    job.append(&s.text, 0.0, s.format);
+                                }
 
                                 let label_res = ui.add(Label::new(job).truncate(true).sense(egui::Sense::click()));
                                 label_res.context_menu(|ui| {

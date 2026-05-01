@@ -170,11 +170,21 @@ impl BackendClient for WeeChatClient {
 
                         let (mut ws_tx, mut ws_rx) = ws_stream.split();
                         let mut clean = false;
+                        let mut last_received = std::time::Instant::now();
+
+                        // Check for dead connection every 30 s; disconnect if silent for 90 s.
+                        // We do NOT send WebSocket Ping frames because many relay setups (nginx
+                        // proxies, WeeChat itself) close the connection on receiving an
+                        // application-initiated Ping, causing spurious 30-second reconnect loops.
+                        let mut idle_check = tokio::time::interval(Duration::from_secs(30));
+                        idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        idle_check.tick().await; // skip the immediate first tick
 
                         loop {
                             tokio::select! {
                                 Some(msg) = ws_rx.next() => match msg {
                                     Ok(Message::Text(text)) => {
+                                        last_received = std::time::Instant::now();
                                         if let Ok(resp) = serde_json::from_str::<WeeChatResponse>(&text) {
                                             // WeeChatResponse → BackendEvent translation happens
                                             // inside event_handler (still on WeeChatApp).
@@ -183,6 +193,13 @@ impl BackendClient for WeeChatClient {
                                             let _ = event_tx.send(BackendEvent::_WeeChat(resp));
                                             ctx.request_repaint();
                                         }
+                                    }
+                                    Ok(Message::Ping(data)) => {
+                                        last_received = std::time::Instant::now();
+                                        let _ = ws_tx.send(Message::Pong(data)).await;
+                                    }
+                                    Ok(Message::Pong(_)) => {
+                                        last_received = std::time::Instant::now();
                                     }
                                     Ok(Message::Close(_)) => {
                                         connected.store(false, Ordering::Relaxed);
@@ -208,6 +225,14 @@ impl BackendClient for WeeChatClient {
                                         connected.store(false, Ordering::Relaxed);
                                         send!(BackendEvent::Disconnected);
                                         clean = true;
+                                        break;
+                                    }
+                                },
+                                _ = idle_check.tick() => {
+                                    if last_received.elapsed() > Duration::from_secs(90) {
+                                        // No data from server in 90 s — connection is dead
+                                        connected.store(false, Ordering::Relaxed);
+                                        send!(BackendEvent::Disconnected);
                                         break;
                                     }
                                 }
@@ -257,14 +282,24 @@ impl BackendClient for WeeChatClient {
     }
 
     fn mark_read(&self, buffer_id: &str) {
+        // REST endpoint (WeeChat 4.3+): sets the persistent last_read_line_ufr marker.
         self.send_api(
-            "POST /api/input",
+            &format!("POST /api/buffers/{}/read", buffer_id),
             None,
-            Some(json!({
-                "buffer_id": buffer_id.parse::<i64>().unwrap_or(0),
-                "input": "/input hotlist_clear"
-            })),
+            None,
         );
+        // Belt-and-suspenders for older relay versions: the input command clears the
+        // in-memory hotlist entry immediately and also updates last_read_line_ufr.
+        if let Ok(id) = buffer_id.parse::<i64>() {
+            self.send_api(
+                "POST /api/input",
+                None,
+                Some(serde_json::json!({
+                    "buffer_id": id,
+                    "input": "/buffer set hotlist -1"
+                })),
+            );
+        }
     }
 
     fn is_connected(&self) -> bool {

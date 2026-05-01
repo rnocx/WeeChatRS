@@ -13,6 +13,7 @@ pub struct IrcConfig {
     pub host: String,
     pub port: u16,
     pub nick: String,
+    pub sasl_username: String,
     pub password: String,
     pub use_ssl: bool,
     pub accept_invalid_certs: bool,
