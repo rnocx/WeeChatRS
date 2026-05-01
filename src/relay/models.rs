@@ -61,4 +61,5 @@ pub struct Nick {
     pub name: String,
     pub prefix: String,
     pub color_ansi: String,
+    pub away: bool,
 }

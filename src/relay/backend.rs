@@ -14,6 +14,8 @@ pub enum BackendEvent {
     Error(String),
     /// Authentication failed (wrong password, rejected SASL, etc.).
     AuthError(String),
+    /// Informational message for the connection log only (not shown as an error).
+    ConnLog(String),
     /// Full initial buffer list received on connect.
     BuffersLoaded(Vec<Buffer>),
     /// A single new message arrived in a buffer.
@@ -35,6 +37,12 @@ pub enum BackendEvent {
     NickRemoved {
         buffer_id: String,
         nick_name: String,
+    },
+    /// A nick's away status changed.
+    NickAwayChanged {
+        buffer_id: String,
+        nick_name: String,
+        away: bool,
     },
     /// Unread activity changed for a buffer.
     ActivityChanged {
