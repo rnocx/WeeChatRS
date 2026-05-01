@@ -46,6 +46,8 @@ struct Session {
     monitored_nicks: HashSet<String>,
     pending_status_lines: Vec<Line>,
     pong_received: bool,
+    targets_batch_ref: Option<String>,
+    pending_pm_targets: Vec<String>,
 }
 
 impl Session {
@@ -70,6 +72,8 @@ impl Session {
             monitored_nicks: HashSet::new(),
             pending_status_lines: Vec::new(),
             pong_received: true,
+            targets_batch_ref: None,
+            pending_pm_targets: Vec::new(),
         }
     }
 
@@ -153,9 +157,21 @@ fn strip_prefix_chars(name: &str) -> (&str, &str) {
     (&name[..end], &name[end..])
 }
 
+/// Returns the single highest-ranking IRC prefix char from a set of prefix chars.
+/// Ranking: ~ (owner) > & (admin) > @ (op) > % (halfop) > + (voice)
+fn highest_prefix(prefixes: &str) -> &'static str {
+    if prefixes.contains('~') { "~" }
+    else if prefixes.contains('&') { "&" }
+    else if prefixes.contains('@') { "@" }
+    else if prefixes.contains('%') { "%" }
+    else if prefixes.contains('+') { "+" }
+    else { "" }
+}
+
 fn parse_names_entry(entry: &str) -> Nick {
-    // multi-prefix: strip all leading mode chars (@, +, %, ~, &, !)
-    let (prefix, rest) = strip_prefix_chars(entry);
+    // multi-prefix: strip all leading mode chars, then keep only the highest-ranked one
+    let (all_prefixes, rest) = strip_prefix_chars(entry);
+    let prefix = highest_prefix(all_prefixes);
     // userhost-in-names: rest may be "nick!user@host" — keep only the nick part
     let name = rest.split('!').next().unwrap_or(rest);
     Nick { name: name.to_string(), prefix: prefix.to_string(), color_ansi: nick_color_ansi(name), away: false }
@@ -304,6 +320,11 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 events.push(BackendEvent::LineAdded { buffer_id: "status".to_string(), line: make_line(&line_counter.to_string(), "--", welcome, timestamp_from_msg(msg), false) });
             } else {
                 session.pending_status_lines.clear();
+                // Ask soju for all recent conversations so we can discover PMs that
+                // arrived while we were disconnected (channels come via JOIN already).
+                if session.negotiated_caps.contains("chathistory") {
+                    session.whois_lines.push("CHATHISTORY TARGETS * * 50".to_string());
+                }
             }
             events.push(BackendEvent::Connected);
         }
@@ -320,12 +341,43 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 if kind == "chathistory" {
                     let target = msg.param(2).unwrap_or("").to_lowercase();
                     session.batch_buf.insert(batch_ref.to_string(), (target, Vec::new()));
+                } else if kind == "chathistory/targets" {
+                    session.targets_batch_ref = Some(batch_ref.to_string());
+                    session.pending_pm_targets.clear();
                 }
                 // labeled-response batches are intentionally NOT added to batch_buf so that
                 // messages inside them flow through the normal handlers immediately.
             } else if let Some(batch_ref) = ref_param.strip_prefix('-') {
                 if let Some((buffer_id, lines)) = session.batch_buf.remove(batch_ref) {
-                    events.push(BackendEvent::LinesLoaded { buffer_id, lines, is_prepend: true });
+                    // Soju replays PM chathistory on connect before we've seen any live PRIVMSG,
+                    // so the buffer may not exist yet — open it now if needed.
+                    if !is_channel(&buffer_id) && !buffer_id.is_empty() && !session.joined.contains(&buffer_id) {
+                        session.joined.insert(buffer_id.clone());
+                        let buf = session.alloc_buffer(&buffer_id, &buffer_id, "private");
+                        events.push(BackendEvent::BufferOpened(buf));
+                    }
+                    if !lines.is_empty() {
+                        events.push(BackendEvent::LinesLoaded { buffer_id, lines, is_prepend: true });
+                    }
+                } else if session.targets_batch_ref.as_deref() == Some(batch_ref) {
+                    session.targets_batch_ref = None;
+                    for target in std::mem::take(&mut session.pending_pm_targets) {
+                        if !session.joined.contains(&target) {
+                            session.joined.insert(target.clone());
+                            let buf = session.alloc_buffer(&target, &target, "private");
+                            events.push(BackendEvent::BufferOpened(buf));
+                            session.whois_lines.push(format!("CHATHISTORY LATEST {} * 100", target));
+                        }
+                    }
+                }
+            }
+        }
+
+        "CHATHISTORY" => {
+            if msg.param(0).unwrap_or("") == "TARGETS" {
+                let target = msg.param(1).unwrap_or("").to_string();
+                if !target.is_empty() && !is_channel(&target) {
+                    session.pending_pm_targets.push(target.to_lowercase());
                 }
             }
         }
@@ -678,7 +730,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             let channel = msg.param(1).unwrap_or("").to_lowercase();
             let nick = msg.param(5).unwrap_or("").to_string();
             let flags = msg.param(6).unwrap_or("");
-            let prefix = if flags.contains('@') { "@" } else if flags.contains('+') { "+" } else { "" };
+            let prefix = highest_prefix(flags);
             let bucket = session.who_buf.entry(channel).or_default();
             if let Some(existing) = bucket.iter_mut().find(|n| n.name == nick) {
                 existing.prefix = prefix.to_string();

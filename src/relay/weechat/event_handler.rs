@@ -147,6 +147,10 @@ impl WeeChatApp {
                 if !self.buffers.iter().any(|b| b.id == full_id) {
                     self.buffers.push(buf);
                 }
+                // Auto-select when nothing is currently selected (e.g. first buffer on connect).
+                if self.selected_buffer_id.is_none() {
+                    self.select_buffer(full_id.clone());
+                }
                 // Resolve a pending /join or /query switch
                 if let Some(target) = self.pending_buffer_switch.take() {
                     if let Some(found) = self.buffers.iter().find(|b|
@@ -180,12 +184,15 @@ impl WeeChatApp {
             }
             BackendEvent::LineAdded { buffer_id, line } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
-                    if line.highlight {
-                        buf.activity = crate::relay::models::BufferActivity::Highlight;
+                    if !is_selected && !buf.muted && line.displayed {
+                        if line.highlight {
+                            buf.activity = crate::relay::models::BufferActivity::Highlight;
+                        } else if buf.activity != crate::relay::models::BufferActivity::Highlight {
+                            buf.activity = crate::relay::models::BufferActivity::Message;
+                        }
                         buf.unread_count = buf.unread_count.saturating_add(1);
-                    } else if matches!(buf.activity, crate::relay::models::BufferActivity::None) {
-                        buf.activity = crate::relay::models::BufferActivity::Message;
                     }
                     buf.messages.push_back(line);
                     if buf.messages.len() > MAX_STORED_LINES {
@@ -197,7 +204,12 @@ impl WeeChatApp {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 nicks.sort_by(|a, b| {
                     fn rank(p: &str) -> u8 {
-                        if p.contains('@') { 0 } else if p.contains('+') { 1 } else { 2 }
+                        if p.contains('~') { 0 }
+                        else if p.contains('&') { 1 }
+                        else if p.contains('@') { 2 }
+                        else if p.contains('%') { 3 }
+                        else if p.contains('+') { 4 }
+                        else { 5 }
                     }
                     rank(&a.prefix).cmp(&rank(&b.prefix))
                         .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
@@ -243,7 +255,23 @@ impl WeeChatApp {
             }
             BackendEvent::LinesLoaded { buffer_id, lines, is_prepend } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
+                let is_load_more = self.loading_more_buffer_id.as_deref() == Some(full_id.as_str());
                 if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    // Update activity for on-connect chathistory replay, but not for
+                    // user-triggered "load more" requests (those are explicitly old history).
+                    if !is_selected && !buf.muted && !is_load_more {
+                        for line in &lines {
+                            if !line.displayed { continue; }
+                            if line.highlight {
+                                buf.activity = crate::relay::models::BufferActivity::Highlight;
+                                buf.unread_count = buf.unread_count.saturating_add(1);
+                            } else if buf.activity != crate::relay::models::BufferActivity::Highlight {
+                                buf.activity = crate::relay::models::BufferActivity::Message;
+                                buf.unread_count = buf.unread_count.saturating_add(1);
+                            }
+                        }
+                    }
                     if is_prepend {
                         for line in lines.into_iter().rev() {
                             buf.messages.push_front(line);
@@ -260,7 +288,7 @@ impl WeeChatApp {
                         }
                     }
                 }
-                if self.loading_more_buffer_id.as_deref() == Some(&full_id) {
+                if is_load_more {
                     self.loading_more_buffer_id = None;
                 }
             }

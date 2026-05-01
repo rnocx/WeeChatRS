@@ -311,10 +311,17 @@ pub struct AppSettings {
     /// Multi-connection profiles (new).
     #[serde(default)]
     pub connections: Vec<ConnectionProfile>,
+    /// Max chars in prefix column (0 = auto/dynamic, matches weechat.look.prefix_align_max).
+    #[serde(default)]
+    pub prefix_align_max: usize,
+    /// Separator between prefix column and message (matches weechat.look.prefix_suffix).
+    #[serde(default = "default_prefix_suffix")]
+    pub prefix_suffix: String,
 }
 
 fn default_true() -> bool { true }
 fn default_nicklist_width() -> f32 { 0.0 }
+fn default_prefix_suffix() -> String { "│".to_string() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -351,6 +358,8 @@ impl Default for AppSettings {
             backend_type: BackendType::WeeChat,
             irc_nick: String::new(),
             connections: Vec::new(),
+            prefix_align_max: 0,
+            prefix_suffix: "│".to_string(),
         }
     }
 }
@@ -451,6 +460,12 @@ pub struct WeeChatApp {
 
     // Transient search text inside the font-family dropdown.
     pub(crate) font_search: String,
+
+    // Prefix column alignment (mirrors weechat.look.prefix_align_max / prefix_suffix).
+    pub(crate) prefix_align_max: usize,
+    pub(crate) prefix_suffix: String,
+    // Per-buffer max prefix pixel width tracked across frames for stable column alignment.
+    pub(crate) prefix_col_widths: HashMap<String, f32>,
 }
 
 pub(crate) struct CompletionState {
@@ -559,6 +574,9 @@ impl WeeChatApp {
             muted_buffer_names: settings.muted_buffer_names,
             loading_more_buffer_id: None,
             font_search: String::new(),
+            prefix_align_max: settings.prefix_align_max,
+            prefix_suffix: settings.prefix_suffix,
+            prefix_col_widths: HashMap::new(),
         }
     }
 
@@ -755,6 +773,8 @@ impl eframe::App for WeeChatApp {
             accept_invalid_certs: false,
             irc_nick: String::new(),
             connections: self.profiles.clone(),
+            prefix_align_max: self.prefix_align_max,
+            prefix_suffix: self.prefix_suffix.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -1267,7 +1287,8 @@ impl eframe::App for WeeChatApp {
 
         let any_connected = self.is_any_connected();
 
-        if self.show_nicklist && !is_query_or_core && any_connected && current_buffer_id.is_some() {
+        let current_buf_has_nicklist = current_buf.map(|b| b.has_nicklist).unwrap_or(false);
+        if self.show_nicklist && !is_query_or_core && current_buf_has_nicklist && any_connected && current_buffer_id.is_some() {
             if self.nicklist_width == 0.0 {
                 let char_w = ctx.fonts(|f| f.glyph_width(&font_id, 'W'));
                 self.nicklist_width = char_w * 15.0 + 20.0;
@@ -1333,8 +1354,13 @@ impl eframe::App for WeeChatApp {
                 .frame(Frame::none().fill(surface_color).inner_margin(Margin::symmetric(16.0, 10.0)))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
+                        let hint = if current_buffer_kind == "server" {
+                            "Type /join #channel or any IRC command..."
+                        } else {
+                            "Type a message..."
+                        };
                         let text_edit = egui::TextEdit::singleline(&mut self.input_text)
-                            .hint_text("Type a message...")
+                            .hint_text(hint)
                             .margin(Margin::symmetric(8.0, 4.0))
                             .lock_focus(true)
                             .desired_width(ui.available_width() - 80.0);
@@ -1632,10 +1658,36 @@ impl eframe::App for WeeChatApp {
                                             ui.label(egui::RichText::new(line.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()).font(font_id.clone()).color(text_muted));
                                         }
                                         let prefix_sections = ANSIParser::parse(&line.prefix, font_id.clone(), &self.theme);
-                                        let mut prefix_job = LayoutJob::default();
-                                        prefix_job.halign = egui::Align::LEFT;
-                                        for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.format); }
-                                        ui.add(Label::new(prefix_job).wrap(false));
+
+                                        // Measure plain-text width for stable column tracking.
+                                        let prefix_plain: String = prefix_sections.iter().map(|s| s.text.as_str()).collect();
+                                        let measured_w = ui.fonts(|f| {
+                                            f.layout_no_wrap(prefix_plain, font_id.clone(), Color32::WHITE).size().x
+                                        });
+                                        let cap_px = if self.prefix_align_max > 0 {
+                                            ui.fonts(|f| {
+                                                f.layout_no_wrap("M".repeat(self.prefix_align_max), font_id.clone(), Color32::WHITE).size().x
+                                            })
+                                        } else {
+                                            f32::INFINITY
+                                        };
+                                        let entry = self.prefix_col_widths.entry(current_buffer_id.clone().unwrap_or_default()).or_insert(0.0);
+                                        *entry = entry.max(measured_w).min(cap_px);
+                                        let col_width = *entry;
+
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(col_width, ui.text_style_height(&TextStyle::Body)),
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let mut prefix_job = LayoutJob::default();
+                                                prefix_job.halign = egui::Align::RIGHT;
+                                                for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.format); }
+                                                ui.add(Label::new(prefix_job).wrap(false));
+                                            }
+                                        );
+                                        if !self.prefix_suffix.is_empty() {
+                                            ui.label(egui::RichText::new(&self.prefix_suffix).font(font_id.clone()).color(text_muted));
+                                        }
 
                                         let msg_col_width = ui.available_width();
                                         ui.vertical(|ui| {
