@@ -356,6 +356,12 @@ impl WeeChatApp {
                                             ui.label("Nick:");
                                             ui.add(egui::TextEdit::singleline(&mut self.editing_profile.nick).desired_width(200.0));
                                             ui.end_row();
+                                            ui.label("Username:");
+                                            ui.vertical(|ui| {
+                                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.username).desired_width(200.0).hint_text("leave blank to use nick"));
+                                                ui.label(RichText::new("IRC USER field — use nick/network for ZNC").small().color(ui.visuals().weak_text_color()));
+                                            });
+                                            ui.end_row();
                                             ui.label("SASL username:");
                                             ui.vertical(|ui| {
                                                 ui.add(egui::TextEdit::singleline(&mut self.editing_profile.sasl_username).desired_width(200.0).hint_text("leave blank to use nick"));

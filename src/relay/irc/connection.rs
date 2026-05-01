@@ -845,7 +845,8 @@ pub fn spawn(
                         let _ = write_half.write_all(format!("PASS :{}\r\n", config.password).as_bytes()).await;
                     }
                     let _ = write_half.write_all(format!("NICK {}\r\n", config.nick).as_bytes()).await;
-                    let _ = write_half.write_all(format!("USER {} 0 * :{}\r\n", config.nick, config.nick).as_bytes()).await;
+                    let user = if config.username.is_empty() { &config.nick } else { &config.username };
+                    let _ = write_half.write_all(format!("USER {} 0 * :{}\r\n", user, config.nick).as_bytes()).await;
 
                     connected.store(true, Ordering::Relaxed);
                     backoff = Duration::from_secs(1);

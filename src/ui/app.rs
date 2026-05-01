@@ -191,6 +191,8 @@ pub struct ConnectionProfile {
     pub port: String,
     pub nick: String,
     #[serde(default)]
+    pub username: String,
+    #[serde(default)]
     pub sasl_username: String,
     pub use_ssl: bool,
     pub accept_invalid_certs: bool,
@@ -220,6 +222,7 @@ impl Default for ConnectionProfile {
             host: "localhost".to_string(),
             port: "9001".to_string(),
             nick: String::new(),
+            username: String::new(),
             sasl_username: String::new(),
             use_ssl: true,
             accept_invalid_certs: false,
@@ -479,6 +482,7 @@ impl WeeChatApp {
                 host: settings.host.clone(),
                 port: settings.port.clone(),
                 nick: settings.irc_nick.clone(),
+                username: String::new(),
                 sasl_username: String::new(),
                 use_ssl: settings.use_ssl,
                 accept_invalid_certs: settings.accept_invalid_certs,
@@ -664,6 +668,7 @@ impl WeeChatApp {
                     host: profile.host.clone(),
                     port,
                     nick: if profile.nick.is_empty() { "user".to_string() } else { profile.nick.clone() },
+                    username: profile.username.clone(),
                     sasl_username: profile.sasl_username.clone(),
                     password: password.clone(),
                     use_ssl: profile.use_ssl,
