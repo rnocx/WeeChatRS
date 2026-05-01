@@ -1,4 +1,4 @@
-use crate::relay::client::RelayEvent;
+use crate::relay::backend::BackendEvent;
 use crate::relay::models::*;
 use crate::ui::app::{WeeChatApp, MAX_STORED_LINES};
 use chrono::{Utc, DateTime, Local};
@@ -12,165 +12,350 @@ fn ansi_re() -> &'static regex::Regex {
 }
 
 impl WeeChatApp {
-    pub(crate) fn handle_event(&mut self, event: RelayEvent) {
+    pub(crate) fn handle_event(&mut self, conn_prefix: &str, event: BackendEvent) {
         match event {
-            RelayEvent::Connecting => {
-                self.is_connecting = true;
-                self.connection_status = "Connecting...".to_string();
-                self.connection_attempts += 1;
-                if self.connection_attempts == 1 {
-                    self.log_conn("TCP connection + WebSocket handshake in progress…");
-                } else {
-                    let backoff = {
-                        let secs = 1u64 << (self.connection_attempts - 2).min(4);
-                        secs.min(30)
-                    };
-                    self.log_conn(format!(
-                        "Reconnect attempt {} (backoff was {}s)…",
-                        self.connection_attempts - 1,
-                        backoff
-                    ));
-                }
-            }
-            RelayEvent::Connected => {
-                self.is_connecting = false;
-                self.connecting_pending = false;
-                self.auth_error = None;
-                self.connection_status = "Connected".to_string();
-                self.log_conn("WebSocket handshake complete");
-                self.log_conn("Sending credentials via Sec-WebSocket-Protocol bearer token");
-                self.log_conn("Authentication accepted by relay");
-                self.log_conn("→ GET /api/buffers");
-                self.log_conn("→ POST /api/sync  {colors: ansi, input: false}");
-                self.log_conn("Connected");
-                self.buffers.clear();
-                // On a fresh connect (user clicked Connect) trust the relay's hotlist
-                // entirely — cleared_buffer_ids only applies within a session to avoid
-                // re-showing activity the user already dismissed during an in-progress
-                // connection drop/reconnect cycle.
-                if self.connection_attempts == 1 {
-                    self.cleared_buffer_ids.clear();
-                }
-                if let Some(client) = &self.client {
-                    client.send_api("GET /api/buffers", Some("_list_buffers"), None);
-                    client.send_api("POST /api/sync", None, Some(serde_json::json!({"colors": "ansi", "input": false})));
-                    // Hotlist is fetched from handle_buffer_list once buffers are populated,
-                    // so the activity state is never applied to an empty buffer list.
-                }
-            }
-            RelayEvent::Disconnected => {
-                self.is_connecting = false;
-                if self.connecting_pending {
-                    self.connecting_pending = false;
-                    self.auth_error = Some("Connection closed before auth completed — check your password and relay settings.".to_string());
-                    self.log_conn("WebSocket closed by server before authentication completed");
-                    self.log_conn("Check: relay password, relay plugin loaded, port correct");
-                    self.client = None;
-                    self.connection_status = String::new();
-                } else {
-                    if !self.auto_reconnect {
-                        self.client = None;
+            BackendEvent::Connected => {
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.is_connecting = false;
+                    conn.connecting_pending = false;
+                    conn.auth_error = None;
+                    conn.status = "Connected".to_string();
+                    match conn.backend_type {
+                        crate::ui::app::BackendType::WeeChat => {
+                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  WebSocket handshake complete", ts));
+                            let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  Sending credentials via Sec-WebSocket-Protocol bearer token", ts2));
+                            let ts3 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  Authentication accepted by relay", ts3));
+                            let ts4 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  → GET /api/buffers", ts4));
+                            let ts5 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  → POST /api/sync  {{colors: ansi, input: false}}", ts5));
+                        }
+                        crate::ui::app::BackendType::Soju => {
+                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  IRC registration complete (CAP/NICK/USER)", ts));
+                        }
                     }
-                    self.buffers.clear();
-                    self.selected_buffer_id = None;
-                    self.connection_status = "Disconnected".to_string();
-                    if self.auto_reconnect {
-                        self.log_conn("Disconnected — auto-reconnect is ON, will retry");
+                    let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                    conn.connection_log.push_back(format!("[{}]  Connected", ts));
+                    if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
+                }
+                // Remove stale buffers for this connection then re-fetch
+                let pfx = format!("{}/", conn_prefix);
+                self.buffers.retain(|b| !b.id.starts_with(&pfx));
+                // Fetch buffer list and sync subscriptions on connected connection
+                let conn_prefix_owned = conn_prefix.to_string();
+                if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix_owned) {
+                    conn.client.fetch_buffer_list();
+                    conn.client.sync_subscriptions();
+                }
+                if !self.show_connection_log {
+                    self.connection_log_unread = true;
+                }
+            }
+            BackendEvent::Disconnected => {
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.is_connecting = false;
+                    if conn.connecting_pending {
+                        conn.connecting_pending = false;
+                        conn.auth_error = Some("Connection closed before auth completed — check your password and relay settings.".to_string());
+                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        conn.connection_log.push_back(format!("[{}]  WebSocket closed by server before authentication completed", ts));
+                        let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
+                        conn.connection_log.push_back(format!("[{}]  Check: relay password, relay plugin loaded, port correct", ts2));
+                        conn.status = String::new();
+                        if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
                     } else {
-                        self.log_conn("Disconnected");
+                        conn.status = "Disconnected".to_string();
+                        if conn.auto_reconnect {
+                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  Disconnected — auto-reconnect is ON, will retry", ts));
+                        } else {
+                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  Disconnected", ts));
+                        }
+                        if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
+                    }
+                }
+                // Remove buffers for this connection
+                let pfx = format!("{}/", conn_prefix);
+                self.buffers.retain(|b| !b.id.starts_with(&pfx));
+                if let Some(sel) = &self.selected_buffer_id {
+                    if sel.starts_with(&pfx) {
+                        self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
+                    }
+                }
+                // Remove non-auto-reconnect connections
+                let should_remove = self.connections.iter()
+                    .find(|c| c.prefix == conn_prefix)
+                    .map(|c| !c.auto_reconnect && c.auth_error.is_none())
+                    .unwrap_or(false);
+                if should_remove {
+                    // Keep the handle but mark disconnected so UI shows status
+                }
+                if !self.show_connection_log {
+                    self.connection_log_unread = true;
+                }
+            }
+            BackendEvent::AuthError(e) | BackendEvent::Error(e) => {
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    if conn.connecting_pending {
+                        let is_auth = e.contains("401") || e.contains("403")
+                            || e.to_lowercase().contains("unauthorized")
+                            || e.to_lowercase().contains("forbidden");
+                        conn.connecting_pending = false;
+                        if is_auth {
+                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  Auth error: {}", ts, e));
+                            let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  Wrong password or relay not configured to accept this connection", ts2));
+                        } else {
+                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            conn.connection_log.push_back(format!("[{}]  Connection error: {}", ts, e));
+                        }
+                        conn.auth_error = Some(if is_auth {
+                            "Wrong password or relay not configured to accept this connection.".to_string()
+                        } else {
+                            format!("Connection failed: {}", e)
+                        });
+                        conn.status = String::new();
+                        if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
+                    } else {
+                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        conn.connection_log.push_back(format!("[{}]  Error: {}", ts, e));
+                        conn.status = format!("Error: {}", e);
+                        if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
+                    }
+                }
+                if !self.show_connection_log {
+                    self.connection_log_unread = true;
+                }
+            }
+            BackendEvent::ConnLog(msg) => {
+                self.log_conn_for(conn_prefix, msg);
+            }
+            BackendEvent::_WeeChat(resp) => {
+                self.process_response(conn_prefix, resp);
+            }
+            BackendEvent::BufferOpened(mut buf) => {
+                let full_id = format!("{}/{}", conn_prefix, buf.id);
+                let full_full_name = format!("{}/{}", conn_prefix, buf.full_name);
+                buf.id = full_id.clone();
+                buf.full_name = full_full_name;
+                if !self.buffers.iter().any(|b| b.id == full_id) {
+                    self.buffers.push(buf);
+                }
+                // Auto-select when nothing is currently selected (e.g. first buffer on connect).
+                if self.selected_buffer_id.is_none() {
+                    self.select_buffer(full_id.clone());
+                }
+                // Resolve a pending /join or /query switch
+                if let Some(target) = self.pending_buffer_switch.take() {
+                    if let Some(found) = self.buffers.iter().find(|b|
+                        b.name == target
+                        || b.id == target
+                        || b.full_name.ends_with(&target)
+                    ) {
+                        let id = found.id.clone();
+                        self.select_buffer(id);
+                    } else {
+                        self.pending_buffer_switch = Some(target);
                     }
                 }
             }
-            RelayEvent::Error(e) => {
-                if self.connecting_pending {
-                    let is_auth = e.contains("401") || e.contains("403")
-                        || e.to_lowercase().contains("unauthorized")
-                        || e.to_lowercase().contains("forbidden");
-                    self.connecting_pending = false;
-                    if is_auth {
-                        self.log_conn(format!("Auth error: {}", e));
-                        self.log_conn("Wrong password or relay not configured to accept this connection");
-                    } else {
-                        self.log_conn(format!("Connection error: {}", e));
+            BackendEvent::BufferClosed { buffer_id } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                self.buffers.retain(|b| b.id != full_id);
+                if self.selected_buffer_id.as_deref() == Some(&full_id) {
+                    self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
+                }
+            }
+            BackendEvent::BuffersLoaded(bufs) => {
+                // Prefix all buffer ids from this connection, then replace those buffers
+                let pfx = format!("{}/", conn_prefix);
+                self.buffers.retain(|b| !b.id.starts_with(&pfx));
+                for mut buf in bufs {
+                    buf.id = format!("{}/{}", conn_prefix, buf.id);
+                    buf.full_name = format!("{}/{}", conn_prefix, buf.full_name);
+                    self.buffers.push(buf);
+                }
+            }
+            BackendEvent::LineAdded { buffer_id, line } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    if !is_selected && !buf.muted && line.displayed {
+                        if line.highlight {
+                            buf.activity = crate::relay::models::BufferActivity::Highlight;
+                        } else if buf.activity != crate::relay::models::BufferActivity::Highlight {
+                            buf.activity = crate::relay::models::BufferActivity::Message;
+                        }
+                        buf.unread_count = buf.unread_count.saturating_add(1);
                     }
-                    self.auth_error = Some(if is_auth {
-                        "Wrong password or relay not configured to accept this connection.".to_string()
-                    } else {
-                        format!("Connection failed: {}", e)
-                    });
-                    self.client = None;
-                    self.connection_status = String::new();
-                } else {
-                    self.log_conn(format!("Error: {}", e));
-                    self.connection_status = format!("Error: {}", e);
-                    if !self.auto_reconnect {
-                        self.client = None;
-                        self.buffers.clear();
+                    buf.messages.push_back(line);
+                    if buf.messages.len() > MAX_STORED_LINES {
+                        buf.messages.pop_front();
                     }
                 }
             }
-            RelayEvent::Message(resp) => {
-                self.process_response(resp);
+            BackendEvent::NicklistLoaded { buffer_id, mut nicks } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                nicks.sort_by(|a, b| {
+                    fn rank(p: &str) -> u8 {
+                        if p.contains('~') { 0 }
+                        else if p.contains('&') { 1 }
+                        else if p.contains('@') { 2 }
+                        else if p.contains('%') { 3 }
+                        else if p.contains('+') { 4 }
+                        else { 5 }
+                    }
+                    rank(&a.prefix).cmp(&rank(&b.prefix))
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    buf.nicks = nicks;
+                }
+            }
+            BackendEvent::NickAdded { buffer_id, nick } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    if !buf.nicks.iter().any(|n| n.name == nick.name) {
+                        buf.nicks.push(nick);
+                    }
+                }
+            }
+            BackendEvent::NickRemoved { buffer_id, nick_name } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    buf.nicks.retain(|n| !n.name.eq_ignore_ascii_case(&nick_name));
+                }
+            }
+            BackendEvent::NickAwayChanged { buffer_id, nick_name, away } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    if let Some(nick) = buf.nicks.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&nick_name)) {
+                        nick.away = away;
+                    }
+                }
+            }
+            BackendEvent::TopicChanged { buffer_id, topic } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    buf.topic = topic;
+                }
+            }
+            BackendEvent::ActivityChanged { buffer_id, activity, unread_count } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    buf.activity = activity;
+                    buf.unread_count = unread_count;
+                }
+            }
+            BackendEvent::LinesLoaded { buffer_id, lines, is_prepend } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
+                let is_load_more = self.loading_more_buffer_id.as_deref() == Some(full_id.as_str());
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    // Update activity for on-connect chathistory replay, but not for
+                    // user-triggered "load more" requests (those are explicitly old history).
+                    if !is_selected && !buf.muted && !is_load_more {
+                        for line in &lines {
+                            if !line.displayed { continue; }
+                            if line.highlight {
+                                buf.activity = crate::relay::models::BufferActivity::Highlight;
+                                buf.unread_count = buf.unread_count.saturating_add(1);
+                            } else if buf.activity != crate::relay::models::BufferActivity::Highlight {
+                                buf.activity = crate::relay::models::BufferActivity::Message;
+                                buf.unread_count = buf.unread_count.saturating_add(1);
+                            }
+                        }
+                    }
+                    if is_prepend {
+                        for line in lines.into_iter().rev() {
+                            buf.messages.push_front(line);
+                        }
+                        while buf.messages.len() > MAX_STORED_LINES {
+                            buf.messages.pop_back();
+                        }
+                    } else {
+                        for line in lines {
+                            buf.messages.push_back(line);
+                        }
+                        while buf.messages.len() > MAX_STORED_LINES {
+                            buf.messages.pop_front();
+                        }
+                    }
+                }
+                if is_load_more {
+                    self.loading_more_buffer_id = None;
+                }
+            }
+            BackendEvent::BufferHidden { buffer_id, hidden } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                    buf.hidden = hidden;
+                }
             }
         }
     }
 
-    pub(crate) fn process_response(&mut self, resp: WeeChatResponse) {
+    pub(crate) fn process_response(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
         if let Some(id) = &resp.request_id {
             if id == "_list_buffers" {
-                self.handle_buffer_list(resp);
+                self.handle_buffer_list(conn_prefix, resp);
                 return;
             } else if id == "_hotlist" {
-                self.handle_hotlist(resp);
+                self.handle_hotlist(conn_prefix, resp);
                 return;
             } else if id.starts_with("_buffer_lines:") {
                 let buffer_id = id[14..].to_string();
-                self.handle_buffer_lines(&buffer_id, resp);
+                self.handle_buffer_lines(conn_prefix, &buffer_id, resp);
                 return;
             } else if id.starts_with("_nicks:") {
                 let buffer_id = id[7..].to_string();
-                self.handle_nick_list(&buffer_id, resp);
+                self.handle_nick_list(conn_prefix, &buffer_id, resp);
                 return;
             } else if id.starts_with("_buffer_info:") {
                 let buffer_id = id[13..].to_string();
-                self.handle_buffer_info(&buffer_id, resp);
+                self.handle_buffer_info(conn_prefix, &buffer_id, resp);
                 return;
             }
         }
 
         if let Some(event) = &resp.event_name {
             match event.as_str() {
-                "buffer_line_added" => self.handle_line_added(resp),
-                "buffer_line_data_changed" => self.handle_line_changed(resp),
+                "buffer_line_added" => self.handle_line_added(conn_prefix, resp),
+                "buffer_line_data_changed" => self.handle_line_changed(conn_prefix, resp),
                 "buffer_hidden" => {
-                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
-                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
+                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
                             buf.hidden = true;
                         }
                     }
                 }
                 "buffer_unhidden" => {
-                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
-                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
+                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
                             buf.hidden = false;
                         }
                     }
                 }
                 "buffer_title_changed" => {
-                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
-                        if let Some(client) = &self.client {
-                            client.send_api(
-                                &format!("GET /api/buffers/{}", buffer_id),
-                                Some(&format!("_buffer_info:{}", buffer_id)),
-                                None,
-                            );
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
+                            conn.client.refresh_buffer(&raw_id);
                         }
                     }
                 }
                 "nicklist_nick_added" => {
-                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(nick) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
-                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
                                 if !buf.nicks.iter().any(|n| n.name == nick.name) {
                                     buf.nicks.push(nick);
                                     buf.nicks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -180,18 +365,20 @@ impl WeeChatApp {
                     }
                 }
                 "nicklist_nick_removing" => {
-                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(name) = resp.body.as_ref().and_then(|b| b.get("name")).and_then(|v| v.as_str()) {
-                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
                                 buf.nicks.retain(|n| n.name != name);
                             }
                         }
                     }
                 }
                 "nicklist_nick_changed" => {
-                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(updated) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
-                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
                                 if let Some(existing) = buf.nicks.iter_mut().find(|n| n.name == updated.name) {
                                     *existing = updated;
                                 } else {
@@ -203,8 +390,9 @@ impl WeeChatApp {
                     }
                 }
                 "buffer_cleared" => {
-                    if let Some(buffer_id) = resp.buffer_id.map(|i| i.to_string()) {
-                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
+                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
                             buf.messages.clear();
                             buf.last_read_id = None;
                             buf.visit_start_marker_id = None;
@@ -212,33 +400,33 @@ impl WeeChatApp {
                     }
                 }
                 "upgrade" => {
-                    self.connection_status = "WeeChat upgrading…".to_string();
-                    self.log_conn("WeeChat is upgrading — waiting for reload…");
+                    self.log_conn_for(conn_prefix, "WeeChat is upgrading — waiting for reload…");
                 }
                 "upgrade_ended" => {
-                    // WeeChat finished reloading — re-fetch buffers; handle_buffer_list
-                    // will chain the hotlist fetch once buffers are populated.
-                    if let Some(client) = &self.client {
-                        client.send_api("GET /api/buffers", Some("_list_buffers"), None);
+                    if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
+                        conn.client.fetch_buffer_list();
                     }
-                    self.connection_status = "Connected".to_string();
-                    self.log_conn("WeeChat upgrade complete — re-synced");
+                    self.log_conn_for(conn_prefix, "WeeChat upgrade complete — re-synced");
                 }
                 "buffer_opened" | "buffer_closed" | "buffer_renamed"
                 | "buffer_localvar_added" | "buffer_localvar_changed"
                 | "buffer_localvar_removed" => {
-                    if let Some(client) = &self.client {
-                        client.send_api("GET /api/buffers", Some("_list_buffers"), None);
+                    if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
+                        conn.client.fetch_buffer_list();
                     }
                 }
                 "buffer_hotlist_added" | "buffer_hotlist_updated" => {
-                    self.handle_hotlist(resp);
+                    // New unread activity pushed while connected — remove from cleared set
+                    // so the real unread state is applied rather than being suppressed.
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
+                        self.cleared_buffer_ids.remove(&full_id);
+                    }
+                    self.handle_hotlist(conn_prefix, resp);
                 }
                 "buffer_hotlist_removed" => {
-                    // WeeChat cleared a hotlist entry (user read it elsewhere).
-                    // Re-fetch the full hotlist so our state stays in sync.
-                    if let Some(client) = &self.client {
-                        client.send_api("GET /api/hotlist", Some("_hotlist"), None);
+                    if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
+                        conn.client.fetch_hotlist();
                     }
                 }
                 _ => {}
@@ -273,15 +461,12 @@ impl WeeChatApp {
             if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
                 return dt.with_timezone(&Utc);
             }
-            // No timezone in string — treat as Unix timestamp (seconds) if numeric,
-            // otherwise assume the relay's local time and convert to UTC via the local offset.
             if let Ok(secs) = s.parse::<i64>() {
                 if let Some(dt) = DateTime::from_timestamp(secs, 0) {
                     return dt;
                 }
             }
             if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-                // Interpret as local time so we don't offset by the relay server's timezone.
                 return chrono::TimeZone::from_local_datetime(&Local, &dt)
                     .single()
                     .map(|d| d.with_timezone(&Utc))
@@ -305,7 +490,7 @@ impl WeeChatApp {
 
         if full_name == "weechat" || plugin == "core" || full_name == "core.weechat" {
             *kind = "core".to_string();
-            *server = "!00_core".to_string(); // Forced to top
+            *server = "!00_core".to_string();
             return;
         }
 
@@ -315,7 +500,7 @@ impl WeeChatApp {
             if let Some(k) = vars.get("type").and_then(|v| v.as_str()) { *kind = k.to_string(); }
             if let Some(s) = vars.get("server").and_then(|v| v.as_str()) { *server = s.to_string().to_lowercase(); }
         }
-        
+
         if topic.is_empty() {
             if let Some(t) = obj.get("title").and_then(|v| v.as_str()) { *topic = t.to_string(); }
             else if let Some(t) = obj.get("topic").and_then(|v| v.as_str()) { *topic = t.to_string(); }
@@ -331,8 +516,6 @@ impl WeeChatApp {
                 } else {
                     parts[1]
                 };
-                // local_variables.server is authoritative — only fall back to
-                // full_name parsing when it wasn't present in the relay data.
                 if *server == "orphans" {
                     *server = net_candidate.to_string().to_lowercase();
                 }
@@ -349,45 +532,43 @@ impl WeeChatApp {
 
     fn sort_buffers(buffers: &mut Vec<Buffer>) {
         buffers.sort_by(|a, b| {
-            // Group by server key
             if a.server != b.server {
                 return a.server.cmp(&b.server);
             }
-            
-            // Inside group: Roots (core/server) always first
+
             let a_is_root = a.kind == "core" || a.kind == "server";
             let b_is_root = b.kind == "core" || b.kind == "server";
-            
+
             if a_is_root && !b_is_root { return std::cmp::Ordering::Less; }
             if b_is_root && !a_is_root { return std::cmp::Ordering::Greater; }
 
-            // Then by buffer number
             a.number.cmp(&b.number)
         });
     }
 
-    fn handle_buffer_list(&mut self, resp: WeeChatResponse) {
+    fn handle_buffer_list(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
         let body = Self::body_as_vec(&resp);
-        let mut new_buffers = Vec::new();
+        let mut new_conn_buffers = Vec::new();
 
         for val in body {
             if let Some(obj) = val.as_object() {
-                let id = obj.get("id").and_then(|v| Self::parse_id(v));
+                let raw_id = obj.get("id").and_then(|v| Self::parse_id(v));
 
                 let number = obj.get("number").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                 let name = obj.get("short_name").and_then(|v| v.as_str())
                     .or_else(|| obj.get("name").and_then(|v| v.as_str()))
                     .unwrap_or("unknown").to_string();
-                let full_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
+                let raw_full_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
                 let plugin = obj.get("plugin").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let hidden = obj.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
                 let has_nicklist = obj.get("nicklist").and_then(|v| v.as_bool()).unwrap_or(true);
-                // Relay sends the server-side read marker; use it so the unread divider
-                // is correct immediately on connect without needing any prior local state.
                 let relay_last_read_id = obj.get("last_read_line_id").and_then(|v| Self::parse_id(v))
                     .or_else(|| obj.get("last_read_line").and_then(|v| v.as_object()).and_then(|o| o.get("id")).and_then(|v| Self::parse_id(v)));
 
-                if let Some(id) = id {
+                if let Some(raw_id) = raw_id {
+                    let full_id = format!("{}/{}", conn_prefix, raw_id);
+                    let full_full_name = format!("{}/{}", conn_prefix, raw_full_name);
+
                     let mut topic = String::new();
                     let mut modes = String::new();
                     let mut kind = String::new();
@@ -400,7 +581,7 @@ impl WeeChatApp {
                     let mut last_read_id = None;
                     let mut visit_start_marker_id = None;
 
-                    if let Some(existing) = self.buffers.iter().find(|b| b.id == id) {
+                    if let Some(existing) = self.buffers.iter().find(|b| b.id == full_id) {
                         messages = existing.messages.clone();
                         nicks = existing.nicks.clone();
                         activity = existing.activity;
@@ -408,20 +589,19 @@ impl WeeChatApp {
                         last_read_id = existing.last_read_id.clone();
                         visit_start_marker_id = existing.visit_start_marker_id.clone();
                     }
-                    let muted = self.muted_buffer_names.contains(&full_name);
-                    // Relay's read marker takes priority — it's the authoritative baseline
-                    // for showing the unread divider after a fresh connect.
+                    let muted = self.muted_buffer_names.contains(&full_full_name);
                     if relay_last_read_id.is_some() {
                         last_read_id = relay_last_read_id.clone();
                     }
 
-                    Self::extract_metadata(obj, &mut topic, &mut modes, &mut kind, &mut server, &full_name, &plugin);
+                    // Use raw_full_name (without prefix) for metadata extraction
+                    Self::extract_metadata(obj, &mut topic, &mut modes, &mut kind, &mut server, &raw_full_name, &plugin);
 
-                    new_buffers.push(Buffer {
-                        id,
+                    new_conn_buffers.push(Buffer {
+                        id: full_id,
                         number,
                         name,
-                        full_name,
+                        full_name: full_full_name,
                         plugin,
                         kind,
                         server,
@@ -441,27 +621,28 @@ impl WeeChatApp {
             }
         }
 
-        if !new_buffers.is_empty() {
+        if !new_conn_buffers.is_empty() {
             let network_count = {
                 let mut seen = std::collections::HashSet::new();
-                new_buffers.iter().filter(|b| b.kind != "core").for_each(|b| { seen.insert(&b.server); });
+                new_conn_buffers.iter().filter(|b| b.kind != "core").for_each(|b| { seen.insert(&b.server); });
                 seen.len()
             };
-            self.log_conn(format!(
+            self.log_conn_for(conn_prefix, format!(
                 "← GET /api/buffers  {} buffers, {} network(s)",
-                new_buffers.len(), network_count
+                new_conn_buffers.len(), network_count
             ));
-            Self::sort_buffers(&mut new_buffers);
-            self.buffers = new_buffers;
+            Self::sort_buffers(&mut new_conn_buffers);
 
-            // Re-apply user's custom ordering. Buffers not in the order (e.g. newly
-            // opened query windows) are anchored just after their server header so they
-            // appear in the right group rather than being dumped at the end.
+            // Remove old buffers for this connection, then add new ones
+            let pfx = format!("{}/", conn_prefix);
+            self.buffers.retain(|b| !b.id.starts_with(&pfx));
+            self.buffers.extend(new_conn_buffers);
+
+            // Re-apply user's custom ordering
             if !self.buffer_order.is_empty() {
                 let order = &self.buffer_order;
                 let max_order = order.len();
 
-                // Position of each server group's header in buffer_order.
                 let server_header_pos: std::collections::HashMap<String, usize> = self.buffers.iter()
                     .filter(|b| b.kind == "server" || b.kind == "core")
                     .filter_map(|b| {
@@ -474,12 +655,28 @@ impl WeeChatApp {
                     if let Some(pos) = order.iter().position(|id| id == &b.id) {
                         pos * 10_000
                     } else {
-                        // Anchor to the server header slot; fall back to end if server unknown.
                         let base = server_header_pos.get(&b.server)
                             .map(|&p| p * 10_000 + 1)
                             .unwrap_or(max_order * 10_000 + 1);
                         base + b.number as usize
                     }
+                });
+            }
+
+            // When multiple connections are present, group all buffers by connection prefix
+            // so each connection's buffers appear together in the sidebar.
+            let conn_count = {
+                let mut seen = std::collections::HashSet::new();
+                for b in &self.buffers {
+                    if let Some(p) = b.id.split('/').next() { seen.insert(p.to_string()); }
+                }
+                seen.len()
+            };
+            if conn_count > 1 {
+                self.buffers.sort_by(|a, b| {
+                    let pa = a.id.split('/').next().unwrap_or("");
+                    let pb = b.id.split('/').next().unwrap_or("");
+                    pa.cmp(pb)
                 });
             }
 
@@ -499,53 +696,44 @@ impl WeeChatApp {
                 }
             }
 
-            // Fetch hotlist only after buffers are populated so activity is never
-            // applied to an empty list and silently dropped.
-            self.log_conn("→ GET /api/hotlist");
-            if let Some(client) = &self.client {
-                client.send_api("GET /api/hotlist", Some("_hotlist"), None);
+            self.log_conn_for(conn_prefix, "→ GET /api/hotlist");
+            if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
+                conn.client.fetch_hotlist();
             }
         }
     }
 
-    fn handle_hotlist(&mut self, resp: WeeChatResponse) {
+    fn handle_hotlist(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
         let body = Self::body_as_vec(&resp);
         let is_initial = resp.request_id.as_deref() == Some("_hotlist");
         let entry_count = body.len();
         if is_initial {
-            self.log_conn(format!("← GET /api/hotlist  {} active entr{}", entry_count, if entry_count == 1 { "y" } else { "ies" }));
+            self.log_conn_for(conn_prefix, format!("← GET /api/hotlist  {} active entr{}", entry_count, if entry_count == 1 { "y" } else { "ies" }));
         }
         for val in body {
             if let Some(obj) = val.as_object() {
-                let buffer_id = obj.get("buffer_id").and_then(|v| Self::parse_id(v));
+                let raw_buffer_id = obj.get("buffer_id").and_then(|v| Self::parse_id(v));
                 let priority = obj.get("priority")
                     .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
                     .unwrap_or(0);
 
-                if let Some(buffer_id) = buffer_id {
-                    // Skip the buffer the user is currently viewing.
+                if let Some(raw_buffer_id) = raw_buffer_id {
+                    let buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
                     if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
                         continue;
                     }
-                    // Skip muted buffers — they are intentionally silenced.
                     if self.buffers.iter().any(|b| b.id == buffer_id && b.muted) {
                         continue;
                     }
-                    // Skip buffers the user has explicitly read in this or a previous session.
-                    // This suppresses stale hotlist entries when the server-side read call is
-                    // unavailable (older WeeChat versions).
                     if self.cleared_buffer_ids.contains(&buffer_id) {
                         continue;
                     }
                     if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
-                        // WeeChat hotlist priorities:
-                        // 0 = low (join/part/system), 1 = message, 2 = private, 3 = highlight
                         buffer.activity = match priority {
                             3 => BufferActivity::Highlight,
                             2 | 1 => BufferActivity::Message,
                             _ => BufferActivity::Metadata,
                         };
-                        // count is an array: [low_priority, message, private, highlight]
                         if let Some(count_arr) = obj.get("count").and_then(|v| v.as_array()) {
                             let msg  = count_arr.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
                             let priv_msg = count_arr.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
@@ -558,7 +746,8 @@ impl WeeChatApp {
         }
     }
 
-    fn handle_buffer_lines(&mut self, buffer_id: &str, resp: WeeChatResponse) {
+    fn handle_buffer_lines(&mut self, conn_prefix: &str, raw_buffer_id: &str, resp: WeeChatResponse) {
+        let full_buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
         let body = Self::body_as_vec(&resp);
         let lines: Vec<Line> = body.iter().filter_map(|val| {
             let obj = val.as_object()?;
@@ -568,7 +757,6 @@ impl WeeChatApp {
             let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
             let timestamp = Self::parse_date(obj.get("date"));
-
             let highlight = obj.get("highlight").and_then(|v| v.as_bool()).unwrap_or(false);
             Some(Line {
                 id,
@@ -581,31 +769,26 @@ impl WeeChatApp {
         }).collect();
 
         let mut log_entry: Option<String> = None;
-        if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+        if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == full_buffer_id) {
             let mut deque: std::collections::VecDeque<Line> = lines.into();
             if deque.len() > MAX_STORED_LINES {
                 let excess = deque.len() - MAX_STORED_LINES;
                 deque.drain(0..excess);
             }
             let line_count = deque.len();
-            let is_load_more = self.loading_more_buffer_id.as_deref() == Some(buffer_id);
+            let is_load_more = self.loading_more_buffer_id.as_deref() == Some(&full_buffer_id);
             log_entry = Some(format!(
                 "← GET /api/buffers/{}/lines  {} lines{}  [#{}]",
-                buffer_id, line_count,
+                raw_buffer_id, line_count,
                 if is_load_more { " (load more)" } else { "" },
                 buffer.name
             ));
             buffer.messages = deque;
-            // Clear the in-flight load-more marker now that the response arrived.
             if is_load_more {
                 self.loading_more_buffer_id = None;
             }
-            let is_selected = self.selected_buffer_id.as_deref() == Some(buffer_id);
+            let is_selected = self.selected_buffer_id.as_deref() == Some(&full_buffer_id);
             if is_selected {
-                // Advance the persistent marker to the latest message so the next
-                // visit to this buffer starts with no divider.  The visual divider
-                // for the *current* visit is anchored on visit_start_marker_id which
-                // was snapshotted in select_buffer before this update.
                 if let Some(last) = buffer.messages.back() {
                     buffer.last_read_id = Some(last.id.clone());
                 }
@@ -616,28 +799,32 @@ impl WeeChatApp {
             }
         }
         if let Some(entry) = log_entry {
-            self.log_conn(entry);
+            self.log_conn_for(conn_prefix, entry);
         }
     }
 
-    fn handle_buffer_info(&mut self, buffer_id: &str, resp: WeeChatResponse) {
+    fn handle_buffer_info(&mut self, conn_prefix: &str, raw_buffer_id: &str, resp: WeeChatResponse) {
+        let full_buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
         let body = Self::body_as_vec(&resp);
         for val in body {
             if let Some(obj) = val.as_object() {
-                if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
-                    let full_name = buffer.full_name.clone();
+                if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == full_buffer_id) {
+                    // Strip prefix from full_name for metadata extraction
+                    let pfx = format!("{}/", conn_prefix);
+                    let raw_full_name = buffer.full_name.strip_prefix(&pfx).unwrap_or(&buffer.full_name).to_string();
                     let plugin = buffer.plugin.clone();
-                    Self::extract_metadata(obj, &mut buffer.topic, &mut buffer.modes, &mut buffer.kind, &mut buffer.server, &full_name, &plugin);
+                    Self::extract_metadata(obj, &mut buffer.topic, &mut buffer.modes, &mut buffer.kind, &mut buffer.server, &raw_full_name, &plugin);
                 }
             }
         }
     }
 
-    fn handle_nick_list(&mut self, buffer_id: &str, resp: WeeChatResponse) {
+    fn handle_nick_list(&mut self, conn_prefix: &str, raw_buffer_id: &str, resp: WeeChatResponse) {
+        let full_buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
         if let Some(body) = &resp.body {
             let mut nicks = Vec::new();
             self.extract_nicks(body, &mut nicks);
-            if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+            if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == full_buffer_id) {
                 buffer.nicks = nicks;
             }
         }
@@ -653,7 +840,7 @@ impl WeeChatApp {
         } else {
             color.to_string()
         };
-        Some(Nick { name: name.to_string(), prefix: prefix.to_string(), color_ansi })
+        Some(Nick { name: name.to_string(), prefix: prefix.to_string(), color_ansi, away: false })
     }
 
     fn extract_nicks(&self, val: &Value, nicks: &mut Vec<Nick>) {
@@ -677,7 +864,6 @@ impl WeeChatApp {
 
     #[cfg(target_os = "macos")]
     fn osascript_quote(s: &str) -> String {
-        // AppleScript strings use double-quotes; escape embedded quotes with \"
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     }
 
@@ -685,12 +871,12 @@ impl WeeChatApp {
         ansi_re().replace_all(text, "").to_string()
     }
 
-    fn handle_line_added(&mut self, resp: WeeChatResponse) {
+    fn handle_line_added(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
         let body = Self::body_as_vec(&resp);
         for val in body {
             if let Some(obj) = val.as_object() {
                 let displayed = obj.get("displayed").and_then(|v| v.as_bool()).unwrap_or(true);
-                let buffer_id = resp.buffer_id.map(|i| i.to_string())
+                let raw_buffer_id = resp.buffer_id.map(|i| i.to_string())
                     .or_else(|| obj.get("buffer_id").and_then(|v| Self::parse_id(v)));
 
                 let is_highlight = obj.get("highlight").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -703,7 +889,8 @@ impl WeeChatApp {
                     || Self::has_tag(obj, "irc_part")
                     || Self::has_tag(obj, "irc_quit");
 
-                if let Some(buffer_id) = buffer_id {
+                if let Some(raw_buffer_id) = raw_buffer_id {
+                    let buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
                     let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
                     let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
                     let id = obj.get("id").and_then(|v| Self::parse_id(v))
@@ -734,21 +921,17 @@ impl WeeChatApp {
                                 } else if notify_level == 2 {
                                     BufferActivity::Message
                                 } else if is_join_part {
-                                    // Join/part lines get a metadata marker but no badge count.
                                     BufferActivity::Metadata
                                 } else {
                                     BufferActivity::Metadata
                                 };
 
-                                // Only increment the badge for real messages, not join/part noise.
                                 if !is_join_part {
                                     buffer.unread_count = buffer.unread_count.saturating_add(1);
                                 }
 
                                 if activity > buffer.activity {
                                     buffer.activity = activity;
-                                    // A real new message arrived while the user isn't watching —
-                                    // evict from cleared set so it shows as unread on next reconnect.
                                     self.cleared_buffer_ids.remove(&buffer_id);
                                 }
 
@@ -758,9 +941,6 @@ impl WeeChatApp {
                                     let body = if sender.is_empty() { text } else { format!("{}: {}", sender, text) };
                                     #[cfg(target_os = "macos")]
                                     {
-                                        // notify-rust uses a mac-notification-sys helper app which
-                                        // macOS tries to activate on notification click instead of
-                                        // WeeChatRS. Use osascript directly to avoid that.
                                         let script = format!(
                                             "display notification {} with title {}",
                                             Self::osascript_quote(&body),
@@ -786,16 +966,17 @@ impl WeeChatApp {
         }
     }
 
-    fn handle_line_changed(&mut self, resp: WeeChatResponse) {
+    fn handle_line_changed(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
         let body = Self::body_as_vec(&resp);
         for val in body {
             if let Some(obj) = val.as_object() {
-                let buffer_id = resp.buffer_id.map(|i| i.to_string())
+                let raw_buffer_id = resp.buffer_id.map(|i| i.to_string())
                     .or_else(|| obj.get("buffer_id").and_then(|v| Self::parse_id(v)));
                 let line_id = obj.get("id").and_then(|v| Self::parse_id(v));
                 let displayed = obj.get("displayed").and_then(|v| v.as_bool()).unwrap_or(true);
 
-                if let (Some(buffer_id), Some(line_id)) = (buffer_id, line_id) {
+                if let (Some(raw_buffer_id), Some(line_id)) = (raw_buffer_id, line_id) {
+                    let buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
                     if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
                         if let Some(line) = buffer.messages.iter_mut().find(|m| m.id == line_id) {
                             line.displayed = displayed;

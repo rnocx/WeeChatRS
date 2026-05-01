@@ -1,6 +1,6 @@
 [package]
 name = "weechat-rs"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [dependencies]
@@ -22,21 +22,24 @@ plist = "1.6"
 rfd = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-notify-rust = "4.11"
 fontdb = "0.22"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 native-tls = "0.2"
+tokio-native-tls = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+notify-rust = "4.11"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+notify-rust = "4.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["sync-secret-service"] }
+keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
 openssl = { version = "0.10", features = ["vendored"] }
+notify-rust = { version = "4.11", default-features = false, features = ["z"] }
 
 [build-dependencies]
 winres = "0.1"
