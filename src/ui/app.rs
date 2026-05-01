@@ -1283,8 +1283,6 @@ impl eframe::App for WeeChatApp {
 
         let font_id = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
 
-        let is_query_or_core = current_buffer_kind == "private" || current_buffer_kind == "server" || current_buffer_kind == "core" || current_buffer_full_name.as_ref().map(|n| n == "weechat" || n.contains("highmon")).unwrap_or(false);
-
         let any_connected = self.is_any_connected();
 
         let current_buf_has_nicklist = current_buf.map(|b| b.has_nicklist).unwrap_or(false);
