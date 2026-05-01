@@ -952,10 +952,13 @@ impl WeeChatApp {
                                     }
                                     #[cfg(not(target_os = "macos"))]
                                     {
-                                        let _ = notify_rust::Notification::new()
-                                            .summary(&buffer.name)
-                                            .body(&body)
-                                            .show();
+                                        let summary = buffer.name.clone();
+                                        std::thread::spawn(move || {
+                                            let _ = notify_rust::Notification::new()
+                                                .summary(&summary)
+                                                .body(&body)
+                                                .show();
+                                        });
                                     }
                                 }
                             }
