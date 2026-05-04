@@ -1,0 +1,27 @@
+FROM --platform=linux/amd64 rust:1-bookworm
+
+RUN apt-get update && apt-get install -y \
+    wget \
+    xz-utils \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LLVM_MINGW_VERSION=20260421
+RUN wget -q \
+    "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz" \
+    -O /tmp/llvm-mingw.tar.xz \
+    && tar -xf /tmp/llvm-mingw.tar.xz -C /opt \
+    && rm /tmp/llvm-mingw.tar.xz
+
+ENV PATH="/opt/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64/bin:${PATH}"
+
+RUN rustup target add aarch64-pc-windows-gnullvm
+
+WORKDIR /src
+COPY . .
+
+RUN mkdir -p .cargo && printf '[target.aarch64-pc-windows-gnullvm]\nlinker = "aarch64-w64-mingw32-clang"\nar = "aarch64-w64-mingw32-ar"\n' > .cargo/config.toml
+
+RUN cargo build --release --jobs 2 --target aarch64-pc-windows-gnullvm 2>&1
+
+RUN cp target/aarch64-pc-windows-gnullvm/release/weechat-rs.exe /weechat-rs-windows-aarch64.exe
