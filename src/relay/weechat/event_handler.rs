@@ -11,6 +11,7 @@ fn ansi_re() -> &'static regex::Regex {
     ANSI_RE.get_or_init(|| regex::Regex::new(r"\x1B\[[0-9;]*[A-Za-z]").unwrap())
 }
 
+
 impl WeeChatApp {
     pub(crate) fn handle_event(&mut self, conn_prefix: &str, event: BackendEvent) {
         match event {
@@ -45,6 +46,9 @@ impl WeeChatApp {
                 // Remove stale buffers for this connection then re-fetch
                 let pfx = format!("{}/", conn_prefix);
                 self.buffers.retain(|b| !b.id.starts_with(&pfx));
+                self.rebuild_buffer_idx();
+                // Clear suppression set so the fresh hotlist can apply unread counts correctly
+                self.cleared_buffer_ids.retain(|id| !id.starts_with(&pfx));
                 // Fetch buffer list and sync subscriptions on connected connection
                 let conn_prefix_owned = conn_prefix.to_string();
                 if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix_owned) {
@@ -82,6 +86,7 @@ impl WeeChatApp {
                 // Remove buffers for this connection
                 let pfx = format!("{}/", conn_prefix);
                 self.buffers.retain(|b| !b.id.starts_with(&pfx));
+                self.rebuild_buffer_idx();
                 if let Some(sel) = &self.selected_buffer_id {
                     if sel.starts_with(&pfx) {
                         self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
@@ -144,8 +149,9 @@ impl WeeChatApp {
                 let full_full_name = format!("{}/{}", conn_prefix, buf.full_name);
                 buf.id = full_id.clone();
                 buf.full_name = full_full_name;
-                if !self.buffers.iter().any(|b| b.id == full_id) {
+                if !self.buffer_idx_of(&full_id).is_some() {
                     self.buffers.push(buf);
+                    self.rebuild_buffer_idx();
                 }
                 // Auto-select when nothing is currently selected (e.g. first buffer on connect).
                 if self.selected_buffer_id.is_none() {
@@ -168,6 +174,7 @@ impl WeeChatApp {
             BackendEvent::BufferClosed { buffer_id } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 self.buffers.retain(|b| b.id != full_id);
+                self.rebuild_buffer_idx();
                 if self.selected_buffer_id.as_deref() == Some(&full_id) {
                     self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
                 }
@@ -181,14 +188,29 @@ impl WeeChatApp {
                     buf.full_name = format!("{}/{}", conn_prefix, buf.full_name);
                     self.buffers.push(buf);
                 }
+                self.rebuild_buffer_idx();
             }
             BackendEvent::LineAdded { buffer_id, line } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if line.highlight {
+                    log::info!(
+                        "LineAdded highlight=true buffer={} selected={} displayed={}",
+                        full_id, is_selected, line.displayed
+                    );
+                }
+                let mut should_notify = false;
+                let mut buf_name = String::new();
+                let mut notify_prefix = String::new();
+                let mut notify_message = String::new();
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     if !is_selected && !buf.muted && line.displayed {
                         if line.highlight {
                             buf.activity = crate::relay::models::BufferActivity::Highlight;
+                            should_notify = true;
+                            buf_name = buf.name.clone();
+                            notify_prefix = line.prefix.clone();
+                            notify_message = line.message.clone();
                         } else if buf.activity != crate::relay::models::BufferActivity::Highlight {
                             buf.activity = crate::relay::models::BufferActivity::Message;
                         }
@@ -198,6 +220,9 @@ impl WeeChatApp {
                     if buf.messages.len() > MAX_STORED_LINES {
                         buf.messages.pop_front();
                     }
+                }
+                if should_notify {
+                    self.notify_highlight(&full_id, &buf_name, &notify_prefix, &notify_message);
                 }
             }
             BackendEvent::NicklistLoaded { buffer_id, mut nicks } => {
@@ -214,13 +239,13 @@ impl WeeChatApp {
                     rank(&a.prefix).cmp(&rank(&b.prefix))
                         .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
                 });
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     buf.nicks = nicks;
                 }
             }
             BackendEvent::NickAdded { buffer_id, nick } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     if !buf.nicks.iter().any(|n| n.name == nick.name) {
                         buf.nicks.push(nick);
                     }
@@ -228,13 +253,13 @@ impl WeeChatApp {
             }
             BackendEvent::NickRemoved { buffer_id, nick_name } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     buf.nicks.retain(|n| !n.name.eq_ignore_ascii_case(&nick_name));
                 }
             }
             BackendEvent::NickAwayChanged { buffer_id, nick_name, away } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     if let Some(nick) = buf.nicks.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&nick_name)) {
                         nick.away = away;
                     }
@@ -242,13 +267,13 @@ impl WeeChatApp {
             }
             BackendEvent::TopicChanged { buffer_id, topic } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     buf.topic = topic;
                 }
             }
             BackendEvent::ActivityChanged { buffer_id, activity, unread_count } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     buf.activity = activity;
                     buf.unread_count = unread_count;
                 }
@@ -257,7 +282,7 @@ impl WeeChatApp {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 let is_load_more = self.loading_more_buffer_id.as_deref() == Some(full_id.as_str());
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     // Update activity for on-connect chathistory replay, but not for
                     // user-triggered "load more" requests (those are explicitly old history).
                     if !is_selected && !buf.muted && !is_load_more {
@@ -294,7 +319,7 @@ impl WeeChatApp {
             }
             BackendEvent::BufferHidden { buffer_id, hidden } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
-                if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     buf.hidden = hidden;
                 }
             }
@@ -331,7 +356,7 @@ impl WeeChatApp {
                 "buffer_hidden" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
-                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                        if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                             buf.hidden = true;
                         }
                     }
@@ -339,7 +364,7 @@ impl WeeChatApp {
                 "buffer_unhidden" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
-                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                        if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                             buf.hidden = false;
                         }
                     }
@@ -355,7 +380,7 @@ impl WeeChatApp {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(nick) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
-                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                            if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                                 if !buf.nicks.iter().any(|n| n.name == nick.name) {
                                     buf.nicks.push(nick);
                                     buf.nicks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -368,7 +393,7 @@ impl WeeChatApp {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(name) = resp.body.as_ref().and_then(|b| b.get("name")).and_then(|v| v.as_str()) {
-                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                            if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                                 buf.nicks.retain(|n| n.name != name);
                             }
                         }
@@ -378,7 +403,7 @@ impl WeeChatApp {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(updated) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
-                            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                            if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                                 if let Some(existing) = buf.nicks.iter_mut().find(|n| n.name == updated.name) {
                                     *existing = updated;
                                 } else {
@@ -392,7 +417,7 @@ impl WeeChatApp {
                 "buffer_cleared" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
-                        if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == full_id) {
+                        if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                             buf.messages.clear();
                             buf.last_read_id = None;
                             buf.visit_start_marker_id = None;
@@ -581,7 +606,7 @@ impl WeeChatApp {
                     let mut last_read_id = None;
                     let mut visit_start_marker_id = None;
 
-                    if let Some(existing) = self.buffers.iter().find(|b| b.id == full_id) {
+                    if let Some(existing) = self.buffer_by_id(&full_id) {
                         messages = existing.messages.clone();
                         nicks = existing.nicks.clone();
                         activity = existing.activity;
@@ -679,6 +704,7 @@ impl WeeChatApp {
                     pa.cmp(pb)
                 });
             }
+            self.rebuild_buffer_idx();
 
             if let Some(target) = self.pending_buffer_switch.take() {
                 if let Some(found) = self.buffers.iter().find(|b| b.name == target || b.full_name.ends_with(&target)) {
@@ -728,7 +754,7 @@ impl WeeChatApp {
                     if self.cleared_buffer_ids.contains(&buffer_id) {
                         continue;
                     }
-                    if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    if let Some(buffer) = self.buffer_by_id_mut(&buffer_id) {
                         buffer.activity = match priority {
                             3 => BufferActivity::Highlight,
                             2 | 1 => BufferActivity::Message,
@@ -758,25 +784,20 @@ impl WeeChatApp {
             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
             let timestamp = Self::parse_date(obj.get("date"));
             let highlight = obj.get("highlight").and_then(|v| v.as_bool()).unwrap_or(false);
-            Some(Line {
-                id,
-                timestamp,
-                prefix: prefix.to_string(),
-                message: message.to_string(),
-                displayed,
-                highlight,
-            })
+            Some(Line::new(id, timestamp, prefix.to_string(), message.to_string(), displayed, highlight))
         }).collect();
 
         let mut log_entry: Option<String> = None;
-        if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == full_buffer_id) {
+        let is_load_more = self.loading_more_buffer_id.as_deref() == Some(&full_buffer_id);
+        let is_selected = self.selected_buffer_id.as_deref() == Some(&full_buffer_id);
+        if let Some(idx) = self.buffer_idx_of(&full_buffer_id) {
+            let buffer = &mut self.buffers[idx];
             let mut deque: std::collections::VecDeque<Line> = lines.into();
             if deque.len() > MAX_STORED_LINES {
                 let excess = deque.len() - MAX_STORED_LINES;
                 deque.drain(0..excess);
             }
             let line_count = deque.len();
-            let is_load_more = self.loading_more_buffer_id.as_deref() == Some(&full_buffer_id);
             log_entry = Some(format!(
                 "← GET /api/buffers/{}/lines  {} lines{}  [#{}]",
                 raw_buffer_id, line_count,
@@ -784,10 +805,6 @@ impl WeeChatApp {
                 buffer.name
             ));
             buffer.messages = deque;
-            if is_load_more {
-                self.loading_more_buffer_id = None;
-            }
-            let is_selected = self.selected_buffer_id.as_deref() == Some(&full_buffer_id);
             if is_selected {
                 if let Some(last) = buffer.messages.back() {
                     buffer.last_read_id = Some(last.id.clone());
@@ -797,6 +814,9 @@ impl WeeChatApp {
                     buffer.last_read_id = Some(last.id.clone());
                 }
             }
+        }
+        if is_load_more {
+            self.loading_more_buffer_id = None;
         }
         if let Some(entry) = log_entry {
             self.log_conn_for(conn_prefix, entry);
@@ -808,7 +828,7 @@ impl WeeChatApp {
         let body = Self::body_as_vec(&resp);
         for val in body {
             if let Some(obj) = val.as_object() {
-                if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == full_buffer_id) {
+                if let Some(buffer) = self.buffer_by_id_mut(&full_buffer_id) {
                     // Strip prefix from full_name for metadata extraction
                     let pfx = format!("{}/", conn_prefix);
                     let raw_full_name = buffer.full_name.strip_prefix(&pfx).unwrap_or(&buffer.full_name).to_string();
@@ -824,7 +844,7 @@ impl WeeChatApp {
         if let Some(body) = &resp.body {
             let mut nicks = Vec::new();
             self.extract_nicks(body, &mut nicks);
-            if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == full_buffer_id) {
+            if let Some(buffer) = self.buffer_by_id_mut(&full_buffer_id) {
                 buffer.nicks = nicks;
             }
         }
@@ -862,9 +882,54 @@ impl WeeChatApp {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn osascript_quote(s: &str) -> String {
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    /// Fire a highlight notification for `buffer_id` (full prefixed id) with a
+    /// per-buffer 3-second cooldown. Also requests user-attention so the dock
+    /// bounces / taskbar flashes. Used by both the WeeChat and IRC backends.
+    /// Title format:
+    ///   - channel highlight: `<channel> — <sender>`
+    ///   - private message:  `<sender>` (no channel prefix)
+    pub(crate) fn notify_highlight(
+        &mut self,
+        buffer_id: &str,
+        buffer_name: &str,
+        prefix: &str,
+        message: &str,
+    ) {
+        let now = std::time::Instant::now();
+        let cooldown = std::time::Duration::from_secs(3);
+        let suppress = self
+            .last_notif_at
+            .get(buffer_id)
+            .map(|last| now.duration_since(*last) < cooldown)
+            .unwrap_or(false);
+        if suppress {
+            return;
+        }
+        self.last_notif_at.insert(buffer_id.to_string(), now);
+        self.request_attention = true;
+
+        let sender = Self::strip_ansi(prefix);
+        let body = Self::strip_ansi(message);
+
+        // Channel buffers in IRC start with #/&/!, WeeChat passes the same. If
+        // the buffer name looks like a channel, prefix the title with it; for
+        // PMs (or core/server buffers) just use the sender.
+        let is_channel_like = buffer_name.starts_with('#')
+            || buffer_name.starts_with('&')
+            || buffer_name.starts_with('!');
+        let title = if is_channel_like && !sender.is_empty() {
+            format!("{} — {}", buffer_name, sender)
+        } else if sender.is_empty() {
+            buffer_name.to_string()
+        } else {
+            sender
+        };
+
+        crate::ui::notify::show(crate::ui::notify::Notification {
+            app_name: "WeeChatRS".to_string(),
+            title,
+            body,
+        });
     }
 
     pub(crate) fn strip_ansi(text: &str) -> String {
@@ -897,23 +962,19 @@ impl WeeChatApp {
                         .unwrap_or_else(|| Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string());
                     let timestamp = Self::parse_date(obj.get("date"));
 
-                    let line = Line {
-                        id,
-                        timestamp,
-                        prefix: prefix.to_string(),
-                        message: message.to_string(),
-                        displayed,
-                        highlight: is_highlight,
-                    };
+                    let line = Line::new(id, timestamp, prefix.to_string(), message.to_string(), displayed, is_highlight);
 
-                    if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    let is_selected = self.selected_buffer_id.as_deref() == Some(&buffer_id);
+                    let mut notify_data: Option<(String, String, String)> = None;
+                    if let Some(idx) = self.buffer_idx_of(&buffer_id) {
+                        let buffer = &mut self.buffers[idx];
                         if !buffer.messages.iter().any(|m| m.id == line.id) {
                             buffer.messages.push_back(line.clone());
                             if buffer.messages.len() > MAX_STORED_LINES {
                                 buffer.messages.pop_front();
                             }
 
-                            if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
+                            if is_selected {
                                 buffer.last_read_id = Some(line.id.clone());
                             } else if displayed && !buffer.muted && !is_notify_none && !is_self_msg {
                                 let activity = if is_highlight || notify_level == 3 {
@@ -936,33 +997,17 @@ impl WeeChatApp {
                                 }
 
                                 if (is_highlight || notify_level == 3) && !buffer.muted {
-                                    let sender = Self::strip_ansi(prefix);
-                                    let text = Self::strip_ansi(message);
-                                    let body = if sender.is_empty() { text } else { format!("{}: {}", sender, text) };
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        let script = format!(
-                                            "display notification {} with title {}",
-                                            Self::osascript_quote(&body),
-                                            Self::osascript_quote(&buffer.name),
-                                        );
-                                        let _ = std::process::Command::new("osascript")
-                                            .args(["-e", &script])
-                                            .spawn();
-                                    }
-                                    #[cfg(not(target_os = "macos"))]
-                                    {
-                                        let summary = buffer.name.clone();
-                                        std::thread::spawn(move || {
-                                            let _ = notify_rust::Notification::new()
-                                                .summary(&summary)
-                                                .body(&body)
-                                                .show();
-                                        });
-                                    }
+                                    notify_data = Some((
+                                        buffer.name.clone(),
+                                        prefix.to_string(),
+                                        message.to_string(),
+                                    ));
                                 }
                             }
                         }
+                    }
+                    if let Some((name, p, m)) = notify_data {
+                        self.notify_highlight(&buffer_id, &name, &p, &m);
                     }
                 }
             }
@@ -980,21 +1025,14 @@ impl WeeChatApp {
 
                 if let (Some(raw_buffer_id), Some(line_id)) = (raw_buffer_id, line_id) {
                     let buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
-                    if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == buffer_id) {
+                    if let Some(buffer) = self.buffer_by_id_mut(&buffer_id) {
                         if let Some(line) = buffer.messages.iter_mut().find(|m| m.id == line_id) {
                             line.displayed = displayed;
                         } else if displayed {
                             let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
                             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
                             let timestamp = Self::parse_date(obj.get("date"));
-                            buffer.messages.push_back(Line {
-                                id: line_id,
-                                timestamp,
-                                prefix: prefix.to_string(),
-                                message: message.to_string(),
-                                displayed,
-                                highlight: false,
-                            });
+                            buffer.messages.push_back(Line::new(line_id, timestamp, prefix.to_string(), message.to_string(), displayed, false));
                             if buffer.messages.len() > MAX_STORED_LINES {
                                 buffer.messages.pop_front();
                             }

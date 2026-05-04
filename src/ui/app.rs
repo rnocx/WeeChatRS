@@ -3,6 +3,7 @@ use crate::relay::weechat::{WeeChatClient, WeeChatConfig};
 use crate::relay::models::*;
 use crate::ui::ansi::ANSIParser;
 use crate::ui::theme::AppTheme;
+use crate::ui::url_safety::is_safe_public_url;
 use egui::{FontId, ScrollArea, Label, Key, Visuals, TextStyle, FontFamily, Color32, text::LayoutJob, Margin, Frame, Rounding, Stroke, Vec2, Modifiers, Rect, Painter};
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,9 @@ fn decode_entities(s: &str) -> String {
 }
 
 async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
+    if !is_safe_public_url(&url) {
+        return Err("blocked: non-public URL".to_string());
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent("Mozilla/5.0 WeeChatRS/0.1 (link preview)")
@@ -128,6 +132,22 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
 }
 
 pub const INITIAL_LINES: usize = 1000;
+const IMAGE_CACHE_MAX: usize = 200;
+const PREVIEW_CACHE_MAX: usize = 200;
+const PREFIX_COL_WIDTHS_MAX: usize = 500;
+
+/// Drop entries from `map` until its size is at most `cap`. We don't track
+/// insertion order, so eviction picks an arbitrary key — acceptable for caches
+/// where the goal is to prevent unbounded growth, not optimal hit rate.
+fn cap_map<V>(map: &mut HashMap<String, V>, cap: usize) {
+    while map.len() > cap {
+        let victim = match map.keys().next() {
+            Some(k) => k.clone(),
+            None => break,
+        };
+        map.remove(&victim);
+    }
+}
 pub const LOAD_MORE_LINES: usize = 1000;
 pub const MAX_STORED_LINES: usize = 10_000;
 
@@ -383,6 +403,9 @@ pub struct WeeChatApp {
     pub(crate) conn_connect_idx: Option<usize>, // index awaiting password before connect
 
     pub(crate) buffers: Vec<Buffer>,
+    /// id → index into `buffers`. Maintained in lock-step via `rebuild_buffer_idx`
+    /// called after every push/retain/extend/sort/clear of `buffers`.
+    pub(crate) buffer_idx: HashMap<String, usize>,
     pub(crate) selected_buffer_id: Option<String>,
     pub(crate) input_text: String,
     // Settings
@@ -454,6 +477,15 @@ pub struct WeeChatApp {
 
     // Muted buffers (stored by full_name, stable across WeeChat restarts).
     pub(crate) muted_buffer_names: HashSet<String>,
+    /// Per-buffer cooldown tracking for OS notifications. Prevents a noisy channel
+    /// from spamming the OS notification center.
+    pub(crate) last_notif_at: HashMap<String, std::time::Instant>,
+    /// Set true when a highlight notification fires while the window isn't focused.
+    /// `update()` consumes this and asks the OS to draw user attention to the app
+    /// (Dock icon bounce on macOS, taskbar flash on Windows, urgency hint on Linux).
+    pub(crate) request_attention: bool,
+    /// Deferred notification subsystem init — must run after the OS run loop starts.
+    notify_initialized: bool,
 
     // Set to the buffer ID while a "load more" history request is in flight.
     pub(crate) loading_more_buffer_id: Option<String>,
@@ -526,6 +558,7 @@ impl WeeChatApp {
             conn_show_add: false,
             conn_connect_idx: None,
             buffers: Vec::new(),
+            buffer_idx: HashMap::new(),
             selected_buffer_id: None,
             input_text: String::new(),
             show_settings: false,
@@ -572,6 +605,9 @@ impl WeeChatApp {
             available_fonts,
             selected_view_since: None,
             muted_buffer_names: settings.muted_buffer_names,
+            last_notif_at: HashMap::new(),
+            request_attention: false,
+            notify_initialized: false,
             loading_more_buffer_id: None,
             font_search: String::new(),
             prefix_align_max: settings.prefix_align_max,
@@ -616,6 +652,29 @@ impl WeeChatApp {
         self.connections.iter().any(|c| c.client.is_connected())
     }
 
+    /// Rebuild the `buffer_idx` map from `self.buffers`. Call after any
+    /// push/retain/extend/sort/clear of `self.buffers`.
+    pub(crate) fn rebuild_buffer_idx(&mut self) {
+        self.buffer_idx.clear();
+        self.buffer_idx.reserve(self.buffers.len());
+        for (i, b) in self.buffers.iter().enumerate() {
+            self.buffer_idx.insert(b.id.clone(), i);
+        }
+    }
+
+    /// O(1) lookup of a buffer's index by id.
+    pub(crate) fn buffer_idx_of(&self, id: &str) -> Option<usize> {
+        self.buffer_idx.get(id).copied()
+    }
+
+    pub(crate) fn buffer_by_id(&self, id: &str) -> Option<&Buffer> {
+        self.buffer_idx_of(id).map(|i| &self.buffers[i])
+    }
+
+    pub(crate) fn buffer_by_id_mut(&mut self, id: &str) -> Option<&mut Buffer> {
+        self.buffer_idx_of(id).map(move |i| &mut self.buffers[i])
+    }
+
     /// Returns (client_ref, raw_buffer_id) for the connection that owns the given full prefixed buffer_id.
     pub(crate) fn client_for_buffer<'a>(&'a self, buffer_id: &str) -> Option<(&'a dyn BackendClient, String)> {
         for conn in &self.connections {
@@ -639,7 +698,7 @@ impl WeeChatApp {
         self.selected_buffer_id = Some(id.clone());
         self.selected_view_since = Some(std::time::Instant::now());
         self.cleared_buffer_ids.insert(id.clone());
-        if let Some(buffer) = self.buffers.iter_mut().find(|b| b.id == id) {
+        if let Some(buffer) = self.buffer_by_id_mut(&id) {
             buffer.activity = BufferActivity::None;
             buffer.unread_count = 0;
             buffer.visit_start_marker_id = buffer.last_read_id.clone();
@@ -780,8 +839,34 @@ impl eframe::App for WeeChatApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.notify_initialized {
+            self.notify_initialized = true;
+            crate::ui::notify::init();
+        }
+
         while let Ok((prefix, event)) = self.event_rx.try_recv() {
             self.handle_event(&prefix, event);
+        }
+
+        if self.request_attention {
+            self.request_attention = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Critical,
+            ));
+        }
+
+        // Periodically prune prefix_col_widths so it can't grow indefinitely as
+        // transient buffers come and go. Cheap when below cap.
+        if self.prefix_col_widths.len() > PREFIX_COL_WIDTHS_MAX {
+            self.prefix_col_widths.retain(|id, _| self.buffer_idx.contains_key(id));
+            // If still over cap (huge connected session), drop arbitrary entries.
+            cap_map(&mut self.prefix_col_widths, PREFIX_COL_WIDTHS_MAX);
+        }
+
+        // Same for the notification cooldown map — drop entries older than 5 minutes.
+        if self.last_notif_at.len() > 200 {
+            let now = std::time::Instant::now();
+            self.last_notif_at.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(300));
         }
 
         while let Ok((url, result)) = self.image_rx.try_recv() {
@@ -800,13 +885,14 @@ impl eframe::App for WeeChatApp {
                 }
                 Err(_) => { self.image_cache.insert(url, ImageState::Failed); }
             }
+            cap_map(&mut self.image_cache, IMAGE_CACHE_MAX);
         }
 
         while let Ok((url, result)) = self.preview_rx.try_recv() {
             match result {
                 Ok(preview) => {
                     if let Some(img_url) = &preview.image_url {
-                        if !self.image_cache.contains_key(img_url) {
+                        if is_safe_public_url(img_url) && !self.image_cache.contains_key(img_url) {
                             self.image_cache.insert(img_url.clone(), ImageState::Loading);
                             let tx = self.image_tx.clone();
                             let img_url_owned = img_url.clone();
@@ -823,6 +909,7 @@ impl eframe::App for WeeChatApp {
                 }
                 Err(_) => { self.preview_cache.insert(url, PreviewState::Failed); }
             }
+            cap_map(&mut self.preview_cache, PREVIEW_CACHE_MAX);
         }
 
         let mut tab_pressed = false;
@@ -958,9 +1045,13 @@ impl eframe::App for WeeChatApp {
                     Self::draw_sidebar_icon(ui.painter(), rect, color, false);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (rect, res) = ui.allocate_at_least(icon_size, egui::Sense::click());
-                        if res.clicked() { self.show_nicklist = !self.show_nicklist; }
-                        let color = if self.show_nicklist { accent_color } else { Color32::GRAY };
+                        let buf_has_nicklist = self.selected_buffer_id.as_ref()
+                            .and_then(|id| self.buffer_by_id(id))
+                            .map(|b| b.has_nicklist)
+                            .unwrap_or(false);
+                        let (rect, res) = ui.allocate_at_least(icon_size, if buf_has_nicklist { egui::Sense::click() } else { egui::Sense::hover() });
+                        if buf_has_nicklist && res.clicked() { self.show_nicklist = !self.show_nicklist; }
+                        let color = if buf_has_nicklist && self.show_nicklist { accent_color } else { Color32::GRAY.linear_multiply(if buf_has_nicklist { 1.0 } else { 0.4 }) };
                         Self::draw_sidebar_icon(ui.painter(), rect, color, true);
                         ui.add_space(8.0);
 
@@ -1010,10 +1101,12 @@ impl eframe::App for WeeChatApp {
                 let char_w = ctx.fonts(|f| f.glyph_width(&buf_font_id, 'W'));
                 self.buffers_width = char_w * 20.0 + 20.0;
             }
+            let buffers_max_w = (ctx.screen_rect().width() * 0.40).max(80.0);
             let buffers_resp = egui::SidePanel::left("buffers_panel")
                 .resizable(true)
                 .default_width(self.buffers_width)
                 .min_width(80.0)
+                .max_width(buffers_max_w)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
@@ -1024,7 +1117,7 @@ impl eframe::App for WeeChatApp {
                     let pointer_pos = ctx.pointer_hover_pos();
 
                     let dragged_group_ids: HashSet<String> = if let Some(drag_id) = &self.dragging_buffer_id {
-                        if let Some(drag_buf) = self.buffers.iter().find(|b| &b.id == drag_id) {
+                        if let Some(drag_buf) = self.buffer_by_id(drag_id) {
                             if drag_buf.kind == "server" || drag_buf.kind == "core" {
                                 let skey = drag_buf.server.clone();
                                 self.buffers.iter().filter(|b| b.server == skey).map(|b| b.id.clone()).collect()
@@ -1043,6 +1136,7 @@ impl eframe::App for WeeChatApp {
                     let multi_conn = conn_label_map.len() > 1;
 
                     ScrollArea::vertical().show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 2.0;
                         let mut last_conn_prefix: Option<String> = None;
                         for buffer in &self.buffers {
@@ -1244,7 +1338,8 @@ impl eframe::App for WeeChatApp {
                         self.drag_drop_before_id = None;
                     }
                 });
-            self.buffers_width = buffers_resp.response.rect.width();
+            let w = buffers_resp.response.rect.width();
+            if w >= 80.0 { self.buffers_width = w; }
         }
 
         if let Some(id) = next_selected_buffer_id {
@@ -1257,7 +1352,7 @@ impl eframe::App for WeeChatApp {
             } else {
                 self.muted_buffer_names.remove(&full_name);
             }
-            if let Some(b) = self.buffers.iter_mut().find(|b| b.id == buf_id) {
+            if let Some(b) = self.buffer_by_id_mut(&buf_id) {
                 b.muted = mute;
                 if mute {
                     b.activity = BufferActivity::None;
@@ -1271,7 +1366,7 @@ impl eframe::App for WeeChatApp {
         }
 
         let current_buffer_id = self.selected_buffer_id.clone();
-        let current_buf = current_buffer_id.as_ref().and_then(|id| self.buffers.iter().find(|b| &b.id == id));
+        let current_buf = current_buffer_id.as_ref().and_then(|id| self.buffer_by_id(id));
         let current_buffer_nicks = current_buf.map(|b| b.nicks.clone());
         let current_buffer_full_name = current_buf.map(|b| b.full_name.clone());
         let current_buffer_messages = current_buf.map(|b| b.messages.clone());
@@ -1286,17 +1381,16 @@ impl eframe::App for WeeChatApp {
         let any_connected = self.is_any_connected();
 
         let current_buf_has_nicklist = current_buf.map(|b| b.has_nicklist).unwrap_or(false);
-        // Always render the nicks panel when show_nicklist is on so egui's stored
-        // panel width is never lost. Conditionally populate content only for buffers
-        // that actually have a nicklist.
-        if self.show_nicklist && any_connected && current_buffer_id.is_some() {
+        if self.show_nicklist && current_buf_has_nicklist && any_connected && current_buffer_id.is_some() {
             if self.nicklist_width < 80.0 {
                 self.nicklist_width = 180.0;
             }
+            let nicks_max_w = (ctx.screen_rect().width() * 0.30).max(80.0);
             let nicks_resp = egui::SidePanel::right("nicks_panel_2")
                 .resizable(true)
                 .default_width(self.nicklist_width)
                 .min_width(80.0)
+                .max_width(nicks_max_w)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
                     // Force content to fill the full panel width so that egui's
@@ -1304,11 +1398,10 @@ impl eframe::App for WeeChatApp {
                     // min_rect), preventing the panel from snapping back to
                     // content width after every resize.
                     ui.set_min_width(ui.available_width());
-                    if current_buf_has_nicklist {
-                        ui.add_space(4.0);
-                        ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
-                        ui.add_space(8.0);
-                        ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
+                    ui.add_space(8.0);
+                    ScrollArea::vertical().show(ui, |ui| {
                             if let Some(nicks) = &current_buffer_nicks {
                                 for nick in nicks {
                                     let text = format!("{}{}", nick.prefix, nick.name);
@@ -1322,18 +1415,15 @@ impl eframe::App for WeeChatApp {
                                             format!("{}{}", esc, text)
                                         }
                                     } else { text };
-                                    let sections = ANSIParser::parse(&input, font_id.clone(), &self.theme);
+                                    let sections = ANSIParser::parse(&input);
                                     let mut job = LayoutJob::default();
-                                    for mut s in sections {
+                                    for s in sections {
+                                        let mut fmt = s.style.to_format(font_id.clone(), &self.theme);
                                         if nick.away {
-                                            s.format.color = egui::text::TextFormat {
-                                                color: text_muted,
-                                                italics: true,
-                                                ..s.format.clone()
-                                            }.color;
-                                            s.format.italics = true;
+                                            fmt.color = text_muted;
+                                            fmt.italics = true;
                                         }
-                                        job.append(&s.text, 0.0, s.format);
+                                        job.append(&s.text, 0.0, fmt);
                                     }
 
                                     let label_res = ui.add(Label::new(job).truncate(true).sense(egui::Sense::click()));
@@ -1350,51 +1440,62 @@ impl eframe::App for WeeChatApp {
                                 }
                             }
                         });
-                    }
                 });
             self.nicklist_width = nicks_resp.response.rect.width();
         }
 
-        if any_connected && current_buffer_id.is_some() {
+        if current_buffer_id.is_some() {
+            // Is the SELECTED buffer's connection up? Different from any_connected when
+            // multiple connections are configured and only some are alive.
+            let selected_buffer_connected = current_buffer_id.as_ref()
+                .and_then(|id| id.split('/').next())
+                .and_then(|prefix| self.connections.iter().find(|c| c.prefix == prefix))
+                .map(|c| c.client.is_connected())
+                .unwrap_or(false);
+
             egui::TopBottomPanel::bottom("input_panel")
                 .frame(Frame::none().fill(surface_color).inner_margin(Margin::symmetric(16.0, 10.0)))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        let hint = if current_buffer_kind == "server" {
+                        let hint = if !selected_buffer_connected {
+                            "Disconnected — reconnect before sending"
+                        } else if current_buffer_kind == "server" {
                             "Type /join #channel or any IRC command..."
                         } else {
                             "Type a message..."
                         };
-                        let text_edit = egui::TextEdit::singleline(&mut self.input_text)
-                            .hint_text(hint)
-                            .margin(Margin::symmetric(8.0, 4.0))
-                            .lock_focus(true)
-                            .desired_width(ui.available_width() - 80.0);
+                        ui.add_enabled_ui(selected_buffer_connected, |ui| {
+                            let text_edit = egui::TextEdit::singleline(&mut self.input_text)
+                                .hint_text(hint)
+                                .margin(Margin::symmetric(8.0, 4.0))
+                                .lock_focus(true)
+                                .desired_width(ui.available_width() - 80.0);
 
-                        let res = ui.add(text_edit);
+                            let res = ui.add(text_edit);
 
-                        if res.has_focus() {
-                            if tab_pressed {
-                                self.perform_completion(ctx, res.id);
-                                res.request_focus();
-                            } else if history_up {
-                                self.cycle_history(-1, ctx, res.id);
-                                res.request_focus();
-                            } else if history_down {
-                                self.cycle_history(1, ctx, res.id);
-                                res.request_focus();
-                            } else {
-                                let any_other_key = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. })));
-                                if any_other_key && !tab_pressed && !history_up && !history_down {
-                                    self.completion = None;
+                            if res.has_focus() {
+                                if tab_pressed {
+                                    self.perform_completion(ctx, res.id);
+                                    res.request_focus();
+                                } else if history_up {
+                                    self.cycle_history(-1, ctx, res.id);
+                                    res.request_focus();
+                                } else if history_down {
+                                    self.cycle_history(1, ctx, res.id);
+                                    res.request_focus();
+                                } else {
+                                    let any_other_key = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. })));
+                                    if any_other_key && !tab_pressed && !history_up && !history_down {
+                                        self.completion = None;
+                                    }
                                 }
                             }
-                        }
 
-                        if ui.add(egui::Button::new(egui::RichText::new("Send").color(Color32::WHITE).strong()).fill(accent_color).min_size(Vec2::new(60.0, 0.0))).clicked() || (res.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter))) {
-                            self.send_current_message();
-                            res.request_focus();
-                        }
+                            if ui.add(egui::Button::new(egui::RichText::new("Send").color(Color32::WHITE).strong()).fill(accent_color).min_size(Vec2::new(60.0, 0.0))).clicked() || (res.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter))) {
+                                self.send_current_message();
+                                res.request_focus();
+                            }
+                        });
                     });
                 });
         }
@@ -1513,6 +1614,7 @@ impl eframe::App for WeeChatApp {
                 });
             } else if let Some(_full_name) = current_buffer_full_name {
                 ui.vertical(|ui| {
+                    ui.set_max_width(ui.available_width());
                     if self.show_search {
                         Frame::none()
                             .fill(surface_color.linear_multiply(0.8))
@@ -1546,9 +1648,9 @@ impl eframe::App for WeeChatApp {
                                     }
                                     if !current_buffer_topic.is_empty() {
                                         let topic_font = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
-                                        let sections = ANSIParser::parse(&current_buffer_topic, topic_font, &self.theme);
+                                        let sections = ANSIParser::parse(&current_buffer_topic);
                                         let mut job = LayoutJob::default();
-                                        for s in sections { job.append(&s.text, 0.0, s.format); }
+                                        for s in sections { job.append(&s.text, 0.0, s.style.to_format(topic_font.clone(), &self.theme)); }
                                         ui.add(Label::new(job).wrap(true));
                                     }
                                 });
@@ -1557,7 +1659,10 @@ impl eframe::App for WeeChatApp {
                         ui.separator();
                     }
 
+                    let msg_area_width = ui.available_width();
                     ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                        ui.set_min_width(msg_area_width);
+                        ui.set_max_width(msg_area_width);
                         ui.spacing_mut().item_spacing.y = 1.0;
                         Frame::none().inner_margin(Margin::same(16.0)).show(ui, |ui| {
                             if let (Some(buf_id), Some(messages)) = (current_buffer_id.as_ref(), current_buffer_messages.as_ref()) {
@@ -1592,9 +1697,7 @@ impl eframe::App for WeeChatApp {
                                     if !self.show_filtered_lines && !line.displayed { continue; }
 
                                     if let Some(q) = &search_query {
-                                        let clean_prefix = Self::strip_ansi(&line.prefix).to_lowercase();
-                                        let clean_msg = Self::strip_ansi(&line.message).to_lowercase();
-                                        if !clean_prefix.contains(q) && !clean_msg.contains(q) { continue; }
+                                        if !line.plain_prefix_lower.contains(q) && !line.plain_message_lower.contains(q) { continue; }
                                     }
 
                                     let past_visit_marker = current_buffer_visit_marker_id.as_ref().map(|vid| {
@@ -1627,7 +1730,7 @@ impl eframe::App for WeeChatApp {
                                         marker_shown = true;
                                     }
 
-                                    let msg_sections = ANSIParser::parse(&line.message, font_id.clone(), &self.theme);
+                                    let msg_sections = &line.parsed_message;
 
                                     let image_urls_in_line: Vec<String> = if self.show_inline_images {
                                         msg_sections.iter()
@@ -1654,7 +1757,7 @@ impl eframe::App for WeeChatApp {
                                     } else {
                                         Color32::TRANSPARENT
                                     };
-                                    Frame::none()
+                                    let row_resp = Frame::none()
                                         .fill(row_bg)
                                         .rounding(Rounding::same(3.0))
                                         .show(ui, |ui| {
@@ -1663,12 +1766,11 @@ impl eframe::App for WeeChatApp {
                                         if self.show_timestamps {
                                             ui.label(egui::RichText::new(line.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()).font(font_id.clone()).color(text_muted));
                                         }
-                                        let prefix_sections = ANSIParser::parse(&line.prefix, font_id.clone(), &self.theme);
+                                        let prefix_sections = &line.parsed_prefix;
 
                                         // Measure plain-text width for stable column tracking.
-                                        let prefix_plain: String = prefix_sections.iter().map(|s| s.text.as_str()).collect();
                                         let measured_w = ui.fonts(|f| {
-                                            f.layout_no_wrap(prefix_plain, font_id.clone(), Color32::WHITE).size().x
+                                            f.layout_no_wrap(line.plain_prefix.clone(), font_id.clone(), Color32::WHITE).size().x
                                         });
                                         let cap_px = if self.prefix_align_max > 0 {
                                             ui.fonts(|f| {
@@ -1687,7 +1789,7 @@ impl eframe::App for WeeChatApp {
                                             |ui| {
                                                 let mut prefix_job = LayoutJob::default();
                                                 prefix_job.halign = egui::Align::RIGHT;
-                                                for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.format); }
+                                                for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &self.theme)); }
                                                 ui.add(Label::new(prefix_job).wrap(false));
                                             }
                                         );
@@ -1700,12 +1802,12 @@ impl eframe::App for WeeChatApp {
                                             ui.set_min_width(msg_col_width);
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.spacing_mut().item_spacing.x = 6.0;
-                                                for s in &msg_sections {
+                                                for s in msg_sections {
                                                     if let Some(url) = &s.url {
                                                         if ui.link(egui::RichText::new(&s.text).font(font_id.clone())).clicked() {
                                                             ui.ctx().output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url.clone())));
                                                         }
-                                                        if self.show_inline_images && Self::is_image_url(url) {
+                                                        if self.show_inline_images && Self::is_image_url(url) && is_safe_public_url(url) {
                                                             let is_expanded = self.image_expanded.contains(url);
                                                             let btn = if is_expanded { "🖼" } else { "🖼 preview" };
                                                             if ui.small_button(btn).clicked() {
@@ -1728,7 +1830,7 @@ impl eframe::App for WeeChatApp {
                                                                 }
                                                             }
                                                         }
-                                                        if self.show_link_previews && !Self::is_image_url(url) {
+                                                        if self.show_link_previews && !Self::is_image_url(url) && is_safe_public_url(url) {
                                                             let is_expanded = self.preview_expanded.contains(url);
                                                             let btn = if is_expanded { "🔗" } else { "🔗 preview" };
                                                             if ui.small_button(btn).clicked() {
@@ -1750,7 +1852,7 @@ impl eframe::App for WeeChatApp {
                                                         }
                                                     } else if !self.emoji_rendering {
                                                         let mut job = LayoutJob::default();
-                                                        job.append(&s.text, 0.0, s.format.clone());
+                                                        job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &self.theme));
                                                         ui.add(Label::new(job).wrap(true));
                                                     } else {
                                                         let emoji_size = font_id.size + 2.0;
@@ -1758,7 +1860,7 @@ impl eframe::App for WeeChatApp {
                                                             match span {
                                                                 crate::ui::emoji::TextSpan::Text(t) => {
                                                                     let mut job = LayoutJob::default();
-                                                                    job.append(&t, 0.0, s.format.clone());
+                                                                    job.append(&t, 0.0, s.style.to_format(font_id.clone(), &self.theme));
                                                                     ui.add(Label::new(job).wrap(true));
                                                                 }
                                                                 crate::ui::emoji::TextSpan::Emoji(e) => {
@@ -1784,7 +1886,7 @@ impl eframe::App for WeeChatApp {
                                                                         }
                                                                         _ => {
                                                                             let mut job = LayoutJob::default();
-                                                                            job.append(&e, 0.0, s.format.clone());
+                                                                            job.append(&e, 0.0, s.style.to_format(font_id.clone(), &self.theme));
                                                                             ui.add(Label::new(job).wrap(true));
                                                                         }
                                                                     }
@@ -1879,6 +1981,25 @@ impl eframe::App for WeeChatApp {
                                         }); // end vertical (message column)
                                     }); // end horizontal (full message row)
                                     }); // end highlight frame
+                                    let interactable = ui.interact(
+                                        row_resp.response.rect,
+                                        egui::Id::new("msg_row").with(&line.id),
+                                        egui::Sense::click(),
+                                    );
+                                    let plain_message = line.plain_message.clone();
+                                    let plain_prefix = line.plain_prefix.clone();
+                                    interactable.context_menu(|ui| {
+                                        if ui.button("Copy message").clicked() {
+                                            ui.ctx().output_mut(|o| o.copied_text = plain_message.clone());
+                                            ui.close_menu();
+                                        }
+                                        if !plain_prefix.is_empty() {
+                                            if ui.button("Copy with sender").clicked() {
+                                                ui.ctx().output_mut(|o| o.copied_text = format!("<{}> {}", plain_prefix, plain_message));
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         });

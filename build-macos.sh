@@ -64,6 +64,9 @@ EOF
 
 chmod +x "${OUT_DIR}/${BUNDLE}/Contents/MacOS/${BINARY_NAME}"
 
+echo "==> Signing .app bundle (ad-hoc)..."
+codesign --force --deep --sign - "${OUT_DIR}/${BUNDLE}"
+
 echo ""
 echo "==> Done: ${OUT_DIR}/${BUNDLE}"
 echo "    Universal binary: ${OUT_DIR}/${BINARY_NAME}-universal"

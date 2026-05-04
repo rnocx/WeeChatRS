@@ -88,6 +88,8 @@ impl Session {
             "extended-join",
             "batch",
             "chathistory",
+            "draft/chathistory",
+            "draft/event-playback",
             "echo-message",
             "invite-notify",
             "chghost",
@@ -98,6 +100,11 @@ impl Session {
             "soju.im/bouncer-networks",
             "soju.im/read-marker",
         ]
+    }
+
+    fn has_chathistory(&self) -> bool {
+        self.negotiated_caps.contains("chathistory")
+            || self.negotiated_caps.contains("draft/chathistory")
     }
 
     fn cap_req(&self, has_sasl_creds: bool) -> String {
@@ -185,11 +192,49 @@ fn timestamp_from_msg(msg: &IrcMessage) -> DateTime<Utc> {
 }
 
 fn make_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>, highlight: bool) -> Line {
-    Line { id: id.to_string(), timestamp: ts, prefix: prefix.to_string(), message: text.to_string(), displayed: true, highlight }
+    Line::new(id.to_string(), ts, prefix.to_string(), text.to_string(), true, highlight)
 }
 
 fn is_channel(target: &str) -> bool {
     target.starts_with('#') || target.starts_with('&') || target.starts_with('!')
+}
+
+/// Modern IRCv3 servers can send lines up to ~8 KB with tags. Cap a bit
+/// generously to absorb that without giving a hostile server unlimited memory.
+const MAX_IRC_LINE: usize = 16 * 1024;
+
+/// Read a single line into `buf`, ending at the next `\n` or EOF.
+///
+/// Returns `Ok(0)` on EOF with no data buffered, `Ok(n)` for the byte count
+/// (including the trailing `\n` if present), or an error if the line exceeds
+/// `MAX_IRC_LINE` bytes — in which case the caller should drop the connection
+/// rather than try to recover, since we've lost framing.
+async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<usize> {
+    let start_len = buf.len();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(buf.len() - start_len);
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(&available[..=pos]);
+            let n = pos + 1;
+            reader.consume(n);
+            return Ok(buf.len() - start_len);
+        }
+        if buf.len() + available.len() > MAX_IRC_LINE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IRC line exceeds maximum length",
+            ));
+        }
+        buf.extend_from_slice(available);
+        let n = available.len();
+        reader.consume(n);
+    }
 }
 
 // ── IRC → BackendEvent translation ───────────────────────────────────────────
@@ -322,7 +367,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 session.pending_status_lines.clear();
                 // Ask soju for all recent conversations so we can discover PMs that
                 // arrived while we were disconnected (channels come via JOIN already).
-                if session.negotiated_caps.contains("chathistory") {
+                if session.has_chathistory() {
                     session.whois_lines.push("CHATHISTORY TARGETS * * 50".to_string());
                 }
             }
@@ -393,7 +438,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 events.push(BackendEvent::BufferOpened(buf));
                 session.whois_lines.push(format!("NAMES {}", channel));
                 session.whois_lines.push(format!("WHO {}", channel));
-                if session.negotiated_caps.contains("chathistory") {
+                if session.has_chathistory() {
                     session.whois_lines.push(format!("CHATHISTORY LATEST {} * 100", channel));
                 }
             } else if session.joined.contains(&chan_lower) {
@@ -704,7 +749,19 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
 
         "PONG" => { session.pong_received = true; }
 
-        "MARKREAD" => {}
+        "MARKREAD" => {
+            // soju.im/read-marker: another client (or this one earlier) marked a target read.
+            // Format: MARKREAD <target> [timestamp=<rfc3339> | *]
+            let target = msg.param(0).unwrap_or("").to_lowercase();
+            let ts_param = msg.param(1).unwrap_or("");
+            if !target.is_empty() && ts_param.starts_with("timestamp=") && ts_param != "timestamp=*" {
+                events.push(BackendEvent::ActivityChanged {
+                    buffer_id: target,
+                    activity: BufferActivity::None,
+                    unread_count: 0,
+                });
+            }
+        }
 
         "ERROR" => {
             let text = msg.param(0).unwrap_or("Unknown error").to_string();
@@ -916,7 +973,7 @@ pub fn spawn(
                         }
 
                         tokio::select! {
-                            result = reader.read_until(b'\n', &mut raw_buf) => {
+                            result = read_line_bounded(&mut reader, &mut raw_buf) => {
                                 match result {
                                     Ok(0) => {
                                         connected.store(false, Ordering::Relaxed);
@@ -1030,7 +1087,7 @@ pub fn spawn(
                                         }
                                     }
                                     Some(IrcCommand::FetchBefore { buffer_id, before_ts }) => {
-                                        if session.negotiated_caps.contains("chathistory") {
+                                        if session.has_chathistory() {
                                             let _ = write_half.write_all(format!("CHATHISTORY BEFORE {} timestamp={} 100\r\n", buffer_id, before_ts).as_bytes()).await;
                                         }
                                     }

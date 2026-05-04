@@ -8,7 +8,7 @@ const SERVICE: &str = "weechat-rs";
 // Spawning a dedicated OS thread gives zbus a clean stack with no runtime context.
 // We block on the result via a channel — these calls are infrequent (button clicks only).
 #[cfg(target_os = "linux")]
-fn run_keyring<F, R>(f: F) -> R
+fn run_keyring<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
@@ -17,7 +17,7 @@ where
     std::thread::spawn(move || {
         let _ = tx.send(f());
     });
-    rx.recv().expect("keyring thread panicked")
+    rx.recv().map_err(|_| "keyring helper thread panicked or was dropped".to_string())
 }
 
 #[allow(dead_code)]
@@ -34,7 +34,7 @@ pub fn save(host: &str, port: &str, password: &str) -> Result<(), String> {
         Entry::new(SERVICE, &key)
             .and_then(|e| e.set_password(&password))
             .map_err(|e| e.to_string())
-    });
+    }).and_then(|r| r);
     #[cfg(not(target_os = "linux"))]
     Entry::new(SERVICE, &key)
         .and_then(|e| e.set_password(&password))
@@ -49,7 +49,7 @@ pub fn load(host: &str, port: &str) -> Option<String> {
         Entry::new(SERVICE, &key)
             .ok()
             .and_then(|e| e.get_password().ok())
-    });
+    }).ok().flatten();
     #[cfg(not(target_os = "linux"))]
     Entry::new(SERVICE, &key)
         .ok()
@@ -64,7 +64,7 @@ pub fn delete(host: &str, port: &str) -> Result<(), String> {
         Entry::new(SERVICE, &key)
             .and_then(|e| e.delete_credential())
             .map_err(|e| e.to_string())
-    });
+    }).and_then(|r| r);
     #[cfg(not(target_os = "linux"))]
     Entry::new(SERVICE, &key)
         .and_then(|e| e.delete_credential())
@@ -79,7 +79,7 @@ pub fn save_by_key(key: &str, password: &str) -> Result<(), String> {
         Entry::new(SERVICE, &key)
             .and_then(|e| e.set_password(&password))
             .map_err(|e| e.to_string())
-    });
+    }).and_then(|r| r);
     #[cfg(not(target_os = "linux"))]
     Entry::new(SERVICE, &key)
         .and_then(|e| e.set_password(&password))
@@ -93,7 +93,7 @@ pub fn load_by_key(key: &str) -> Option<String> {
         Entry::new(SERVICE, &key)
             .ok()
             .and_then(|e| e.get_password().ok())
-    });
+    }).ok().flatten();
     #[cfg(not(target_os = "linux"))]
     Entry::new(SERVICE, &key)
         .ok()
