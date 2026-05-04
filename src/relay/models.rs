@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
+use crate::ui::ansi::{ANSIParser, ANSISection};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WeeChatResponse {
@@ -47,6 +48,7 @@ pub struct Buffer {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Line {
     pub id: String,
     pub timestamp: DateTime<Utc>,
@@ -54,6 +56,46 @@ pub struct Line {
     pub message: String,
     pub displayed: bool,
     pub highlight: bool,
+    // Cached: parsed once at insertion. Theme/font-independent — resolved at render.
+    pub parsed_prefix: Vec<ANSISection>,
+    pub parsed_message: Vec<ANSISection>,
+    // Cached plain text (ANSI stripped) and lowercased copies for search.
+    pub plain_prefix: String,
+    pub plain_message: String,
+    pub plain_prefix_lower: String,
+    pub plain_message_lower: String,
+}
+
+impl Line {
+    pub fn new(
+        id: String,
+        timestamp: DateTime<Utc>,
+        prefix: String,
+        message: String,
+        displayed: bool,
+        highlight: bool,
+    ) -> Self {
+        let parsed_prefix = ANSIParser::parse(&prefix);
+        let parsed_message = ANSIParser::parse(&message);
+        let plain_prefix: String = parsed_prefix.iter().map(|s| s.text.as_str()).collect();
+        let plain_message: String = parsed_message.iter().map(|s| s.text.as_str()).collect();
+        let plain_prefix_lower = plain_prefix.to_lowercase();
+        let plain_message_lower = plain_message.to_lowercase();
+        Self {
+            id,
+            timestamp,
+            prefix,
+            message,
+            displayed,
+            highlight,
+            parsed_prefix,
+            parsed_message,
+            plain_prefix,
+            plain_message,
+            plain_prefix_lower,
+            plain_message_lower,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

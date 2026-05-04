@@ -56,7 +56,10 @@ impl WeeChatApp {
 
                     // Header row
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Settings").strong().size(18.0));
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("Settings").strong().size(18.0));
+                            ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(11.0).color(accent_color.linear_multiply(0.7)));
+                        });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button(RichText::new("✕").size(16.0)).clicked() {
                                 close = true;

@@ -133,24 +133,27 @@ impl BackendClient for WeeChatClient {
                     }
                 };
 
-                request.headers_mut().insert(
-                    "Origin",
-                    format!("https://{}", host_clean).parse().unwrap(),
+                let origin = format!("https://{}", host_clean);
+                let basic_auth = format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(auth_string.as_bytes())
                 );
-                request.headers_mut().insert(
-                    "Sec-WebSocket-Protocol",
-                    auth_protocol.parse().unwrap(),
-                );
-                request.headers_mut().insert(
-                    "Authorization",
-                    format!(
-                        "Basic {}",
-                        base64::engine::general_purpose::STANDARD
-                            .encode(auth_string.as_bytes())
-                    )
-                    .parse()
-                    .unwrap(),
-                );
+                let header_result: Result<(), String> = (|| {
+                    let origin_v = origin.parse().map_err(|e: http::header::InvalidHeaderValue|
+                        format!("invalid Origin header (bad host?): {}", e))?;
+                    let auth_proto_v = auth_protocol.parse().map_err(|e: http::header::InvalidHeaderValue|
+                        format!("invalid Sec-WebSocket-Protocol header: {}", e))?;
+                    let basic_v = basic_auth.parse().map_err(|e: http::header::InvalidHeaderValue|
+                        format!("invalid Authorization header: {}", e))?;
+                    request.headers_mut().insert("Origin", origin_v);
+                    request.headers_mut().insert("Sec-WebSocket-Protocol", auth_proto_v);
+                    request.headers_mut().insert("Authorization", basic_v);
+                    Ok(())
+                })();
+                if let Err(e) = header_result {
+                    send!(BackendEvent::AuthError(format!("Connection setup failed: {}", e)));
+                    return;
+                }
 
                 let connector = if config.use_ssl {
                     native_tls::TlsConnector::builder()
@@ -243,7 +246,22 @@ impl BackendClient for WeeChatClient {
                     }
                     Err(e) => {
                         connected.store(false, Ordering::Relaxed);
-                        send!(BackendEvent::Error(format!("Connection failed: {}", e)));
+                        // tungstenite returns Error::Http(resp) on a non-101 handshake response.
+                        // Status 401/403 mean wrong password / forbidden — retrying won't help.
+                        let is_auth_failure = match &e {
+                            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                                let s = resp.status().as_u16();
+                                s == 401 || s == 403
+                            }
+                            _ => false,
+                        };
+                        let msg = format!("Connection failed: {}", e);
+                        if is_auth_failure {
+                            send!(BackendEvent::AuthError(msg));
+                            return;
+                        } else {
+                            send!(BackendEvent::Error(msg));
+                        }
                     }
                 }
 
@@ -296,7 +314,7 @@ impl BackendClient for WeeChatClient {
                 None,
                 Some(serde_json::json!({
                     "buffer_id": id,
-                    "input": "/buffer set hotlist -1"
+                    "command": "/buffer set hotlist -1"
                 })),
             );
         }

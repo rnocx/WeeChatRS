@@ -1,6 +1,6 @@
 [package]
 name = "weechat-rs"
-version = "0.6.8"
+version = "0.6.9"
 edition = "2021"
 
 [dependencies]
@@ -30,7 +30,16 @@ tokio-native-tls = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
-notify-rust = "4.11"
+objc2-user-notifications = { version = "0.3", features = [
+    "UNUserNotificationCenter",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotification",
+    "block2",
+] }
+objc2 = ">=0.6.2, <0.8.0"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+block2 = ">=0.6.1, <0.8.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
@@ -39,7 +48,9 @@ notify-rust = "4.11"
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
 openssl = { version = "0.10", features = ["vendored"] }
-notify-rust = { version = "4.11", default-features = false, features = ["z"] }
+# Direct DBus call to org.freedesktop.Notifications — replaces notify-rust on
+# Linux for full control over hints (image-data, urgency, category, etc.).
+zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 [build-dependencies]
 winres = "0.1"
