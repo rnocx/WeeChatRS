@@ -199,6 +199,101 @@ fn is_channel(target: &str) -> bool {
     target.starts_with('#') || target.starts_with('&') || target.starts_with('!')
 }
 
+/// Expand IRC command aliases and shortcuts into wire-format IRC lines.
+///
+/// Returns `Some(wire_line)` when the input is a recognised alias that maps
+/// directly to a raw server command, or `None` to fall through to the normal
+/// send logic.  `/me` and `/msg` are intentionally NOT handled here — they go
+/// through the PRIVMSG branch so that self-echo stays correct.
+fn expand_irc_command(buffer_id: &str, text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let without_slash = &trimmed[1..];
+    let (cmd, rest) = match without_slash.find(|c: char| c.is_ascii_whitespace()) {
+        Some(pos) => (&without_slash[..pos], without_slash[pos + 1..].trim()),
+        None => (without_slash, ""),
+    };
+    let cmd_lc = cmd.to_ascii_lowercase();
+
+    match cmd_lc.as_str() {
+        // /j [key]  →  JOIN #channel [key]
+        "j" => Some(if rest.is_empty() {
+            format!("JOIN {}", buffer_id)
+        } else {
+            format!("JOIN {}", rest)
+        }),
+
+        // /w nick  /wi nick  →  WHOIS nick
+        "w" | "wi" => {
+            if rest.is_empty() { None } else { Some(format!("WHOIS {}", rest)) }
+        }
+
+        // /back  →  AWAY  (clears away status)
+        "back" => Some("AWAY".to_string()),
+
+        // /topic [text]  /t [text]
+        "topic" | "t" => {
+            if !is_channel(buffer_id) { return None; }
+            if rest.is_empty() {
+                Some(format!("TOPIC {}", buffer_id))
+            } else {
+                Some(format!("TOPIC {} :{}", buffer_id, rest))
+            }
+        }
+
+        // /invite nick [#channel]
+        "invite" => {
+            let mut parts = rest.splitn(2, |c: char| c.is_ascii_whitespace());
+            let nick = parts.next().unwrap_or("").trim();
+            let chan = parts.next().map(str::trim).filter(|s| !s.is_empty())
+                .unwrap_or(buffer_id);
+            if nick.is_empty() { None } else { Some(format!("INVITE {} {}", nick, chan)) }
+        }
+
+        // /kick nick [reason]  /k nick [reason]
+        "kick" | "k" => {
+            if !is_channel(buffer_id) || rest.is_empty() { return None; }
+            let mut parts = rest.splitn(2, |c: char| c.is_ascii_whitespace());
+            let nick = parts.next().unwrap_or("").trim();
+            let reason = parts.next().map(str::trim).unwrap_or("");
+            if nick.is_empty() { return None; }
+            if reason.is_empty() {
+                Some(format!("KICK {} {}", buffer_id, nick))
+            } else {
+                Some(format!("KICK {} {} :{}", buffer_id, nick, reason))
+            }
+        }
+
+        // Mode shortcuts — all require a channel context
+        "op" | "deop" | "voice" | "devoice" | "unvoice"
+        | "halfop" | "dehalfop" | "ban" | "unban" | "quiet" | "unquiet" => {
+            if !is_channel(buffer_id) || rest.is_empty() { return None; }
+            let (sign, mode_char) = match cmd_lc.as_str() {
+                "op"       => ('+', 'o'),
+                "deop"     => ('-', 'o'),
+                "voice"    => ('+', 'v'),
+                "devoice" | "unvoice" => ('-', 'v'),
+                "halfop"   => ('+', 'h'),
+                "dehalfop" => ('-', 'h'),
+                "ban"      => ('+', 'b'),
+                "unban"    => ('-', 'b'),
+                "quiet"    => ('+', 'q'),
+                "unquiet"  => ('-', 'q'),
+                _          => return None,
+            };
+            let targets: Vec<&str> = rest.split_ascii_whitespace().collect();
+            let mode_str: String = std::iter::once(sign)
+                .chain(std::iter::repeat(mode_char).take(targets.len()))
+                .collect();
+            Some(format!("MODE {} {} {}", buffer_id, mode_str, targets.join(" ")))
+        }
+
+        _ => None,
+    }
+}
+
 /// Modern IRCv3 servers can send lines up to ~8 KB with tags. Cap a bit
 /// generously to absorb that without giving a hostile server unlimited memory.
 const MAX_IRC_LINE: usize = 16 * 1024;
@@ -353,16 +448,35 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 session.server_name = srv.split('!').next().unwrap_or(srv).to_string();
             }
             session.registered = true;
+            // Connected must fire FIRST so the event handler clears stale buffers from
+            // any previous session before we open the fresh status buffer below.
+            events.push(BackendEvent::Connected);
             if !session.is_soju {
                 let buf_name = if session.server_name.is_empty() { "server".to_string() } else { session.server_name.clone() };
                 let status_buf = session.alloc_buffer("status", &buf_name, "server");
                 events.push(BackendEvent::BufferOpened(status_buf));
+                // Flush pre-registration notices (ident checks, hostname lookups, etc.)
                 for line in session.pending_status_lines.drain(..) {
                     events.push(BackendEvent::LineAdded { buffer_id: "status".to_string(), line });
                 }
-                let welcome = msg.params.last().map(String::as_str).unwrap_or("Connected");
+                // Prominent "connected" banner so the user sees the server and their nick
+                let server_display = if session.server_name.is_empty() { "server".to_string() } else { session.server_name.clone() };
                 *line_counter += 1;
-                events.push(BackendEvent::LineAdded { buffer_id: "status".to_string(), line: make_line(&line_counter.to_string(), "--", welcome, timestamp_from_msg(msg), false) });
+                events.push(BackendEvent::LineAdded {
+                    buffer_id: "status".to_string(),
+                    line: make_line(&line_counter.to_string(), "--",
+                        &format!("Connected to {} as {}", server_display, session.our_nick),
+                        timestamp_from_msg(msg), false),
+                });
+                // 001 welcome text (e.g. "Welcome to the Libera.Chat IRC Network YourNick!")
+                let welcome = msg.params.last().map(String::as_str).unwrap_or("");
+                if !welcome.is_empty() {
+                    *line_counter += 1;
+                    events.push(BackendEvent::LineAdded {
+                        buffer_id: "status".to_string(),
+                        line: make_line(&line_counter.to_string(), "--", welcome, timestamp_from_msg(msg), false),
+                    });
+                }
             } else {
                 session.pending_status_lines.clear();
                 // Ask soju for all recent conversations so we can discover PMs that
@@ -371,7 +485,6 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                     session.whois_lines.push("CHATHISTORY TARGETS * * 50".to_string());
                 }
             }
-            events.push(BackendEvent::Connected);
         }
 
         "PING" => {
@@ -1012,8 +1125,37 @@ pub fn spawn(
                                         break 'conn;
                                     }
                                     Some(IrcCommand::SendMessage { buffer_id, text }) => {
-                                        // /part and /close — leave channel or close DM buffer
                                         let cmd_lower = text.trim().to_lowercase();
+
+                                        // /me <text>  →  CTCP ACTION to current buffer (needs self-echo)
+                                        let text = if let Some(action) = text.trim_start()
+                                            .strip_prefix("/me ")
+                                            .or_else(|| text.trim_start().strip_prefix("/ME "))
+                                        {
+                                            format!("\x01ACTION {}\x01", action.trim())
+                                        } else if cmd_lower == "/me" {
+                                            "\x01ACTION \x01".to_string()
+                                        // /msg <nick> <text>  /m <nick> <text>
+                                        } else if let Some(rest) = text.trim_start().strip_prefix("/msg ")
+                                            .or_else(|| text.trim_start().strip_prefix("/MSG "))
+                                            .or_else(|| text.trim_start().strip_prefix("/m "))
+                                            .or_else(|| text.trim_start().strip_prefix("/M "))
+                                        {
+                                            let mut parts = rest.trim().splitn(2, |c: char| c.is_ascii_whitespace());
+                                            let target = parts.next().unwrap_or("").trim().to_string();
+                                            let msg = parts.next().unwrap_or("").trim().to_string();
+                                            if !target.is_empty() && !msg.is_empty() {
+                                                let _ = write_half.write_all(
+                                                    format!("PRIVMSG {} :{}\r\n", target, msg).as_bytes()
+                                                ).await;
+                                            }
+                                            continue;
+                                        } else {
+                                            text
+                                        };
+
+                                        // /part and /close — leave channel or close DM buffer
+                                        let cmd_lower = text.trim().to_ascii_lowercase();
                                         let is_part = cmd_lower == "/part" || cmd_lower.starts_with("/part ");
                                         let is_close = cmd_lower == "/close";
                                         if is_part || is_close {
@@ -1049,6 +1191,8 @@ pub fn spawn(
                                                     let _ = write_half.write_all(format!("MONITOR + {}\r\n", target_nick).as_bytes()).await;
                                                 }
                                             }
+                                        } else if let Some(wire) = expand_irc_command(&buffer_id, &text) {
+                                            let _ = write_half.write_all(format!("{}\r\n", wire).as_bytes()).await;
                                         } else if let Some(cmd_text) = text.strip_prefix('/') {
                                             let _ = write_half.write_all(format!("{}\r\n", cmd_text).as_bytes()).await;
                                         } else {
