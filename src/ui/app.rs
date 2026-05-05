@@ -498,6 +498,9 @@ pub struct WeeChatApp {
     pub(crate) prefix_suffix: String,
     // Per-buffer max prefix pixel width tracked across frames for stable column alignment.
     pub(crate) prefix_col_widths: HashMap<String, f32>,
+
+    // URL captured at right-click time; stays stable while the context menu is open.
+    pub(crate) ctx_menu_hovered_url: Option<String>,
 }
 
 pub(crate) struct CompletionState {
@@ -613,6 +616,7 @@ impl WeeChatApp {
             prefix_align_max: settings.prefix_align_max,
             prefix_suffix: settings.prefix_suffix,
             prefix_col_widths: HashMap::new(),
+            ctx_menu_hovered_url: None,
         }
     }
 
@@ -1757,6 +1761,7 @@ impl eframe::App for WeeChatApp {
                                     } else {
                                         Color32::TRANSPARENT
                                     };
+                                    let mut row_hovered_url: Option<String> = None;
                                     let row_resp = Frame::none()
                                         .fill(row_bg)
                                         .rounding(Rounding::same(3.0))
@@ -1804,8 +1809,27 @@ impl eframe::App for WeeChatApp {
                                                 ui.spacing_mut().item_spacing.x = 6.0;
                                                 for s in msg_sections {
                                                     if let Some(url) = &s.url {
-                                                        if ui.link(egui::RichText::new(&s.text).font(font_id.clone())).clicked() {
-                                                            ui.ctx().output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url.clone())));
+                                                        // Use hover-only sense so the row's context_menu (which needs
+                                                        // Sense::click on the frame) doesn't compete with link clicks.
+                                                        // URL left-click is detected via raw input instead.
+                                                        let link_style = s.style.to_format(font_id.clone(), &self.theme);
+                                                        let mut link_format = link_style;
+                                                        link_format.color = ui.visuals().hyperlink_color;
+                                                        link_format.underline = egui::Stroke::new(1.0, ui.visuals().hyperlink_color);
+                                                        let mut job = egui::text::LayoutJob::default();
+                                                        job.append(&s.text, 0.0, link_format);
+                                                        let link_resp = ui.add(egui::Label::new(job).sense(egui::Sense::hover()));
+                                                        if link_resp.hovered() {
+                                                            ui.ctx().output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                                                            row_hovered_url = Some(url.clone());
+                                                        }
+                                                        let url_for_click = url.clone();
+                                                        let link_rect = link_resp.rect;
+                                                        if ui.input(|i| {
+                                                            i.pointer.primary_clicked()
+                                                            && i.pointer.interact_pos().map_or(false, |p| link_rect.contains(p))
+                                                        }) {
+                                                            ui.ctx().output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url_for_click)));
                                                         }
                                                         if self.show_inline_images && Self::is_image_url(url) && is_safe_public_url(url) {
                                                             let is_expanded = self.image_expanded.contains(url);
@@ -1981,14 +2005,29 @@ impl eframe::App for WeeChatApp {
                                         }); // end vertical (message column)
                                     }); // end horizontal (full message row)
                                     }); // end highlight frame
-                                    let interactable = ui.interact(
-                                        row_resp.response.rect,
-                                        egui::Id::new("msg_row").with(&line.id),
-                                        egui::Sense::click(),
-                                    );
                                     let plain_message = line.plain_message.clone();
                                     let plain_prefix = line.plain_prefix.clone();
+                                    let interactable = row_resp.response.interact(egui::Sense::click());
+                                    // While the row is hovered (pointer in Middle layer, popup not
+                                    // open), keep the stored URL current.  Once the popup opens the
+                                    // pointer moves into the Foreground layer so the row is no longer
+                                    // hovered, which freezes ctx_menu_hovered_url at the right value.
+                                    if interactable.hovered() {
+                                        self.ctx_menu_hovered_url = row_hovered_url.clone();
+                                    }
+                                    let menu_url = self.ctx_menu_hovered_url.clone();
                                     interactable.context_menu(|ui| {
+                                        if let Some(ref url) = menu_url {
+                                            if ui.button("Open URL").clicked() {
+                                                ui.ctx().output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url.clone())));
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Copy URL").clicked() {
+                                                ui.ctx().output_mut(|o| o.copied_text = url.clone());
+                                                ui.close_menu();
+                                            }
+                                            ui.separator();
+                                        }
                                         if ui.button("Copy message").clicked() {
                                             ui.ctx().output_mut(|o| o.copied_text = plain_message.clone());
                                             ui.close_menu();
