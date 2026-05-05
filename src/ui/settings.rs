@@ -98,6 +98,39 @@ impl WeeChatApp {
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(8.0);
+                        ui.label(RichText::new("File Sharing").strong());
+                        ui.horizontal(|ui| {
+                            ui.label("Upload expiry:");
+                            // Values are the Jirafeau API keywords; labels are human-readable.
+                            const DURATIONS: &[(&str, &str)] = &[
+                                ("minute",    "1 minute"),
+                                ("hour",      "1 hour"),
+                                ("day",       "1 day"),
+                                ("week",      "1 week"),
+                                ("fortnight", "2 weeks"),
+                                ("month",     "1 month"),
+                                ("quarter",   "3 months"),
+                                ("year",      "1 year"),
+                                ("none",      "Never expires"),
+                            ];
+                            let selected_label = DURATIONS.iter()
+                                .find(|(v, _)| *v == self.file_share_duration)
+                                .map(|(_, l)| *l)
+                                .unwrap_or("1 day");
+                            egui::ComboBox::from_id_source("file_share_duration_combo")
+                                .selected_text(selected_label)
+                                .width(120.0)
+                                .show_ui(ui, |ui| {
+                                    for &(value, label) in DURATIONS {
+                                        ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
+                                    }
+                                });
+                            ui.label(RichText::new("files are uploaded to files.interdo.me").small().color(ui.visuals().weak_text_color()));
+                        });
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
                         ui.label(RichText::new("Appearance").strong());
                         ui.horizontal(|ui| {
                             ui.label("Font size:");
