@@ -337,11 +337,15 @@ pub struct AppSettings {
     /// Separator between prefix column and message (matches weechat.look.prefix_suffix).
     #[serde(default = "default_prefix_suffix")]
     pub prefix_suffix: String,
+    /// Duration passed to files.interdo.me upload API (default "24h").
+    #[serde(default = "default_file_share_duration")]
+    pub file_share_duration: String,
 }
 
 fn default_true() -> bool { true }
 fn default_nicklist_width() -> f32 { 180.0 }
 fn default_prefix_suffix() -> String { "│".to_string() }
+fn default_file_share_duration() -> String { "day".to_string() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -380,6 +384,7 @@ impl Default for AppSettings {
             connections: Vec::new(),
             prefix_align_max: 0,
             prefix_suffix: "│".to_string(),
+            file_share_duration: "day".to_string(),
         }
     }
 }
@@ -501,6 +506,17 @@ pub struct WeeChatApp {
 
     // URL captured at right-click time; stays stable while the context menu is open.
     pub(crate) ctx_menu_hovered_url: Option<String>,
+
+    // /np (now-playing) channel: tokio task → main loop → send message
+    pub(crate) np_tx: mpsc::UnboundedSender<(String, String)>,
+    pub(crate) np_rx: mpsc::UnboundedReceiver<(String, String)>,
+
+    // File share: tokio upload task → main loop; Ok = URL to post, Err = error message
+    pub(crate) file_share_tx: mpsc::UnboundedSender<Result<(String, String), String>>,
+    pub(crate) file_share_rx: mpsc::UnboundedReceiver<Result<(String, String), String>>,
+    pub(crate) file_share_uploading: bool,
+    pub(crate) file_share_error: Option<String>,
+    pub(crate) file_share_duration: String,
 }
 
 pub(crate) struct CompletionState {
@@ -515,6 +531,8 @@ impl WeeChatApp {
         let (shared_event_tx, event_rx) = mpsc::unbounded_channel::<(String, BackendEvent)>();
         let (image_tx, image_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
+        let (np_tx, np_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let (file_share_tx, file_share_rx) = mpsc::unbounded_channel::<Result<(String, String), String>>();
 
         let settings: AppSettings = if let Some(storage) = cc.storage {
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
@@ -617,6 +635,13 @@ impl WeeChatApp {
             prefix_suffix: settings.prefix_suffix,
             prefix_col_widths: HashMap::new(),
             ctx_menu_hovered_url: None,
+            np_tx,
+            np_rx,
+            file_share_tx,
+            file_share_rx,
+            file_share_uploading: false,
+            file_share_error: None,
+            file_share_duration: settings.file_share_duration,
         }
     }
 
@@ -838,6 +863,7 @@ impl eframe::App for WeeChatApp {
             connections: self.profiles.clone(),
             prefix_align_max: self.prefix_align_max,
             prefix_suffix: self.prefix_suffix.clone(),
+            file_share_duration: self.file_share_duration.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -914,6 +940,46 @@ impl eframe::App for WeeChatApp {
                 Err(_) => { self.preview_cache.insert(url, PreviewState::Failed); }
             }
             cap_map(&mut self.preview_cache, PREVIEW_CACHE_MAX);
+        }
+
+        // /np drain: send the formatted now-playing message to the active buffer.
+        while let Ok((buf_id, np_text)) = self.np_rx.try_recv() {
+            if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
+                client.send_message(&raw_id, &np_text);
+            }
+        }
+
+        // File share drain: on success send URL; on error show toast (empty = silent cancel).
+        while let Ok(result) = self.file_share_rx.try_recv() {
+            self.file_share_uploading = false;
+            match result {
+                Ok((buf_id, url)) => {
+                    if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
+                        client.send_message(&raw_id, &url);
+                    }
+                }
+                Err(e) if !e.is_empty() => {
+                    self.file_share_error = Some(e);
+                }
+                Err(_) => {}
+            }
+        }
+
+        // Drag-and-drop file upload
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped_files.is_empty() && !self.file_share_uploading {
+            if let Some(path) = dropped_files.into_iter().find_map(|f| f.path) {
+                if let Some(buf_id) = self.selected_buffer_id.clone() {
+                    self.file_share_uploading = true;
+                    self.file_share_error = None;
+                    let duration = self.file_share_duration.clone();
+                    let tx = self.file_share_tx.clone();
+                    tokio::spawn(async move {
+                        let result = crate::ui::fileshare::upload(path, &duration).await;
+                        let _ = tx.send(result.map(|url| (buf_id, url)));
+                    });
+                }
+            }
         }
 
         let mut tab_pressed = false;
@@ -1460,6 +1526,16 @@ impl eframe::App for WeeChatApp {
             egui::TopBottomPanel::bottom("input_panel")
                 .frame(Frame::none().fill(surface_color).inner_margin(Margin::symmetric(16.0, 10.0)))
                 .show(ctx, |ui| {
+                    // File share error toast (clears on next click anywhere)
+                    if let Some(err) = self.file_share_error.clone() {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("Upload failed: {}", err))
+                                .color(Color32::from_rgb(220, 80, 80)).small());
+                            if ui.small_button("✕").clicked() {
+                                self.file_share_error = None;
+                            }
+                        });
+                    }
                     ui.horizontal(|ui| {
                         let hint = if !selected_buffer_connected {
                             "Disconnected — reconnect before sending"
@@ -1468,6 +1544,39 @@ impl eframe::App for WeeChatApp {
                         } else {
                             "Type a message..."
                         };
+
+                        // 📎 file share button
+                        let attach_enabled = selected_buffer_connected && !self.file_share_uploading;
+                        let attach_label = if self.file_share_uploading {
+                            egui::RichText::new("⏳").size(16.0).color(Color32::GRAY)
+                        } else {
+                            egui::RichText::new("📎").size(16.0)
+                        };
+                        if ui.add_enabled(
+                            attach_enabled,
+                            egui::Button::new(attach_label).frame(false),
+                        ).on_hover_text("Upload a file (or drag & drop onto window)").clicked() {
+                            if let Some(buf_id) = self.selected_buffer_id.clone() {
+                                self.file_share_uploading = true;
+                                self.file_share_error = None;
+                                let duration = self.file_share_duration.clone();
+                                let tx = self.file_share_tx.clone();
+                                tokio::spawn(async move {
+                                    let handle = rfd::AsyncFileDialog::new().pick_file().await;
+                                    let h = match handle {
+                                        None => {
+                                            // User cancelled — signal uploading=false with no error
+                                            let _ = tx.send(Err(String::new()));
+                                            return;
+                                        }
+                                        Some(h) => h,
+                                    };
+                                    let result = crate::ui::fileshare::upload(h.path().to_path_buf(), &duration).await;
+                                    let _ = tx.send(result.map(|url| (buf_id, url)));
+                                });
+                            }
+                        }
+
                         ui.add_enabled_ui(selected_buffer_connected, |ui| {
                             let text_edit = egui::TextEdit::singleline(&mut self.input_text)
                                 .hint_text(hint)
