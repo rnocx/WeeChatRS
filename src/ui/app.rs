@@ -1312,7 +1312,14 @@ impl eframe::App for WeeChatApp {
                             let resp = ui.interact(outer_resp.rect, row_id, egui::Sense::click_and_drag());
 
                             if resp.hovered() {
-                                ctx.set_cursor_icon(if is_dragging { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+                                let cursor = if is_dragging {
+                                    egui::CursorIcon::Grabbing
+                                } else if ctx.input(|i| i.pointer.primary_down()) {
+                                    egui::CursorIcon::Grab
+                                } else {
+                                    egui::CursorIcon::Default
+                                };
+                                ctx.set_cursor_icon(cursor);
                             }
                             if resp.drag_started() {
                                 next_drag_buffer_id = Some(buffer.id.clone());
