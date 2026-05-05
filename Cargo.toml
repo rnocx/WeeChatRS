@@ -1,6 +1,6 @@
 [package]
 name = "weechat-rs"
-version = "0.6.9"
+version = "0.7.0"
 edition = "2021"
 
 [dependencies]
@@ -20,7 +20,7 @@ env_logger = "0.11"
 regex = "1.10"
 plist = "1.6"
 rfd = "0.14"
-reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "multipart"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 fontdb = "0.22"
 

@@ -23,23 +23,23 @@ impl WeeChatApp {
                     conn.status = "Connected".to_string();
                     match conn.backend_type {
                         crate::ui::app::BackendType::WeeChat => {
-                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  WebSocket handshake complete", ts));
-                            let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts2 = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Sending credentials via Sec-WebSocket-Protocol bearer token", ts2));
-                            let ts3 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts3 = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Authentication accepted by relay", ts3));
-                            let ts4 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts4 = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  → GET /api/buffers", ts4));
-                            let ts5 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts5 = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  → POST /api/sync  {{colors: ansi, input: false}}", ts5));
                         }
                         crate::ui::app::BackendType::Soju => {
-                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  IRC registration complete (CAP/NICK/USER)", ts));
                         }
                     }
-                    let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                    let ts = chrono::Local::now().format("%H:%M").to_string();
                     conn.connection_log.push_back(format!("[{}]  Connected", ts));
                     if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
                 }
@@ -65,19 +65,19 @@ impl WeeChatApp {
                     if conn.connecting_pending {
                         conn.connecting_pending = false;
                         conn.auth_error = Some("Connection closed before auth completed — check your password and relay settings.".to_string());
-                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        let ts = chrono::Local::now().format("%H:%M").to_string();
                         conn.connection_log.push_back(format!("[{}]  WebSocket closed by server before authentication completed", ts));
-                        let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
+                        let ts2 = chrono::Local::now().format("%H:%M").to_string();
                         conn.connection_log.push_back(format!("[{}]  Check: relay password, relay plugin loaded, port correct", ts2));
                         conn.status = String::new();
                         if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
                     } else {
                         conn.status = "Disconnected".to_string();
                         if conn.auto_reconnect {
-                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Disconnected — auto-reconnect is ON, will retry", ts));
                         } else {
-                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Disconnected", ts));
                         }
                         if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
@@ -112,12 +112,12 @@ impl WeeChatApp {
                             || e.to_lowercase().contains("forbidden");
                         conn.connecting_pending = false;
                         if is_auth {
-                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Auth error: {}", ts, e));
-                            let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts2 = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Wrong password or relay not configured to accept this connection", ts2));
                         } else {
-                            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Connection error: {}", ts, e));
                         }
                         conn.auth_error = Some(if is_auth {
@@ -128,7 +128,7 @@ impl WeeChatApp {
                         conn.status = String::new();
                         if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
                     } else {
-                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        let ts = chrono::Local::now().format("%H:%M").to_string();
                         conn.connection_log.push_back(format!("[{}]  Error: {}", ts, e));
                         conn.status = format!("Error: {}", e);
                         if conn.connection_log.len() > 500 { conn.connection_log.pop_front(); }
