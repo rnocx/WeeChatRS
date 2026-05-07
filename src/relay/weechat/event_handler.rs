@@ -271,27 +271,31 @@ impl WeeChatApp {
                     buf.topic = topic;
                 }
             }
-            BackendEvent::ActivityChanged { buffer_id, activity, unread_count } => {
+            BackendEvent::ActivityChanged { buffer_id, activity, unread_count, markread_ts } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     buf.activity = activity;
                     buf.unread_count = unread_count;
+                    if let Some(ts) = markread_ts {
+                        buf.last_markread_ts = Some(ts);
+                    }
                 }
             }
             BackendEvent::LinesLoaded { buffer_id, lines, is_prepend } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 let is_load_more = self.loading_more_buffer_id.as_deref() == Some(full_id.as_str());
-                // When prepending historical replay, don't re-increment unread counts for a
-                // buffer the user has already viewed this session. This prevents late-arriving
-                // CHATHISTORY responses from undoing a clear the user just performed.
-                let already_cleared = is_prepend && self.cleared_buffer_ids.contains(&full_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     // Update activity for on-connect chathistory replay, but not for
-                    // user-triggered "load more" requests or already-viewed buffers.
-                    if !is_selected && !buf.muted && !is_load_more && !already_cleared {
+                    // user-triggered "load more" requests (those are explicitly old history).
+                    // For prepended history, only count lines newer than the soju read marker.
+                    if !is_selected && !buf.muted && !is_load_more {
+                        let read_cutoff = if is_prepend { buf.last_markread_ts } else { None };
                         for line in &lines {
                             if !line.displayed { continue; }
+                            if let Some(cutoff) = read_cutoff {
+                                if line.timestamp <= cutoff { continue; }
+                            }
                             if line.highlight {
                                 buf.activity = crate::relay::models::BufferActivity::Highlight;
                                 buf.unread_count = buf.unread_count.saturating_add(1);
@@ -653,6 +657,7 @@ impl WeeChatApp {
                         muted,
                         has_nicklist: effective_nicklist,
                         visit_start_marker_id,
+                        last_markread_ts: None,
                     });
                 }
             }
