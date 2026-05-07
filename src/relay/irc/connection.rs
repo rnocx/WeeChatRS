@@ -549,10 +549,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 events.push(BackendEvent::BufferOpened(buf));
                 session.whois_lines.push(format!("NAMES {}", channel));
                 session.whois_lines.push(format!("WHO {}", channel));
-                // Soju auto-replays chathistory for each channel as part of the JOIN batch;
-                // requesting it again would deliver a duplicate that re-increments unread counts
-                // for channels the user has already cleared. Only request explicitly for plain IRC.
-                if session.has_chathistory() && !session.is_soju {
+                if session.has_chathistory() {
                     session.whois_lines.push(format!("CHATHISTORY LATEST {} * 100", channel));
                 }
             } else if session.joined.contains(&chan_lower) {
