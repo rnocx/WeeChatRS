@@ -3,6 +3,7 @@ use crate::relay::weechat::{WeeChatClient, WeeChatConfig};
 use crate::relay::models::*;
 use crate::ui::ansi::ANSIParser;
 use crate::ui::theme::AppTheme;
+use crate::ui::keybinds::KeybindsMap;
 use crate::ui::url_safety::is_safe_public_url;
 use egui::{FontId, ScrollArea, Label, Key, Visuals, TextStyle, FontFamily, Color32, text::LayoutJob, Margin, Frame, Rounding, Stroke, Vec2, Modifiers, Rect, Painter};
 use tokio::sync::mpsc;
@@ -340,6 +341,11 @@ pub struct AppSettings {
     /// Duration passed to files.interdo.me upload API (default "24h").
     #[serde(default = "default_file_share_duration")]
     pub file_share_duration: String,
+    #[serde(default)]
+    pub keybinds: KeybindsMap,
+    /// Server group keys (buffer.server) whose child buffers are collapsed in the list.
+    #[serde(default)]
+    pub collapsed_servers: HashSet<String>,
 }
 
 fn default_true() -> bool { true }
@@ -385,6 +391,8 @@ impl Default for AppSettings {
             prefix_align_max: 0,
             prefix_suffix: "│".to_string(),
             file_share_duration: "day".to_string(),
+            keybinds: KeybindsMap::default(),
+            collapsed_servers: HashSet::new(),
         }
     }
 }
@@ -506,6 +514,14 @@ pub struct WeeChatApp {
 
     // URL captured at right-click time; stays stable while the context menu is open.
     pub(crate) ctx_menu_hovered_url: Option<String>,
+
+    // Keybinds
+    pub(crate) keybinds: KeybindsMap,
+    /// Action currently being rebound (capture mode).
+    pub(crate) editing_keybind: Option<crate::ui::keybinds::KeybindAction>,
+
+    // Collapsed server groups in the buffer list (stored by buffer.server key).
+    pub(crate) collapsed_servers: HashSet<String>,
 
     // /np (now-playing) channel: tokio task → main loop → send message
     pub(crate) np_tx: mpsc::UnboundedSender<(String, String)>,
@@ -642,6 +658,9 @@ impl WeeChatApp {
             file_share_uploading: false,
             file_share_error: None,
             file_share_duration: settings.file_share_duration,
+            keybinds: settings.keybinds,
+            editing_keybind: None,
+            collapsed_servers: settings.collapsed_servers,
         }
     }
 
@@ -771,6 +790,7 @@ impl WeeChatApp {
         let mut client: Box<dyn BackendClient> = match profile.backend_type {
             BackendType::Soju => {
                 let config = crate::relay::irc::IrcConfig {
+                    label: profile.label.clone(),
                     host: profile.host.clone(),
                     port,
                     nick: if profile.nick.is_empty() { "user".to_string() } else { profile.nick.clone() },
@@ -864,6 +884,8 @@ impl eframe::App for WeeChatApp {
             prefix_align_max: self.prefix_align_max,
             prefix_suffix: self.prefix_suffix.clone(),
             file_share_duration: self.file_share_duration.clone(),
+            keybinds: self.keybinds.clone(),
+            collapsed_servers: self.collapsed_servers.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -988,21 +1010,42 @@ impl eframe::App for WeeChatApp {
         let mut history_up = false;
         let mut history_down = false;
         let mut search_shortcut = false;
+        let mut jump_next_unread = false;
+        let mut jump_buffer_n: Option<usize> = None;
 
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::Tab) {
                 tab_pressed = true;
             }
 
-            let meta = i.modifiers.command || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.ctrl;
-            if meta {
-                if i.consume_key(i.modifiers, Key::ArrowUp) || i.key_pressed(Key::ArrowUp) { arrow_up_shortcut = true; }
-                if i.consume_key(i.modifiers, Key::ArrowDown) || i.key_pressed(Key::ArrowDown) { arrow_down_shortcut = true; }
-                if i.consume_key(i.modifiers, Key::F) { search_shortcut = true; }
-                if i.consume_key(i.modifiers, Key::B) { self.show_buffers = !self.show_buffers; }
-                if i.consume_key(i.modifiers, Key::N) { self.show_nicklist = !self.show_nicklist; }
-                if i.consume_key(i.modifiers, Key::T) { self.show_toolbar = !self.show_toolbar; }
-            } else {
+            let kb = &self.keybinds;
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::CycleBufferUp) {
+                arrow_up_shortcut = true;
+            }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::CycleBufferDown) {
+                arrow_down_shortcut = true;
+            }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::ToggleSearch) {
+                search_shortcut = true;
+            }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::ToggleBufferList) {
+                self.show_buffers = !self.show_buffers;
+            }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::ToggleNicklist) {
+                self.show_nicklist = !self.show_nicklist;
+            }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::ToggleToolbar) {
+                self.show_toolbar = !self.show_toolbar;
+            }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::JumpNextUnread) {
+                jump_next_unread = true;
+            }
+            if let Some(n) = kb.consume_jump_number(i) {
+                jump_buffer_n = Some(n);
+            }
+
+            let any_mod = i.modifiers.command || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.ctrl;
+            if !any_mod {
                 if i.consume_key(Modifiers::NONE, Key::ArrowUp) { history_up = true; }
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) { history_down = true; }
             }
@@ -1011,6 +1054,8 @@ impl eframe::App for WeeChatApp {
         if arrow_up_shortcut { self.cycle_buffer(-1); }
         if arrow_down_shortcut { self.cycle_buffer(1); }
         if search_shortcut { self.show_search = !self.show_search; }
+        if jump_next_unread { self.jump_next_unread(); }
+        if let Some(n) = jump_buffer_n { self.jump_buffer_by_number(n); }
 
         if self.font_path != self.applied_font_path {
             crate::ui::fonts::apply(ctx, &self.font_path);
@@ -1096,6 +1141,7 @@ impl eframe::App for WeeChatApp {
         ctx.set_visuals(visuals);
 
         let mut next_selected_buffer_id = None;
+        let mut pending_collapse_toggle: Option<String> = None;
         let mut pending_buffer_command = None;
         let mut next_drag_buffer_id: Option<String> = None;
         let mut pending_mute: Option<(String, String, bool)> = None;
@@ -1179,6 +1225,7 @@ impl eframe::App for WeeChatApp {
                 .max_width(buffers_max_w)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
+                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("BUFFERS").strong().color(accent_color).size(11.0));
                     ui.add_space(8.0);
@@ -1214,31 +1261,42 @@ impl eframe::App for WeeChatApp {
                                 continue;
                             }
                             let is_selected = self.selected_buffer_id.as_deref() == Some(&buffer.id);
-                            let is_root = buffer.kind == "server" || buffer.kind == "core";
+                            let is_core  = buffer.kind == "core";
+                            let is_root  = buffer.kind == "server" || is_core;
+                            // Skip children of collapsed server groups.
+                            if !is_root && self.collapsed_servers.contains(&buffer.server) {
+                                continue;
+                            }
                             let is_child = buffer.kind == "channel" || buffer.kind == "private";
                             let in_dragged_group = dragged_group_ids.contains(&buffer.id);
 
-                            // Connection header — only shown when ≥2 connections are active
-                            if multi_conn {
+                            // Connection header — shown when ≥2 connections are active, but
+                            // suppressed when the first buffer in the group is a root buffer
+                            // (server/core rows render themselves as section headers).
+                            {
                                 let buf_conn_prefix = buffer.id.split('/').next().unwrap_or("").to_string();
                                 if last_conn_prefix.as_deref() != Some(&buf_conn_prefix) {
                                     if last_conn_prefix.is_some() { ui.add_space(6.0); }
-                                    let header_label = conn_label_map.get(&buf_conn_prefix)
-                                        .cloned()
-                                        .unwrap_or_else(|| buf_conn_prefix.clone());
-                                    ui.label(
-                                        egui::RichText::new(header_label.to_uppercase())
-                                            .strong()
-                                            .color(accent_color)
-                                            .size(10.0)
-                                    );
-                                    ui.add_space(2.0);
+                                    if multi_conn && !is_root {
+                                        let header_label = conn_label_map.get(&buf_conn_prefix)
+                                            .cloned()
+                                            .unwrap_or_else(|| buf_conn_prefix.clone());
+                                        ui.label(
+                                            egui::RichText::new(header_label.to_uppercase())
+                                                .strong()
+                                                .color(accent_color)
+                                                .size(10.0)
+                                        );
+                                        ui.add_space(2.0);
+                                    }
                                     last_conn_prefix = Some(buf_conn_prefix);
                                 }
                             }
 
-                            if self.show_server_headers && is_root {
-                                ui.add_space(8.0);
+                            // Space before each root header row (server/core), except at the
+                            // very top (last_conn_prefix was just set, already has add_space).
+                            if is_root {
+                                ui.add_space(4.0);
                             }
 
                             let is_muted = buffer.muted;
@@ -1246,8 +1304,9 @@ impl eframe::App for WeeChatApp {
                                 (accent_color.linear_multiply(0.2), text_primary)
                             } else if is_muted {
                                 (Color32::TRANSPARENT, text_muted.linear_multiply(0.6))
-                            } else if self.show_server_headers && is_root && buffer.activity == BufferActivity::None {
-                                (Color32::TRANSPARENT, accent_color.linear_multiply(0.75))
+                            } else if is_root {
+                                // Server/core headers always use accent colour
+                                (Color32::TRANSPARENT, accent_color)
                             } else {
                                 match buffer.activity {
                                     BufferActivity::Highlight => (Color32::from_rgb(150, 50, 50).linear_multiply(0.3), Color32::from_rgb(255, 100, 100)),
@@ -1259,57 +1318,131 @@ impl eframe::App for WeeChatApp {
 
                             let indent = if is_child { 12.0 } else { 0.0 };
 
-                            let outer_resp = ui.horizontal(|ui| {
-                                ui.add_space(indent);
-                                Frame::none()
-                                    .fill(if in_dragged_group { bg.linear_multiply(0.35) } else { bg })
-                                    .rounding(Rounding::same(6.0))
-                                    .inner_margin(Margin::symmetric(8.0, 4.0))
-                                    .show(ui, |ui| {
-                                        ui.set_min_width(ui.available_width());
-                                        let name = if !is_muted && buffer.activity == BufferActivity::Highlight {
-                                            format!("• {}", buffer.name)
-                                        } else if is_muted {
-                                            format!("🔇 {}", buffer.name)
-                                        } else {
-                                            buffer.name.clone()
-                                        };
-                                        let label = if self.show_server_headers && is_root {
-                                            egui::RichText::new(name.to_uppercase()).color(fg).italics()
-                                        } else if is_muted {
-                                            egui::RichText::new(name).color(fg).italics()
-                                        } else {
-                                            egui::RichText::new(name).color(fg).strong()
-                                        };
-                                        let unread = if is_muted || is_root { 0 } else { buffer.unread_count };
-                                        let buf_activity = buffer.activity;
-                                        if unread > 0 {
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                let badge_text = if unread > 99 { "99+".to_string() } else { unread.to_string() };
-                                                let badge_bg = if buf_activity == BufferActivity::Highlight {
-                                                    Color32::from_rgb(200, 50, 50)
-                                                } else {
-                                                    accent_color
-                                                };
-                                                Frame::none()
-                                                    .fill(badge_bg)
-                                                    .rounding(Rounding::same(8.0))
-                                                    .inner_margin(Margin::symmetric(4.0, 1.0))
-                                                    .show(ui, |ui| {
-                                                        ui.label(egui::RichText::new(badge_text).color(Color32::WHITE).strong().size(self.font_size * 0.72));
-                                                    });
-                                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                                    ui.add(Label::new(label).truncate(true));
-                                                });
-                                            });
-                                        } else {
-                                            ui.add(Label::new(label).truncate(true));
-                                        }
-                                    });
-                            }).response;
+                            // Fixed-height row: derive height from font metrics so the row
+                            // never expands beyond one line regardless of text length or font size.
+                            let avail_w = ui.available_width();
+                            let line_h  = ui.text_style_height(&TextStyle::Body);
+                            let row_h   = line_h + 8.0; // 4 px top + 4 px bottom padding
 
+                            // Chevron width reserved on the right for collapsible server groups.
+                            let chevron_w = if is_root && !is_core { 14.0_f32 } else { 0.0_f32 };
+
+                            // Allocate exact row space — no sense here so layout is not affected.
+                            let (outer_rect, _) = ui.allocate_exact_size(
+                                Vec2::new(avail_w, row_h),
+                                egui::Sense::hover(),
+                            );
+
+                            // Background frame rect (indented for child buffers).
+                            // For root headers the frame width leaves room for the chevron.
+                            let frame_rect = egui::Rect::from_min_size(
+                                egui::pos2(outer_rect.min.x + indent, outer_rect.min.y),
+                                egui::vec2((outer_rect.width() - indent).max(0.0), outer_rect.height()),
+                            );
+                            // Clip background to panel boundary so it never overdraws adjacent panels.
+                            let panel_clip  = ui.clip_rect();
+                            let fill = if in_dragged_group { bg.linear_multiply(0.35) } else { bg };
+                            if fill != Color32::TRANSPARENT {
+                                ui.painter().with_clip_rect(frame_rect.intersect(panel_clip))
+                                    .rect_filled(frame_rect, Rounding::same(6.0), fill);
+                            }
+
+                            // Inner content rect — shrink by chevron on the right for root rows.
+                            let inner_rect = egui::Rect::from_min_max(
+                                frame_rect.shrink2(Vec2::new(8.0, 4.0)).min,
+                                egui::pos2(frame_rect.max.x - chevron_w - 2.0, frame_rect.max.y - 4.0),
+                            );
+                            let clip_rect  = inner_rect.intersect(panel_clip);
+
+                            if clip_rect.is_positive() {
+                                let name = if !is_muted && buffer.activity == BufferActivity::Highlight {
+                                    format!("• {}", buffer.name)
+                                } else if is_muted {
+                                    format!("🔇 {}", buffer.name)
+                                } else {
+                                    buffer.name.clone()
+                                };
+                                // Root buffers (server + core) use compact header styling.
+                                let label = if is_root {
+                                    egui::RichText::new(name.to_uppercase()).color(fg).strong().size(10.0)
+                                } else if is_muted {
+                                    egui::RichText::new(name).color(fg).italics()
+                                } else {
+                                    egui::RichText::new(name).color(fg).strong()
+                                };
+                                let unread       = if is_muted || is_root { 0 } else { buffer.unread_count };
+                                let buf_activity = buffer.activity;
+
+                                let mut row_ui = ui.child_ui(
+                                    inner_rect,
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                );
+                                row_ui.set_clip_rect(clip_rect);
+
+                                if unread > 0 {
+                                    let badge_text = if unread > 99 { "99+".to_string() } else { unread.to_string() };
+                                    let badge_bg   = if buf_activity == BufferActivity::Highlight {
+                                        Color32::from_rgb(200, 50, 50)
+                                    } else {
+                                        accent_color
+                                    };
+                                    Frame::none()
+                                        .fill(badge_bg)
+                                        .rounding(Rounding::same(8.0))
+                                        .inner_margin(Margin::symmetric(4.0, 1.0))
+                                        .show(&mut row_ui, |ui| {
+                                            ui.label(egui::RichText::new(badge_text)
+                                                .color(Color32::WHITE)
+                                                .strong()
+                                                .size(self.font_size * 0.72));
+                                        });
+                                }
+                                // selectable(false) prevents Label from grabbing clicks
+                                // that belong to the row interact registered below.
+                                row_ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.add(Label::new(label).truncate(true).selectable(false));
+                                });
+                            }
+
+                            // Row interact rect excludes the chevron column so the two
+                            // interactions don't overlap and both fire correctly.
+                            let row_interact_rect = if chevron_w > 0.0 {
+                                egui::Rect::from_min_max(
+                                    outer_rect.min,
+                                    egui::pos2(outer_rect.max.x - chevron_w, outer_rect.max.y),
+                                )
+                            } else {
+                                outer_rect
+                            };
+
+                            // Register row interaction first (lower hit-test priority than chevron).
                             let row_id = egui::Id::new("buf_row").with(&buffer.id);
-                            let resp = ui.interact(outer_resp.rect, row_id, egui::Sense::click_and_drag());
+                            let resp   = ui.interact(row_interact_rect, row_id, egui::Sense::click_and_drag());
+
+                            // Chevron collapse toggle — registered after row so it wins the hit-test
+                            // when the pointer is inside the (non-overlapping) chevron rect.
+                            if is_root && !is_core {
+                                let chevron_rect = egui::Rect::from_min_max(
+                                    egui::pos2(outer_rect.max.x - chevron_w, outer_rect.min.y),
+                                    outer_rect.max,
+                                );
+                                let is_collapsed = self.collapsed_servers.contains(&buffer.server);
+                                let chevron_char = if is_collapsed { "▶" } else { "▼" };
+                                let chev_id   = egui::Id::new("buf_chev").with(&buffer.id);
+                                let chev_resp = ui.interact(chevron_rect, chev_id, egui::Sense::click());
+                                let chev_color = if chev_resp.hovered() { text_primary } else { fg };
+                                ui.painter().with_clip_rect(chevron_rect.intersect(panel_clip))
+                                    .text(
+                                        chevron_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        chevron_char,
+                                        egui::FontId::new(8.0, FontFamily::Proportional),
+                                        chev_color,
+                                    );
+                                if chev_resp.clicked() {
+                                    pending_collapse_toggle = Some(buffer.server.clone());
+                                }
+                            }
 
                             if resp.hovered() {
                                 let cursor = if is_dragging {
@@ -1371,7 +1504,7 @@ impl eframe::App for WeeChatApp {
                             }
 
                             if !in_dragged_group {
-                                row_rects.push((outer_resp.rect, buffer.id.clone()));
+                                row_rects.push((outer_rect, buffer.id.clone()));
                             }
                         }
                     });
@@ -1422,6 +1555,11 @@ impl eframe::App for WeeChatApp {
         if let Some(id) = next_selected_buffer_id {
             self.select_buffer(id);
         }
+        if let Some(server) = pending_collapse_toggle {
+            if !self.collapsed_servers.remove(&server) {
+                self.collapsed_servers.insert(server);
+            }
+        }
 
         if let Some((buf_id, full_name, mute)) = pending_mute {
             if mute {
@@ -1470,6 +1608,7 @@ impl eframe::App for WeeChatApp {
                 .max_width(nicks_max_w)
                 .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(10.0)))
                 .show(ctx, |ui| {
+                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
                     // Force content to fill the full panel width so that egui's
                     // PanelState stores the actual panel width (not just content
                     // min_rect), preventing the panel from snapping back to
@@ -1625,6 +1764,9 @@ impl eframe::App for WeeChatApp {
         egui::CentralPanel::default()
             .frame(Frame::none().fill(bg_color).inner_margin(Margin::same(0.0)))
             .show(ctx, |ui| {
+            // egui panels use screen_rect as clip_rect — explicitly restrict to this
+            // panel's rect so content cannot paint into adjacent side panels.
+            ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
             if self.show_settings {
                 self.show_settings_window(ui, accent_color, is_light);
             } else if self.show_connections {
@@ -1779,8 +1921,15 @@ impl eframe::App for WeeChatApp {
                         ui.separator();
                     }
 
-                    let msg_area_width = ui.available_width();
-                    ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                    ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .auto_shrink([false, false])
+                        .horizontal_scroll_offset(0.0)
+                        .show(ui, |ui| {
+                        // Capture width inside the scroll area so it reflects inner_size.x
+                        // (outer width minus vertical scrollbar), preventing content_is_too_large.x
+                        // from going true and enabling horizontal offset drift via drag-to-scroll.
+                        let msg_area_width = ui.available_width();
                         ui.set_min_width(msg_area_width);
                         ui.set_max_width(msg_area_width);
                         ui.spacing_mut().item_spacing.y = 1.0;

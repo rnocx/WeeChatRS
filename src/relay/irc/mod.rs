@@ -10,6 +10,7 @@ use connection::IrcCommand;
 
 #[derive(Clone)]
 pub struct IrcConfig {
+    pub label: String,
     pub host: String,
     pub port: u16,
     pub nick: String,
