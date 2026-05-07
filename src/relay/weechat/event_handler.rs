@@ -282,10 +282,14 @@ impl WeeChatApp {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 let is_load_more = self.loading_more_buffer_id.as_deref() == Some(full_id.as_str());
+                // When prepending historical replay, don't re-increment unread counts for a
+                // buffer the user has already viewed this session. This prevents late-arriving
+                // CHATHISTORY responses from undoing a clear the user just performed.
+                let already_cleared = is_prepend && self.cleared_buffer_ids.contains(&full_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     // Update activity for on-connect chathistory replay, but not for
-                    // user-triggered "load more" requests (those are explicitly old history).
-                    if !is_selected && !buf.muted && !is_load_more {
+                    // user-triggered "load more" requests or already-viewed buffers.
+                    if !is_selected && !buf.muted && !is_load_more && !already_cleared {
                         for line in &lines {
                             if !line.displayed { continue; }
                             if line.highlight {
@@ -513,7 +517,9 @@ impl WeeChatApp {
         *kind = "unknown".to_string();
         *server = "orphans".to_string();
 
-        if full_name == "weechat" || plugin == "core" || full_name == "core.weechat" {
+        if full_name == "weechat" || plugin == "core" || full_name == "core.weechat"
+            || full_name.ends_with(".core.weechat")
+        {
             *kind = "core".to_string();
             *server = "!00_core".to_string();
             return;
@@ -622,6 +628,12 @@ impl WeeChatApp {
                     // Use raw_full_name (without prefix) for metadata extraction
                     Self::extract_metadata(obj, &mut topic, &mut modes, &mut kind, &mut server, &raw_full_name, &plugin);
 
+                    // Core and server buffers never have a usable nicklist regardless of
+                    // what the relay reports (unwrap_or(true) above can over-report).
+                    let effective_nicklist = has_nicklist
+                        && kind != "core"
+                        && kind != "server";
+
                     new_conn_buffers.push(Buffer {
                         id: full_id,
                         number,
@@ -639,7 +651,7 @@ impl WeeChatApp {
                         modes,
                         hidden,
                         muted,
-                        has_nicklist,
+                        has_nicklist: effective_nicklist,
                         visit_start_marker_id,
                     });
                 }
