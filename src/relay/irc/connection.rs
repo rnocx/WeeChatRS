@@ -98,13 +98,26 @@ impl Session {
             "labeled-response",
             "msgid",
             "soju.im/bouncer-networks",
-            "soju.im/read-marker",
+            "draft/read-marker",
+            "soju.im/read",
         ]
     }
 
     fn has_chathistory(&self) -> bool {
         self.negotiated_caps.contains("chathistory")
             || self.negotiated_caps.contains("draft/chathistory")
+    }
+
+    /// Returns the read-marker command name to use, or None if no read-marker cap was negotiated.
+    /// draft/read-marker uses MARKREAD; soju.im/read (legacy) uses READ.
+    fn read_marker_cmd(&self) -> Option<&'static str> {
+        if self.negotiated_caps.contains("draft/read-marker") {
+            Some("MARKREAD")
+        } else if self.negotiated_caps.contains("soju.im/read") {
+            Some("READ")
+        } else {
+            None
+        }
     }
 
     fn cap_req(&self, has_sasl_creds: bool) -> String {
@@ -523,6 +536,12 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                             session.joined.insert(target.clone());
                             let buf = session.alloc_buffer(&target, &target, "private");
                             events.push(BackendEvent::BufferOpened(buf));
+                            // For DMs there is no JOIN, so soju never sends MARKREAD automatically.
+                            // Query the read marker first; soju replies before processing the next
+                            // command, so last_markread_ts will be set before LinesLoaded arrives.
+                            if let Some(cmd) = session.read_marker_cmd() {
+                                session.whois_lines.push(format!("{} {}", cmd, target));
+                            }
                             session.whois_lines.push(format!("CHATHISTORY LATEST {} * 100", target));
                         }
                     }
@@ -851,16 +870,20 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
 
         "PONG" => { session.pong_received = true; }
 
-        "MARKREAD" => {
-            // soju.im/read-marker: another client (or this one earlier) marked a target read.
-            // Format: MARKREAD <target> [timestamp=<rfc3339> | *]
+        // draft/read-marker uses MARKREAD; legacy soju.im/read uses READ.
+        // Both have the same format: <cmd> <target> [timestamp=<rfc3339> | *]
+        "MARKREAD" | "READ" => {
             let target = msg.param(0).unwrap_or("").to_lowercase();
             let ts_param = msg.param(1).unwrap_or("");
-            if !target.is_empty() && ts_param.starts_with("timestamp=") && ts_param != "timestamp=*" {
-                let ts_str = &ts_param["timestamp=".len()..];
-                let markread_ts = chrono::DateTime::parse_from_rfc3339(ts_str)
-                    .ok()
-                    .map(|dt| dt.with_timezone(&Utc));
+            if !target.is_empty() {
+                let markread_ts = if ts_param.starts_with("timestamp=") && ts_param != "timestamp=*" {
+                    let ts_str = &ts_param["timestamp=".len()..];
+                    chrono::DateTime::parse_from_rfc3339(ts_str)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&Utc))
+                } else {
+                    None // "*" or missing means no read marker set yet
+                };
                 events.push(BackendEvent::ActivityChanged {
                     buffer_id: target,
                     activity: BufferActivity::None,
@@ -1219,9 +1242,9 @@ pub fn spawn(
                                     }
                                     Some(IrcCommand::FetchBufferList) => {}
                                     Some(IrcCommand::MarkRead { buffer_id }) => {
-                                        if session.negotiated_caps.contains("soju.im/read-marker") {
+                                        if let Some(cmd) = session.read_marker_cmd() {
                                             let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-                                            let _ = write_half.write_all(format!("MARKREAD {} timestamp={}\r\n", buffer_id, now).as_bytes()).await;
+                                            let _ = write_half.write_all(format!("{} {} timestamp={}\r\n", cmd, buffer_id, now).as_bytes()).await;
                                         }
                                     }
                                     Some(IrcCommand::FetchBefore { buffer_id, before_ts }) => {
