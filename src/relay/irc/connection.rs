@@ -451,8 +451,8 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             // Connected must fire FIRST so the event handler clears stale buffers from
             // any previous session before we open the fresh status buffer below.
             events.push(BackendEvent::Connected);
-            if !session.is_soju {
-                let buf_name = if session.server_name.is_empty() { "server".to_string() } else { session.server_name.clone() };
+            {
+                let buf_name = if !config.label.is_empty() { config.label.clone() } else if !session.server_name.is_empty() { session.server_name.clone() } else { "server".to_string() };
                 let status_buf = session.alloc_buffer("status", &buf_name, "server");
                 events.push(BackendEvent::BufferOpened(status_buf));
                 // Flush pre-registration notices (ident checks, hostname lookups, etc.)
@@ -460,7 +460,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                     events.push(BackendEvent::LineAdded { buffer_id: "status".to_string(), line });
                 }
                 // Prominent "connected" banner so the user sees the server and their nick
-                let server_display = if session.server_name.is_empty() { "server".to_string() } else { session.server_name.clone() };
+                let server_display = if !session.server_name.is_empty() { session.server_name.clone() } else { config.host.clone() };
                 *line_counter += 1;
                 events.push(BackendEvent::LineAdded {
                     buffer_id: "status".to_string(),
@@ -477,11 +477,9 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                         line: make_line(&line_counter.to_string(), "--", welcome, timestamp_from_msg(msg), false),
                     });
                 }
-            } else {
-                session.pending_status_lines.clear();
-                // Ask soju for all recent conversations so we can discover PMs that
-                // arrived while we were disconnected (channels come via JOIN already).
-                if session.has_chathistory() {
+                if session.is_soju && session.has_chathistory() {
+                    // Ask soju for all recent conversations so we can discover PMs that
+                    // arrived while we were disconnected (channels come via JOIN already).
                     session.whois_lines.push("CHATHISTORY TARGETS * * 50".to_string());
                 }
             }
@@ -551,7 +549,10 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 events.push(BackendEvent::BufferOpened(buf));
                 session.whois_lines.push(format!("NAMES {}", channel));
                 session.whois_lines.push(format!("WHO {}", channel));
-                if session.has_chathistory() {
+                // Soju auto-replays chathistory for each channel as part of the JOIN batch;
+                // requesting it again would deliver a duplicate that re-increments unread counts
+                // for channels the user has already cleared. Only request explicitly for plain IRC.
+                if session.has_chathistory() && !session.is_soju {
                     session.whois_lines.push(format!("CHATHISTORY LATEST {} * 100", channel));
                 }
             } else if session.joined.contains(&chan_lower) {
@@ -676,14 +677,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             let buffer_id = if is_channel(&target) {
                 target.to_lowercase()
             } else if is_server_source {
-                if !session.is_soju {
-                    // Non-bouncer: route all server messages to the status buffer
-                    "status".to_string()
-                } else {
-                    // Soju: route to first joined channel (bouncer has its own network buffers)
-                    session.joined.iter().find(|id| is_channel(id)).cloned()
-                        .unwrap_or_else(|| session.joined.iter().next().cloned().unwrap_or_default())
-                }
+                "status".to_string()
             } else if nick.eq_ignore_ascii_case(&session.our_nick) {
                 target.to_lowercase()
             } else {
@@ -772,15 +766,12 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             } else {
                 format!("{} has been invited to {} by {}", target, channel, inviter)
             };
-            // Route to channel if we're in it, otherwise status buffer (or first channel for soju)
+            // Route to channel if we're in it, otherwise status buffer
             let chan_lower = channel.to_lowercase();
             let buf_id = if session.joined.contains(&chan_lower) {
                 chan_lower
-            } else if !session.is_soju {
-                "status".to_string()
             } else {
-                session.joined.iter().find(|id| is_channel(id)).cloned()
-                    .unwrap_or_else(|| session.joined.iter().next().cloned().unwrap_or_default())
+                "status".to_string()
             };
             if !buf_id.is_empty() {
                 *line_counter += 1;
@@ -989,9 +980,9 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
         // 732 — RPL_MONLIST / 733 — ERR_MONLISTFULL: ignore silently
         "732" | "733" => {}
 
-        // Server info / ISUPPORT / MOTD / stats — route to status buffer for non-soju
+        // Server info / ISUPPORT / MOTD / stats — route to status buffer
         "002" | "003" | "004" | "005" | "251" | "252" | "253" | "254" | "255" | "265" | "266"
-        | "375" | "372" | "376" | "250" | "256" | "257" | "258" | "259" if !session.is_soju => {
+        | "375" | "372" | "376" | "250" | "256" | "257" | "258" | "259" => {
             let text = msg.params.iter().skip(1).map(String::as_str).collect::<Vec<_>>().join(" ");
             if !text.is_empty() {
                 *line_counter += 1;
