@@ -37,6 +37,7 @@ pub struct Buffer {
     pub activity: BufferActivity,
     pub unread_count: u32,
     pub last_read_id: Option<String>,
+    pub last_markread_ts: Option<DateTime<Utc>>,
     pub topic: String,
     pub modes: String,
     pub hidden: bool,

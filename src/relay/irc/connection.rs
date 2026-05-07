@@ -135,6 +135,7 @@ impl Session {
             activity: BufferActivity::None,
             unread_count: 0,
             last_read_id: None,
+            last_markread_ts: None,
             topic: String::new(),
             modes: String::new(),
             hidden: false,
@@ -856,10 +857,15 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             let target = msg.param(0).unwrap_or("").to_lowercase();
             let ts_param = msg.param(1).unwrap_or("");
             if !target.is_empty() && ts_param.starts_with("timestamp=") && ts_param != "timestamp=*" {
+                let ts_str = &ts_param["timestamp=".len()..];
+                let markread_ts = chrono::DateTime::parse_from_rfc3339(ts_str)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc));
                 events.push(BackendEvent::ActivityChanged {
                     buffer_id: target,
                     activity: BufferActivity::None,
                     unread_count: 0,
+                    markread_ts,
                 });
             }
         }

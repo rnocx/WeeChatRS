@@ -49,6 +49,8 @@ pub enum BackendEvent {
         buffer_id: String,
         activity: BufferActivity,
         unread_count: u32,
+        /// When set, marks messages up to this timestamp as read (soju MARKREAD).
+        markread_ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// A buffer's topic changed.
     TopicChanged {
