@@ -27,6 +27,7 @@ impl WeeChatApp {
         let mut reset_theme = false;
         let mut new_font: Option<(String, String)> = None;
         let mut reset_font = false;
+        let mut adaptive_theme = self.adaptive_theme;
 
         let danger_color = Color32::from_rgb(185, 55, 55);
         let secondary_fill = if is_light {
@@ -249,7 +250,19 @@ impl WeeChatApp {
                             });
                         });
 
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut adaptive_theme, "Adaptive theme (from wallpaper)");
+                        if adaptive_theme {
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new("Colours are derived from the current desktop wallpaper. Manual editing is disabled while active.")
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        }
+
                         ui.add_space(6.0);
+                        ui.set_enabled(!adaptive_theme);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Background:").small());
                             let mut bg = self.theme.background
@@ -294,6 +307,97 @@ impl WeeChatApp {
                             ui.add_space(2.0);
                         }
 
+                        ui.set_enabled(true);
+
+                        // ── Keybinds ───────────────────────────────────────────
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Keybinds").strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("Reset all").clicked() {
+                                    self.keybinds = crate::ui::keybinds::KeybindsMap::default();
+                                    self.editing_keybind = None;
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+
+                        // Capture mode: consume the next key event and store it.
+                        if let Some(capturing) = self.editing_keybind {
+                            let mut captured: Option<(crate::ui::keybinds::SerdeModifiers, crate::ui::keybinds::AppKey)> = None;
+                            let mut cancel = false;
+                            ui.input_mut(|i| {
+                                let events = std::mem::take(&mut i.events);
+                                let mut remaining = Vec::new();
+                                let mut found = false;
+                                for event in events {
+                                    if !found {
+                                        if let egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } = &event {
+                                            if *key == egui::Key::Escape {
+                                                cancel = true;
+                                                found = true;
+                                                continue;
+                                            } else if let Some(app_key) = crate::ui::keybinds::AppKey::from_egui(*key) {
+                                                let mods = crate::ui::keybinds::SerdeModifiers::from_egui(*modifiers);
+                                                captured = Some((mods, app_key));
+                                                found = true;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    remaining.push(event);
+                                }
+                                i.events = remaining;
+                            });
+                            if cancel { self.editing_keybind = None; }
+                            if let Some((mods, key)) = captured {
+                                self.keybinds.0.insert(capturing, (mods, key));
+                                self.editing_keybind = None;
+                            }
+                        }
+
+                        egui::Grid::new("keybinds_grid")
+                            .num_columns(3)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                for &action in crate::ui::keybinds::KeybindAction::ALL {
+                                    ui.label(action.label());
+                                    let label = self.keybinds.shortcut_label(action);
+                                    let is_capturing = self.editing_keybind == Some(action);
+                                    let btn_text = if is_capturing {
+                                        RichText::new("Press a key…").color(accent_color)
+                                    } else {
+                                        RichText::new(&label)
+                                    };
+                                    let btn = egui::Button::new(btn_text)
+                                        .min_size(Vec2::new(90.0, 0.0));
+                                    if ui.add(btn).clicked() {
+                                        self.editing_keybind = if is_capturing { None } else { Some(action) };
+                                    }
+                                    if ui.small_button("↺").on_hover_text("Reset to default").clicked() {
+                                        let defaults = crate::ui::keybinds::KeybindsMap::default();
+                                        if let Some(default) = defaults.0.get(&action) {
+                                            self.keybinds.0.insert(action, *default);
+                                        }
+                                        if self.editing_keybind == Some(action) {
+                                            self.editing_keybind = None;
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+
+                        if self.editing_keybind.is_some() {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("Press a key combination to bind, or Esc to cancel.")
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        }
+
                         ui.add_space(16.0);
                         ui.vertical_centered_justified(|ui| {
                             if ui.add(
@@ -327,6 +431,15 @@ impl WeeChatApp {
             self.prefix_suffix = prefix_suffix;
         }
         if reset_theme { self.theme = AppTheme::default(); }
+        if adaptive_theme != self.adaptive_theme {
+            self.adaptive_theme = adaptive_theme;
+            if adaptive_theme {
+                self.wallpaper_rx = Some(crate::ui::wallpaper::start_wallpaper_thread(ui.ctx().clone()));
+            } else {
+                self.wallpaper_rx = None;
+                self.adaptive_theme_result = None;
+            }
+        }
         if reset_font {
             self.font_name.clear();
             self.font_path.clear();

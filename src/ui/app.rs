@@ -346,6 +346,9 @@ pub struct AppSettings {
     /// Server group keys (buffer.server) whose child buffers are collapsed in the list.
     #[serde(default)]
     pub collapsed_servers: HashSet<String>,
+    /// Derive theme colours from the current desktop wallpaper.
+    #[serde(default)]
+    pub adaptive_theme: bool,
 }
 
 fn default_true() -> bool { true }
@@ -393,6 +396,7 @@ impl Default for AppSettings {
             file_share_duration: "day".to_string(),
             keybinds: KeybindsMap::default(),
             collapsed_servers: HashSet::new(),
+            adaptive_theme: false,
         }
     }
 }
@@ -523,6 +527,13 @@ pub struct WeeChatApp {
     // Collapsed server groups in the buffer list (stored by buffer.server key).
     pub(crate) collapsed_servers: HashSet<String>,
 
+    // Adaptive wallpaper theme
+    pub(crate) adaptive_theme: bool,
+    /// Wallpaper-derived theme override; None when adaptive is off or not yet loaded.
+    pub(crate) adaptive_theme_result: Option<crate::ui::theme::AppTheme>,
+    /// Channel from the wallpaper-watcher background thread.
+    pub(crate) wallpaper_rx: Option<std::sync::mpsc::Receiver<crate::ui::theme::AppTheme>>,
+
     // /np (now-playing) channel: tokio task → main loop → send message
     pub(crate) np_tx: mpsc::UnboundedSender<(String, String)>,
     pub(crate) np_rx: mpsc::UnboundedReceiver<(String, String)>,
@@ -579,6 +590,13 @@ impl WeeChatApp {
             crate::ui::fonts::apply(&cc.egui_ctx, &settings.font_path);
         }
         let available_fonts = crate::ui::fonts::scan_system_fonts();
+
+        let adaptive_theme = settings.adaptive_theme;
+        let wallpaper_rx = if adaptive_theme {
+            Some(crate::ui::wallpaper::start_wallpaper_thread(cc.egui_ctx.clone()))
+        } else {
+            None
+        };
 
         Self {
             connections: Vec::new(),
@@ -661,6 +679,9 @@ impl WeeChatApp {
             keybinds: settings.keybinds,
             editing_keybind: None,
             collapsed_servers: settings.collapsed_servers,
+            adaptive_theme,
+            adaptive_theme_result: None,
+            wallpaper_rx,
         }
     }
 
@@ -886,6 +907,7 @@ impl eframe::App for WeeChatApp {
             file_share_duration: self.file_share_duration.clone(),
             keybinds: self.keybinds.clone(),
             collapsed_servers: self.collapsed_servers.clone(),
+            adaptive_theme: self.adaptive_theme,
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -898,6 +920,13 @@ impl eframe::App for WeeChatApp {
 
         while let Ok((prefix, event)) = self.event_rx.try_recv() {
             self.handle_event(&prefix, event);
+        }
+
+        // Drain the wallpaper-watcher thread; update override when a new theme arrives.
+        if let Some(rx) = &self.wallpaper_rx {
+            while let Ok(theme) = rx.try_recv() {
+                self.adaptive_theme_result = Some(theme);
+            }
         }
 
         if self.request_attention {
@@ -1081,12 +1110,17 @@ impl eframe::App for WeeChatApp {
         style.visuals.widgets.active.rounding = Rounding::same(8.0);
         ctx.set_style(style);
 
-        let accent_color = if self.theme.name == "Default" {
+        // Effective theme: adaptive override when enabled and loaded, else user's theme.
+        let render_theme: crate::ui::theme::AppTheme = self.adaptive_theme_result
+            .clone()
+            .unwrap_or_else(|| self.theme.clone());
+
+        let accent_color = if render_theme.name == "Default" {
             Color32::from_rgb(100, 149, 237)
         } else {
-            Color32::from(self.theme.ansi[4])
+            Color32::from(render_theme.ansi[4])
         };
-        let base_bg = self.theme.background.map(Color32::from).unwrap_or(Color32::from_rgb(18, 18, 18));
+        let base_bg = render_theme.background.map(Color32::from).unwrap_or(Color32::from_rgb(18, 18, 18));
         let alpha = (self.opacity * 255.0) as u8;
         let bg_color = Color32::from_rgba_unmultiplied(base_bg.r(), base_bg.g(), base_bg.b(), alpha);
 
@@ -1115,7 +1149,7 @@ impl eframe::App for WeeChatApp {
             Color32::from_rgba_unmultiplied(35, 35, 45, 220)
         };
 
-        let text_primary = self.theme.foreground
+        let text_primary = render_theme.foreground
             .map(Color32::from)
             .unwrap_or_else(|| if is_light { Color32::from_gray(15) } else { Color32::WHITE });
         let text_secondary = if is_light { Color32::from_gray(70)  } else { Color32::from_gray(160) };
@@ -1133,7 +1167,7 @@ impl eframe::App for WeeChatApp {
         };
         visuals.widgets.active.bg_fill = accent_color;
         visuals.selection.bg_fill = accent_color.linear_multiply(0.5);
-        if let Some(fg) = self.theme.foreground {
+        if let Some(fg) = render_theme.foreground {
             visuals.override_text_color = Some(fg.into());
         } else if is_light {
             visuals.override_text_color = Some(text_primary);
@@ -1624,7 +1658,7 @@ impl eframe::App for WeeChatApp {
                                     let input = if nick.away {
                                         text.clone()
                                     } else if self.colored_nicks {
-                                        if self.theme.name == "Default" { format!("{}{}", nick.color_ansi, text) }
+                                        if render_theme.name == "Default" { format!("{}{}", nick.color_ansi, text) }
                                         else {
                                             let idx = Self::hash_nick(&nick.name);
                                             let esc = if idx < 8 { format!("\x1B[{}m", 30 + idx) } else { format!("\x1B[{}m", 90 + idx - 8) };
@@ -1634,7 +1668,7 @@ impl eframe::App for WeeChatApp {
                                     let sections = ANSIParser::parse(&input);
                                     let mut job = LayoutJob::default();
                                     for s in sections {
-                                        let mut fmt = s.style.to_format(font_id.clone(), &self.theme);
+                                        let mut fmt = s.style.to_format(font_id.clone(), &render_theme);
                                         if nick.away {
                                             fmt.color = text_muted;
                                             fmt.italics = true;
@@ -1912,7 +1946,7 @@ impl eframe::App for WeeChatApp {
                                         let topic_font = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
                                         let sections = ANSIParser::parse(&current_buffer_topic);
                                         let mut job = LayoutJob::default();
-                                        for s in sections { job.append(&s.text, 0.0, s.style.to_format(topic_font.clone(), &self.theme)); }
+                                        for s in sections { job.append(&s.text, 0.0, s.style.to_format(topic_font.clone(), &render_theme)); }
                                         ui.add(Label::new(job).wrap(true));
                                     }
                                 });
@@ -2021,7 +2055,7 @@ impl eframe::App for WeeChatApp {
                                     };
 
                                     let row_bg = if line.highlight {
-                                        let c = Color32::from(self.theme.ansi[3]);
+                                        let c = Color32::from(render_theme.ansi[3]);
                                         Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 28)
                                     } else {
                                         Color32::TRANSPARENT
@@ -2059,7 +2093,7 @@ impl eframe::App for WeeChatApp {
                                             |ui| {
                                                 let mut prefix_job = LayoutJob::default();
                                                 prefix_job.halign = egui::Align::RIGHT;
-                                                for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &self.theme)); }
+                                                for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &render_theme)); }
                                                 ui.add(Label::new(prefix_job).wrap(false));
                                             }
                                         );
@@ -2077,7 +2111,7 @@ impl eframe::App for WeeChatApp {
                                                         // Use hover-only sense so the row's context_menu (which needs
                                                         // Sense::click on the frame) doesn't compete with link clicks.
                                                         // URL left-click is detected via raw input instead.
-                                                        let link_style = s.style.to_format(font_id.clone(), &self.theme);
+                                                        let link_style = s.style.to_format(font_id.clone(), &render_theme);
                                                         let mut link_format = link_style;
                                                         link_format.color = ui.visuals().hyperlink_color;
                                                         link_format.underline = egui::Stroke::new(1.0, ui.visuals().hyperlink_color);
@@ -2141,7 +2175,7 @@ impl eframe::App for WeeChatApp {
                                                         }
                                                     } else if !self.emoji_rendering {
                                                         let mut job = LayoutJob::default();
-                                                        job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &self.theme));
+                                                        job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &render_theme));
                                                         ui.add(Label::new(job).wrap(true));
                                                     } else {
                                                         let emoji_size = font_id.size + 2.0;
@@ -2149,7 +2183,7 @@ impl eframe::App for WeeChatApp {
                                                             match span {
                                                                 crate::ui::emoji::TextSpan::Text(t) => {
                                                                     let mut job = LayoutJob::default();
-                                                                    job.append(&t, 0.0, s.style.to_format(font_id.clone(), &self.theme));
+                                                                    job.append(&t, 0.0, s.style.to_format(font_id.clone(), &render_theme));
                                                                     ui.add(Label::new(job).wrap(true));
                                                                 }
                                                                 crate::ui::emoji::TextSpan::Emoji(e) => {
@@ -2175,7 +2209,7 @@ impl eframe::App for WeeChatApp {
                                                                         }
                                                                         _ => {
                                                                             let mut job = LayoutJob::default();
-                                                                            job.append(&e, 0.0, s.style.to_format(font_id.clone(), &self.theme));
+                                                                            job.append(&e, 0.0, s.style.to_format(font_id.clone(), &render_theme));
                                                                             ui.add(Label::new(job).wrap(true));
                                                                         }
                                                                     }

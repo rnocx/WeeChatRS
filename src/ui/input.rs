@@ -126,6 +126,39 @@ impl WeeChatApp {
         }
     }
 
+    /// Jump to the Nth visible (non-hidden) buffer (1-indexed).
+    pub(crate) fn jump_buffer_by_number(&mut self, n: usize) {
+        if n == 0 { return; }
+        let visible: Vec<String> = self.buffers.iter()
+            .filter(|b| !b.hidden || self.show_hidden_buffers)
+            .map(|b| b.id.clone())
+            .collect();
+        if let Some(id) = visible.get(n - 1) {
+            let id = id.clone();
+            self.select_buffer(id);
+        }
+    }
+
+    /// Jump to the next buffer that has unread messages or highlights, wrapping around.
+    pub(crate) fn jump_next_unread(&mut self) {
+        use crate::relay::models::BufferActivity;
+        if self.buffers.is_empty() { return; }
+        let start = self.selected_buffer_id.as_ref()
+            .and_then(|id| self.buffers.iter().position(|b| &b.id == id))
+            .unwrap_or(0);
+        let len = self.buffers.len();
+        for i in 1..=len {
+            let idx = (start + i) % len;
+            let buf = &self.buffers[idx];
+            if buf.hidden && !self.show_hidden_buffers { continue; }
+            if buf.activity != BufferActivity::None || buf.unread_count > 0 {
+                let id = buf.id.clone();
+                self.select_buffer(id);
+                return;
+            }
+        }
+    }
+
     pub(crate) fn send_current_message(&mut self) {
         if self.input_text.is_empty() { return; }
         let msg = self.input_text.clone();
