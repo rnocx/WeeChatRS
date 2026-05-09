@@ -23,6 +23,7 @@ rfd = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "multipart"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 fontdb = "0.22"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 native-tls = "0.2"

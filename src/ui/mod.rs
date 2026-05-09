@@ -3,6 +3,7 @@ pub mod ansi;
 pub mod theme;
 pub mod keybinds;
 pub(crate) mod wallpaper;
+mod sysinfo;
 
 mod settings;
 mod input;

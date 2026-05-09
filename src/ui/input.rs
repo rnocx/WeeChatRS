@@ -172,6 +172,19 @@ impl WeeChatApp {
             } else if msg.starts_with("/join ") || msg.starts_with("/j ") {
                 let after = if msg.starts_with("/j ") { &msg[3..] } else { &msg[6..] };
                 self.pending_buffer_switch = after.split_whitespace().next().map(|s| s.to_string());
+            } else if msg.trim() == "/sysinfo" || msg.trim() == "/systeminfo" {
+                if let Some(buffer_id) = self.selected_buffer_id.clone() {
+                    let tx = self.sysinfo_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let info  = crate::ui::sysinfo::gather();
+                        let lines = crate::ui::sysinfo::format_lines(&info);
+                        let _ = tx.send((buffer_id, lines));
+                    });
+                }
+                self.input_text.clear();
+                self.completion = None;
+                self.history_index = None;
+                return;
             } else if msg.trim() == "/np" || msg.starts_with("/np ") {
                 if let Some(buffer_id) = self.selected_buffer_id.clone() {
                     let custom = msg.trim().strip_prefix("/np").map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string());
