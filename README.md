@@ -172,7 +172,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. See `todo.md` for planned
 
 ## Development Notes
 
-[Claude Code](https://claude.ai/code) was used throughout development for debugging, refactoring, and release management. All code has been reviewed and tested by the project author.
+[Claude Code](https://claude.ai/code) was used throughout development for debugging, refactoring, and release management and logo generation. All code has been reviewed and tested by the project author.
+a new logo is something we are looking for, but we are no graphical artists. 
 
 ## License
 
