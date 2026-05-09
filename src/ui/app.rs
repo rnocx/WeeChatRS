@@ -538,6 +538,10 @@ pub struct WeeChatApp {
     pub(crate) np_tx: mpsc::UnboundedSender<(String, String)>,
     pub(crate) np_rx: mpsc::UnboundedReceiver<(String, String)>,
 
+    // /sysinfo channel: background thread → main loop → inject local lines
+    pub(crate) sysinfo_tx: mpsc::UnboundedSender<(String, Vec<String>)>,
+    pub(crate) sysinfo_rx: mpsc::UnboundedReceiver<(String, Vec<String>)>,
+
     // File share: tokio upload task → main loop; Ok = URL to post, Err = error message
     pub(crate) file_share_tx: mpsc::UnboundedSender<Result<(String, String), String>>,
     pub(crate) file_share_rx: mpsc::UnboundedReceiver<Result<(String, String), String>>,
@@ -559,6 +563,7 @@ impl WeeChatApp {
         let (image_tx, image_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
         let (np_tx, np_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let (sysinfo_tx, sysinfo_rx) = mpsc::unbounded_channel::<(String, Vec<String>)>();
         let (file_share_tx, file_share_rx) = mpsc::unbounded_channel::<Result<(String, String), String>>();
 
         let settings: AppSettings = if let Some(storage) = cc.storage {
@@ -671,6 +676,8 @@ impl WeeChatApp {
             ctx_menu_hovered_url: None,
             np_tx,
             np_rx,
+            sysinfo_tx,
+            sysinfo_rx,
             file_share_tx,
             file_share_rx,
             file_share_uploading: false,
@@ -997,6 +1004,20 @@ impl eframe::App for WeeChatApp {
         while let Ok((buf_id, np_text)) = self.np_rx.try_recv() {
             if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
                 client.send_message(&raw_id, &np_text);
+            }
+        }
+
+        // /sysinfo drain: inject lines as local messages (not sent to IRC).
+        while let Ok((buf_id, lines)) = self.sysinfo_rx.try_recv() {
+            if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == buf_id) {
+                for text in lines {
+                    let ts = chrono::Utc::now();
+                    let id = format!("local-sysinfo-{}", ts.timestamp_millis());
+                    let line = crate::relay::models::Line::new(
+                        id, ts, String::new(), text, true, false,
+                    );
+                    buf.messages.push_back(line);
+                }
             }
         }
 
