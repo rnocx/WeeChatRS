@@ -116,21 +116,17 @@ fn detect_gpu() -> String {
 // ── Formatted output lines ────────────────────────────────────────────────────
 
 const B: &str = "\x1B[1m";   // bold
-const G: &str = "\x1B[32m";  // green (uses ANSI slot 2 — adapts with theme)
-const R: &str = "\x1B[0m";   // reset
+const G: &str = "\x1B[32m"; // green
+const R: &str = "\x1B[0m";  // reset
 
 pub fn format_lines(info: &SysInfo) -> Vec<String> {
-    let bar  = format!("{B}{G}───────────────────────────────────────{R}");
-    let row  = |label: &str, value: &str| -> String {
-        format!(" {B}{G}{label:<8}{R}  {value}", label = label, value = value)
-    };
-    vec![
-        format!("{B}{G}── sysinfo {R}"),
-        row("Host",   &info.hostname),
-        row("Uptime", &info.uptime),
-        row("CPU",    &info.cpu),
-        row("Memory", &info.memory),
-        row("GPU",    &info.gpu),
-        bar,
-    ]
+    vec![format!(
+        "{B}{G}[sysinfo]{R} \
+         {B}Host:{R} {} · \
+         {B}Up:{R} {} · \
+         {B}CPU:{R} {} · \
+         {B}Mem:{R} {} · \
+         {B}GPU:{R} {}",
+        info.hostname, info.uptime, info.cpu, info.memory, info.gpu
+    )]
 }
