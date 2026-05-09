@@ -176,9 +176,9 @@ impl WeeChatApp {
                 if let Some(buffer_id) = self.selected_buffer_id.clone() {
                     let tx = self.sysinfo_tx.clone();
                     tokio::task::spawn_blocking(move || {
-                        let info  = crate::ui::sysinfo::gather();
-                        let lines = crate::ui::sysinfo::format_lines(&info);
-                        let _ = tx.send((buffer_id, lines));
+                        let info = crate::ui::sysinfo::gather();
+                        let text = crate::ui::sysinfo::format_line(&info);
+                        let _ = tx.send((buffer_id, text));
                     });
                 }
                 self.input_text.clear();

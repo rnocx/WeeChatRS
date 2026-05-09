@@ -18,7 +18,12 @@ pub fn gather() -> SysInfo {
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     sys.refresh_cpu_all();
 
-    let hostname = System::host_name().unwrap_or_else(|| "unknown".into());
+    let hostname = System::host_name()
+        .unwrap_or_else(|| "unknown".into())
+        .split('.')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
     let uptime   = format_uptime(System::uptime());
 
     let cpu_brand = sys.cpus()
@@ -119,8 +124,8 @@ const B: &str = "\x1B[1m";   // bold
 const G: &str = "\x1B[32m"; // green
 const R: &str = "\x1B[0m";  // reset
 
-pub fn format_lines(info: &SysInfo) -> Vec<String> {
-    vec![format!(
+pub fn format_line(info: &SysInfo) -> String {
+    format!(
         "{B}{G}[sysinfo]{R} \
          {B}Host:{R} {} · \
          {B}Up:{R} {} · \
@@ -128,5 +133,5 @@ pub fn format_lines(info: &SysInfo) -> Vec<String> {
          {B}Mem:{R} {} · \
          {B}GPU:{R} {}",
         info.hostname, info.uptime, info.cpu, info.memory, info.gpu
-    )]
+    )
 }
