@@ -43,10 +43,20 @@ mod macos {
     async fn run_script(script: &str) -> Option<String> {
         let out = Command::new("osascript").arg("-e").arg(script).output().await.ok()?;
         if !out.status.success() { return None; }
-        // Strip control chars so embedded \r/\n in track metadata don't corrupt output.
+        // Strip control chars and invisible Unicode format chars (BOM, zero-width
+        // spaces, etc.) that Apple Music can embed in artist/title metadata.
         let s: String = String::from_utf8_lossy(&out.stdout)
             .chars()
-            .filter(|c| !c.is_control())
+            .filter(|&c| {
+                if c.is_control() { return false; }
+                !matches!(c as u32,
+                    0x00AD | 0x034F |
+                    0x200B..=0x200F |
+                    0x2028 | 0x2029 |
+                    0xFEFF |
+                    0xFFF9..=0xFFFB
+                )
+            })
             .collect::<String>()
             .trim()
             .to_string();
@@ -222,14 +232,24 @@ mod windows {
             .output()
             .ok()?;
         if !out.status.success() { return None; }
-        // Strip all control characters (including embedded \r and \n that appear
-        // when SMTC stores multi-value artist fields as newline-separated strings).
-        // Joining without a separator preserves names split across lines (e.g.
-        // "Hard Dr\niver" → "Hard Driver").
+        // Strip control chars (Cc) and common invisible Unicode format/separator
+        // chars (Cf category: BOM, zero-width spaces, joiners, line/para separators).
+        // is_control() only covers Cc; the extra match handles Cf characters that
+        // Apple Music embeds in SMTC artist/title fields causing doubled syllables.
         let raw = String::from_utf8_lossy(&out.stdout);
         let s: String = raw
             .chars()
-            .filter(|c| !c.is_control())
+            .filter(|&c| {
+                if c.is_control() { return false; }
+                !matches!(c as u32,
+                    0x00AD |          // soft hyphen
+                    0x034F |          // combining grapheme joiner
+                    0x200B..=0x200F | // zero-width space / joiners / direction marks
+                    0x2028 | 0x2029 | // line separator / paragraph separator
+                    0xFEFF |          // BOM / zero-width no-break space
+                    0xFFF9..=0xFFFB   // interlinear annotation anchors
+                )
+            })
             .collect::<String>()
             .trim()
             .to_string();
@@ -250,7 +270,8 @@ if ($session.GetPlaybackInfo().PlaybackStatus -ne 4) { exit 1 }
 $pi = $session.TryGetMediaPropertiesAsync(); $pi.AsTask().Wait()
 $props = $pi.Result
 if ([string]::IsNullOrWhiteSpace($props.Title)) { exit 1 }
-$artist = $props.Artist; $title = $props.Title
+$artist = ([string]$props.Artist -replace '[\p{Cc}\p{Cf}]', '').Trim()
+$title  = ([string]$props.Title  -replace '[\p{Cc}\p{Cf}]', '').Trim()
 if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output $title } else { Write-Output "$artist - $title" }
 "#;
 
@@ -278,7 +299,8 @@ foreach ($s in $sessions) {
     } catch { }
 }
 if ($null -eq $best) { exit 1 }
-$artist = $best.Artist; $title = $best.Title
+$artist = ([string]$best.Artist -replace '[\p{Cc}\p{Cf}]', '').Trim()
+$title  = ([string]$best.Title  -replace '[\p{Cc}\p{Cf}]', '').Trim()
 if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output $title } else { Write-Output "$artist - $title" }
 "#;
 
