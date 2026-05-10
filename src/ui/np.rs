@@ -220,11 +220,28 @@ mod windows {
         if s.is_empty() { None } else { Some(s) }
     }
 
-    // Enumerate all SMTC sessions and pick the best currently-playing one.
-    // "Known" sources (browsers for YouTube Music, Apple Music, iTunes, Spotify)
-    // are preferred over generic/unknown players.
+    // Try SMTC via the "current" session first — simplest path, works when
+    // Apple Music or another known player is the active media session.
+    const SMTC_CURRENT_SCRIPT: &str = r#"
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,
+         Windows.Media.Control, ContentType=WindowsRuntime]
+$mgr = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()
+$mgr.AsTask().Wait()
+$session = $mgr.Result.GetCurrentSession()
+if ($null -eq $session) { exit 1 }
+if ($session.GetPlaybackInfo().PlaybackStatus -ne 4) { exit 1 }
+$pi = $session.TryGetMediaPropertiesAsync(); $pi.AsTask().Wait()
+$props = $pi.Result
+if ([string]::IsNullOrWhiteSpace($props.Title)) { exit 1 }
+$artist = $props.Artist; $title = $props.Title
+if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output $title } else { Write-Output "$artist - $title" }
+"#;
+
+    // Enumerate all SMTC sessions — catches players that aren't the Windows
+    // "current" session. Browsers and known apps are preferred.
     // PlaybackStatus 4 = Playing.
-    const SMTC_SCRIPT: &str = r#"
+    const SMTC_ALL_SCRIPT: &str = r#"
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,
          Windows.Media.Control, ContentType=WindowsRuntime]
@@ -249,8 +266,22 @@ $artist = $best.Artist; $title = $best.Title
 if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output $title } else { Write-Output "$artist - $title" }
 "#;
 
+    // Apple Music (Microsoft Store) window-title fallback.
+    // The Store app process is named "AppleMusic"; its title bar shows
+    // "Song – Artist – Apple Music" while playing.
+    const APPLE_MUSIC_SCRIPT: &str = r#"
+$p = Get-Process -Name AppleMusic -ErrorAction SilentlyContinue |
+     Where-Object { $_.MainWindowTitle -match 'Apple Music' -and $_.MainWindowTitle -notmatch '^Apple Music$' } |
+     Select-Object -First 1
+if ($null -eq $p) { exit 1 }
+$t = $p.MainWindowTitle -replace '\s*[-–]+\s*Apple Music\s*$', ''
+$t = $t.Trim()
+if (-not $t) { exit 1 }
+Write-Output $t
+"#;
+
     // Fallback: find a browser window whose title contains "YouTube Music" and
-    // strip the browser chrome, leaving "Track - Artist" (or just "Track").
+    // strip the browser chrome, leaving "Track" (or "Track - Artist").
     // Only works when the YTM tab is the active tab in that browser window.
     const YTM_BROWSER_SCRIPT: &str = r#"
 $browsers = 'chrome','msedge','brave','vivaldi','opera','firefox'
@@ -268,15 +299,12 @@ exit 1
 "#;
 
     // iTunes window title: "Artist – Title" while playing (classic desktop app).
-    // The Microsoft Store Apple Music app uses SMTC reliably, so this covers
-    // users still on iTunes.
     const ITUNES_TITLE_SCRIPT: &str = r#"
 $p = Get-Process -Name iTunes -ErrorAction SilentlyContinue |
      Where-Object { $_.MainWindowTitle -ne '' -and $_.MainWindowTitle -ne 'iTunes' } |
      Select-Object -First 1
 if ($null -eq $p) { exit 1 }
-# iTunes title is "Artist – Song" with an en-dash; normalise to " - "
-$t = $p.MainWindowTitle -replace '\s*[–-]\s*iTunes\s*$', ''
+$t = $p.MainWindowTitle -replace '\s*[-–]+\s*iTunes\s*$', ''
 $t = $t.Trim()
 if (-not $t) { exit 1 }
 Write-Output $t
@@ -293,7 +321,9 @@ Write-Output $p.MainWindowTitle
 
     pub async fn detect() -> Option<String> {
         tokio::task::spawn_blocking(|| {
-            run_ps(SMTC_SCRIPT)
+            run_ps(SMTC_CURRENT_SCRIPT)
+                .or_else(|| run_ps(SMTC_ALL_SCRIPT))
+                .or_else(|| run_ps(APPLE_MUSIC_SCRIPT))
                 .or_else(|| run_ps(YTM_BROWSER_SCRIPT))
                 .or_else(|| run_ps(ITUNES_TITLE_SCRIPT))
                 .or_else(|| run_ps(SPOTIFY_TITLE_SCRIPT))
