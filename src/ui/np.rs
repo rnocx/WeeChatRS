@@ -9,7 +9,10 @@ pub async fn get_now_playing() -> Option<String> {
     #[cfg(target_os = "linux")]
     return linux::detect().await;
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    return windows::detect().await;
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     return None;
 }
 
@@ -120,7 +123,7 @@ mod linux {
     use tokio::process::Command;
 
     pub async fn detect() -> Option<String> {
-        // playerctl handles both native MPRIS2 players (Spotify, VLC, mpd, …)
+        // playerctl handles both native MPRIS2 players (Spotify, VLC, mpd, ...)
         // and browsers with media integration (Chrome 73+, Firefox 82+),
         // which includes YouTube Music running in a browser tab.
         if let Ok(out) = Command::new("playerctl")
@@ -176,5 +179,62 @@ mod linux {
         }
 
         None
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    fn run_ps(script: &str) -> Option<String> {
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+        if !out.status.success() { return None; }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+
+    // Query SMTC (System Media Transport Controls) — covers Spotify, browser-based
+    // YouTube Music, WMP, and any SMTC-compliant player on Windows 10+.
+    const SMTC_SCRIPT: &str = r#"
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,
+         Windows.Media.Control, ContentType=WindowsRuntime]
+$mgr = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()
+$mgr.AsTask().Wait()
+$session = $mgr.Result.GetCurrentSession()
+if ($null -eq $session) { exit 1 }
+$info = $session.TryGetMediaPropertiesAsync()
+$info.AsTask().Wait()
+$props = $info.Result
+$artist = $props.Artist
+$title  = $props.Title
+if ([string]::IsNullOrWhiteSpace($title)) { exit 1 }
+if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output $title } else { Write-Output "$artist - $title" }
+"#;
+
+    // Fallback: read the Spotify process window title (format: "Artist - Title").
+    const SPOTIFY_TITLE_SCRIPT: &str = r#"
+$p = Get-Process -Name Spotify -ErrorAction SilentlyContinue |
+     Where-Object { $_.MainWindowTitle -ne '' -and $_.MainWindowTitle -ne 'Spotify' } |
+     Select-Object -First 1
+if ($null -eq $p) { exit 1 }
+Write-Output $p.MainWindowTitle
+"#;
+
+    pub async fn detect() -> Option<String> {
+        tokio::task::spawn_blocking(|| {
+            if let Some(s) = run_ps(SMTC_SCRIPT) {
+                return Some(s);
+            }
+            run_ps(SPOTIFY_TITLE_SCRIPT)
+        })
+        .await
+        .ok()?
     }
 }
