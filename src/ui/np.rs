@@ -267,11 +267,12 @@ if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output $title } else { Write-
 "#;
 
     // Apple Music (Microsoft Store) window-title fallback.
-    // The Store app process is named "AppleMusic"; its title bar shows
-    // "Song – Artist – Apple Music" while playing.
+    // Process name: AppleMusic. Title when playing: "Song – Artist – Apple Music"
+    // or just "Song – Apple Music". We accept any non-empty title that isn't the
+    // idle default ("Apple Music") and strip the trailing app name.
     const APPLE_MUSIC_SCRIPT: &str = r#"
 $p = Get-Process -Name AppleMusic -ErrorAction SilentlyContinue |
-     Where-Object { $_.MainWindowTitle -match 'Apple Music' -and $_.MainWindowTitle -notmatch '^Apple Music$' } |
+     Where-Object { $_.MainWindowTitle -ne '' -and $_.MainWindowTitle -ne 'Apple Music' } |
      Select-Object -First 1
 if ($null -eq $p) { exit 1 }
 $t = $p.MainWindowTitle -replace '\s*[-–]+\s*Apple Music\s*$', ''
