@@ -43,7 +43,13 @@ mod macos {
     async fn run_script(script: &str) -> Option<String> {
         let out = Command::new("osascript").arg("-e").arg(script).output().await.ok()?;
         if !out.status.success() { return None; }
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // Strip control chars so embedded \r/\n in track metadata don't corrupt output.
+        let s: String = String::from_utf8_lossy(&out.stdout)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .trim()
+            .to_string();
         if s.is_empty() || s.to_lowercase().contains("execution error") {
             return None;
         }
@@ -216,7 +222,17 @@ mod windows {
             .output()
             .ok()?;
         if !out.status.success() { return None; }
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // Strip all control characters (including embedded \r and \n that appear
+        // when SMTC stores multi-value artist fields as newline-separated strings).
+        // Joining without a separator preserves names split across lines (e.g.
+        // "Hard Dr\niver" → "Hard Driver").
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let s: String = raw
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .trim()
+            .to_string();
         if s.is_empty() { None } else { Some(s) }
     }
 
