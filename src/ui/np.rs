@@ -221,8 +221,8 @@ mod windows {
     }
 
     // Enumerate all SMTC sessions and pick the best currently-playing one.
-    // Browser sessions (Chrome, Edge, Firefox, etc.) are preferred so that
-    // YouTube Music in a tab or installed as a PWA wins over background players.
+    // "Known" sources (browsers for YouTube Music, Apple Music, iTunes, Spotify)
+    // are preferred over generic/unknown players.
     // PlaybackStatus 4 = Playing.
     const SMTC_SCRIPT: &str = r#"
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -232,15 +232,15 @@ $mgr = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]:
 $mgr.AsTask().Wait()
 $sessions = $mgr.Result.GetSessions()
 $best = $null
-$bestIsBrowser = $false
+$bestIsKnown = $false
 foreach ($s in $sessions) {
     try {
         if ($s.GetPlaybackInfo().PlaybackStatus -ne 4) { continue }
         $pi = $s.TryGetMediaPropertiesAsync(); $pi.AsTask().Wait()
         $props = $pi.Result
         if ([string]::IsNullOrWhiteSpace($props.Title)) { continue }
-        $isBrowser = $s.SourceAppUserModelId -match 'chrome|msedge|firefox|brave|vivaldi|opera'
-        if ($isBrowser -and -not $bestIsBrowser) { $best = $props; $bestIsBrowser = $true }
+        $isKnown = $s.SourceAppUserModelId -match 'chrome|msedge|firefox|brave|vivaldi|opera|applemusic|itunes|spotify'
+        if ($isKnown -and -not $bestIsKnown) { $best = $props; $bestIsKnown = $true }
         elseif ($null -eq $best) { $best = $props }
     } catch { }
 }
@@ -267,6 +267,21 @@ foreach ($b in $browsers) {
 exit 1
 "#;
 
+    // iTunes window title: "Artist – Title" while playing (classic desktop app).
+    // The Microsoft Store Apple Music app uses SMTC reliably, so this covers
+    // users still on iTunes.
+    const ITUNES_TITLE_SCRIPT: &str = r#"
+$p = Get-Process -Name iTunes -ErrorAction SilentlyContinue |
+     Where-Object { $_.MainWindowTitle -ne '' -and $_.MainWindowTitle -ne 'iTunes' } |
+     Select-Object -First 1
+if ($null -eq $p) { exit 1 }
+# iTunes title is "Artist – Song" with an en-dash; normalise to " - "
+$t = $p.MainWindowTitle -replace '\s*[–-]\s*iTunes\s*$', ''
+$t = $t.Trim()
+if (-not $t) { exit 1 }
+Write-Output $t
+"#;
+
     // Last resort: Spotify window title shows "Artist - Title" when playing.
     const SPOTIFY_TITLE_SCRIPT: &str = r#"
 $p = Get-Process -Name Spotify -ErrorAction SilentlyContinue |
@@ -280,6 +295,7 @@ Write-Output $p.MainWindowTitle
         tokio::task::spawn_blocking(|| {
             run_ps(SMTC_SCRIPT)
                 .or_else(|| run_ps(YTM_BROWSER_SCRIPT))
+                .or_else(|| run_ps(ITUNES_TITLE_SCRIPT))
                 .or_else(|| run_ps(SPOTIFY_TITLE_SCRIPT))
         })
         .await
