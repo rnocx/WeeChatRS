@@ -120,18 +120,9 @@ fn detect_gpu() -> String {
 
 // ── Formatted output lines ────────────────────────────────────────────────────
 
-const B: &str = "\x1B[1m";   // bold
-const G: &str = "\x1B[32m"; // green
-const R: &str = "\x1B[0m";  // reset
-
 pub fn format_line(info: &SysInfo) -> String {
     format!(
-        "{B}{G}[sysinfo]{R} \
-         {B}Host:{R} {} · \
-         {B}Up:{R} {} · \
-         {B}CPU:{R} {} · \
-         {B}Mem:{R} {} · \
-         {B}GPU:{R} {}",
+        "[sysinfo] Host: {} · Up: {} · CPU: {} · Mem: {} · GPU: {}",
         info.hostname, info.uptime, info.cpu, info.memory, info.gpu
     )
 }
