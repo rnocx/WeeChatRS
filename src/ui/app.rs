@@ -603,7 +603,7 @@ impl WeeChatApp {
             None
         };
 
-        Self {
+        let mut app = Self {
             connections: Vec::new(),
             profiles,
             shared_event_tx,
@@ -689,7 +689,24 @@ impl WeeChatApp {
             adaptive_theme,
             adaptive_theme_result: None,
             wallpaper_rx,
+        };
+
+        // Trigger autoconnect for profiles that have the flag set and a saved password.
+        let auto_profiles: Vec<ConnectionProfile> = app.profiles.iter()
+            .filter(|p| p.auto_connect)
+            .cloned()
+            .collect();
+        for profile in auto_profiles {
+            let password = if profile.save_password {
+                crate::ui::secure_storage::load_by_key(&profile.keyring_host_key())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            app.do_connect(&profile, password, &cc.egui_ctx);
         }
+
+        app
     }
 
     pub(crate) fn hash_nick(name: &str) -> u8 {
