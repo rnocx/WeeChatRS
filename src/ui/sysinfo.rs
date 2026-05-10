@@ -82,17 +82,21 @@ fn detect_gpu() -> String {
 #[cfg(target_os = "windows")]
 fn detect_gpu() -> String {
     use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("wmic")
-        .args(["path", "win32_VideoController", "get", "name", "/value"])
+    // wmic outputs UTF-16 LE; PowerShell outputs UTF-8 when stdout is captured.
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-WmiObject Win32_VideoController | Select-Object -First 1 -ExpandProperty Name)",
+        ])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()
         .ok();
     if let Some(out) = out {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if let Some(val) = line.strip_prefix("Name=") {
-                let v = val.trim();
-                if !v.is_empty() { return v.to_string(); }
-            }
+        if out.status.success() {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !v.is_empty() { return v; }
         }
     }
     "N/A".into()
