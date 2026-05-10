@@ -96,6 +96,22 @@ mod macos {
         parse_ytm_title(&title)
     }
 
+    // YouTube Music installed as a PWA (via Chrome or Edge) runs as its own process.
+    // Its window title follows the same "Track - YouTube Music" pattern.
+    async fn check_ytm_pwa() -> Option<String> {
+        let script =
+            "tell application \"System Events\"
+                set ytProcs to (every process whose displayed name contains \"YouTube Music\")
+                if ytProcs is {} then return \"\"
+                tell item 1 of ytProcs
+                    if (count of windows) = 0 then return \"\"
+                    return name of window 1
+                end tell
+            end tell";
+        let title = run_script(script).await?;
+        parse_ytm_title(&title)
+    }
+
     pub async fn detect() -> Option<String> {
         // 1. Native music apps
         for script in NATIVE_PLAYERS {
@@ -111,6 +127,11 @@ mod macos {
             }
         }
         if let Some(s) = check_safari().await {
+            return Some(s);
+        }
+
+        // 3. YouTube Music PWA
+        if let Some(s) = check_ytm_pwa().await {
             return Some(s);
         }
 
@@ -199,26 +220,54 @@ mod windows {
         if s.is_empty() { None } else { Some(s) }
     }
 
-    // Query SMTC (System Media Transport Controls) — covers Spotify, browser-based
-    // YouTube Music, WMP, and any SMTC-compliant player on Windows 10+.
+    // Enumerate all SMTC sessions and pick the best currently-playing one.
+    // Browser sessions (Chrome, Edge, Firefox, etc.) are preferred so that
+    // YouTube Music in a tab or installed as a PWA wins over background players.
+    // PlaybackStatus 4 = Playing.
     const SMTC_SCRIPT: &str = r#"
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,
          Windows.Media.Control, ContentType=WindowsRuntime]
 $mgr = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()
 $mgr.AsTask().Wait()
-$session = $mgr.Result.GetCurrentSession()
-if ($null -eq $session) { exit 1 }
-$info = $session.TryGetMediaPropertiesAsync()
-$info.AsTask().Wait()
-$props = $info.Result
-$artist = $props.Artist
-$title  = $props.Title
-if ([string]::IsNullOrWhiteSpace($title)) { exit 1 }
+$sessions = $mgr.Result.GetSessions()
+$best = $null
+$bestIsBrowser = $false
+foreach ($s in $sessions) {
+    try {
+        if ($s.GetPlaybackInfo().PlaybackStatus -ne 4) { continue }
+        $pi = $s.TryGetMediaPropertiesAsync(); $pi.AsTask().Wait()
+        $props = $pi.Result
+        if ([string]::IsNullOrWhiteSpace($props.Title)) { continue }
+        $isBrowser = $s.SourceAppUserModelId -match 'chrome|msedge|firefox|brave|vivaldi|opera'
+        if ($isBrowser -and -not $bestIsBrowser) { $best = $props; $bestIsBrowser = $true }
+        elseif ($null -eq $best) { $best = $props }
+    } catch { }
+}
+if ($null -eq $best) { exit 1 }
+$artist = $best.Artist; $title = $best.Title
 if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output $title } else { Write-Output "$artist - $title" }
 "#;
 
-    // Fallback: read the Spotify process window title (format: "Artist - Title").
+    // Fallback: find a browser window whose title contains "YouTube Music" and
+    // strip the browser chrome, leaving "Track - Artist" (or just "Track").
+    // Only works when the YTM tab is the active tab in that browser window.
+    const YTM_BROWSER_SCRIPT: &str = r#"
+$browsers = 'chrome','msedge','brave','vivaldi','opera','firefox'
+foreach ($b in $browsers) {
+    $p = Get-Process -Name $b -ErrorAction SilentlyContinue |
+         Where-Object { $_.MainWindowTitle -match 'YouTube Music' } |
+         Select-Object -First 1
+    if ($p) {
+        $t = $p.MainWindowTitle -replace '\s*[-–]+\s*YouTube Music\b.*$', ''
+        $t = $t.Trim()
+        if ($t -and $t -ne 'YouTube Music') { Write-Output $t; exit 0 }
+    }
+}
+exit 1
+"#;
+
+    // Last resort: Spotify window title shows "Artist - Title" when playing.
     const SPOTIFY_TITLE_SCRIPT: &str = r#"
 $p = Get-Process -Name Spotify -ErrorAction SilentlyContinue |
      Where-Object { $_.MainWindowTitle -ne '' -and $_.MainWindowTitle -ne 'Spotify' } |
@@ -229,10 +278,9 @@ Write-Output $p.MainWindowTitle
 
     pub async fn detect() -> Option<String> {
         tokio::task::spawn_blocking(|| {
-            if let Some(s) = run_ps(SMTC_SCRIPT) {
-                return Some(s);
-            }
-            run_ps(SPOTIFY_TITLE_SCRIPT)
+            run_ps(SMTC_SCRIPT)
+                .or_else(|| run_ps(YTM_BROWSER_SCRIPT))
+                .or_else(|| run_ps(SPOTIFY_TITLE_SCRIPT))
         })
         .await
         .ok()?
