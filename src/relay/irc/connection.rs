@@ -579,6 +579,13 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 session.whois_lines.push(format!("NAMES {}", channel));
                 session.whois_lines.push(format!("WHO {}", channel));
                 if session.has_chathistory() {
+                    // Query the read marker before chathistory. Soju processes
+                    // commands in order and replies to MARKREAD before the next
+                    // command, so last_markread_ts is guaranteed to be set by
+                    // the time LinesLoaded is processed in the UI — same as DMs.
+                    if let Some(cmd) = session.read_marker_cmd() {
+                        session.whois_lines.push(format!("{} {}", cmd, channel));
+                    }
                     session.whois_lines.push(format!("CHATHISTORY LATEST {} * 100", channel));
                 }
             } else if session.joined.contains(&chan_lower) {
