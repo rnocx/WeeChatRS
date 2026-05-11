@@ -496,6 +496,15 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                     // arrived while we were disconnected (channels come via JOIN already).
                     session.whois_lines.push("CHATHISTORY TARGETS * * 50".to_string());
                 }
+                if !config.channel.is_empty() {
+                    let chan = config.channel.trim().to_string();
+                    let join_cmd = if chan.starts_with('#') || chan.starts_with('&') {
+                        format!("JOIN {}", chan)
+                    } else {
+                        format!("JOIN #{}", chan)
+                    };
+                    session.whois_lines.push(join_cmd);
+                }
             }
         }
 

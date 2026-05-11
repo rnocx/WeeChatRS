@@ -220,6 +220,8 @@ pub struct ConnectionProfile {
     pub auto_connect: bool,
     #[serde(default)]
     pub save_password: bool,
+    #[serde(default)]
+    pub channel: String,
 }
 
 impl ConnectionProfile {
@@ -249,6 +251,7 @@ impl Default for ConnectionProfile {
             accept_invalid_certs: false,
             auto_connect: false,
             save_password: false,
+            channel: String::new(),
         }
     }
 }
@@ -588,6 +591,7 @@ impl WeeChatApp {
                 accept_invalid_certs: settings.accept_invalid_certs,
                 auto_connect: false,
                 save_password: settings.save_password,
+                channel: String::new(),
             });
         }
 
@@ -844,6 +848,7 @@ impl WeeChatApp {
                     password: password.clone(),
                     use_ssl: profile.use_ssl,
                     accept_invalid_certs: profile.accept_invalid_certs,
+                    channel: profile.channel.clone(),
                 };
                 Box::new(crate::relay::irc::IrcClient::new(config, per_conn_tx.clone(), ctx.clone()))
             }

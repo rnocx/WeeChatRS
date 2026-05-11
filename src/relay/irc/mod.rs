@@ -19,6 +19,7 @@ pub struct IrcConfig {
     pub password: String,
     pub use_ssl: bool,
     pub accept_invalid_certs: bool,
+    pub channel: String,
 }
 
 pub struct IrcClient {

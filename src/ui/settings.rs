@@ -533,6 +533,9 @@ impl WeeChatApp {
                                                 ui.label(RichText::new("Leave blank to disable SASL").small().color(ui.visuals().weak_text_color()));
                                             });
                                             ui.end_row();
+                                            ui.label("Channel:");
+                                            ui.add(egui::TextEdit::singleline(&mut self.editing_profile.channel).desired_width(200.0).hint_text("#channel (optional)"));
+                                            ui.end_row();
                                         }
                                         ui.label("Password:");
                                         ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).desired_width(200.0));
