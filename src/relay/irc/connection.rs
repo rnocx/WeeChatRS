@@ -209,6 +209,12 @@ fn make_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>, highlight: b
     Line::new(id.to_string(), ts, prefix.to_string(), text.to_string(), true, highlight)
 }
 
+/// Presence/metadata line (join, part, quit, kick, nick change).
+/// displayed=false: hidden when "show filtered lines" is off, never counted as unread.
+fn make_presence_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>) -> Line {
+    Line::new(id.to_string(), ts, prefix.to_string(), text.to_string(), false, false)
+}
+
 fn is_channel(target: &str) -> bool {
     target.starts_with('#') || target.starts_with('&') || target.starts_with('!')
 }
@@ -599,7 +605,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 } else {
                     format!("{} has joined {}", nick, channel)
                 };
-                let line = make_line(&line_counter.to_string(), "-->", &join_text, timestamp_from_msg(msg), false);
+                let line = make_presence_line(&line_counter.to_string(), "-->", &join_text, timestamp_from_msg(msg));
                 events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line });
             }
         }
@@ -616,7 +622,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 events.push(BackendEvent::NickRemoved { buffer_id: chan_lower.clone(), nick_name: nick.clone() });
                 *line_counter += 1;
                 let text = if reason.is_empty() { format!("{} has left {}", nick, channel) } else { format!("{} has left {} ({})", nick, channel, reason) };
-                events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line: make_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg), false) });
+                events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line: make_presence_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg)) });
             }
         }
 
@@ -633,7 +639,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 events.push(BackendEvent::NickRemoved { buffer_id: chan_lower.clone(), nick_name: target.clone() });
                 *line_counter += 1;
                 let text = if reason.is_empty() { format!("{} was kicked from {} by {}", target, channel, kicker) } else { format!("{} was kicked from {} by {} ({})", target, channel, kicker, reason) };
-                events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line: make_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg), false) });
+                events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line: make_presence_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg)) });
             }
         }
 
@@ -645,7 +651,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 events.push(BackendEvent::NickRemoved { buffer_id: chan.clone(), nick_name: nick.clone() });
                 *line_counter += 1;
                 let text = if reason.is_empty() { format!("{} has quit", nick) } else { format!("{} has quit ({})", nick, reason) };
-                events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg), false) });
+                events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_presence_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg)) });
             }
         }
 
@@ -657,7 +663,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 events.push(BackendEvent::NickRemoved { buffer_id: chan.clone(), nick_name: old_nick.clone() });
                 events.push(BackendEvent::NickAdded { buffer_id: chan.clone(), nick: Nick { name: new_nick.clone(), prefix: String::new(), color_ansi: nick_color_ansi(&new_nick), away: false } });
                 *line_counter += 1;
-                events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_line(&line_counter.to_string(), "--", &format!("{} is now known as {}", old_nick, new_nick), timestamp_from_msg(msg), false) });
+                events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_presence_line(&line_counter.to_string(), "--", &format!("{} is now known as {}", old_nick, new_nick), timestamp_from_msg(msg)) });
             }
         }
 
