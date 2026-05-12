@@ -191,9 +191,9 @@ impl WeeChatApp {
                     let tx = self.np_tx.clone();
                     tokio::spawn(async move {
                         let text = if let Some(c) = custom {
-                            format!("♪ {}", c)
+                            format!("{} 🎵", c)
                         } else if let Some(track) = crate::ui::np::get_now_playing().await {
-                            format!("♪ {}", track)
+                            format!("{} 🎵", track)
                         } else {
                             return;
                         };
