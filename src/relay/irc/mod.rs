@@ -20,6 +20,8 @@ pub struct IrcConfig {
     pub use_ssl: bool,
     pub accept_invalid_certs: bool,
     pub channel: String,
+    pub tunnel_port: Option<u16>,
+    pub auto_reconnect: bool,
 }
 
 pub struct IrcClient {

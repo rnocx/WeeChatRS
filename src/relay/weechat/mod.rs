@@ -32,6 +32,10 @@ pub struct WeeChatConfig {
     pub password: String,
     pub use_ssl: bool,
     pub accept_invalid_certs: bool,
+    /// When set, poll this local port until it accepts a TCP connection before
+    /// attempting the WebSocket handshake (used to wait for SSH tunnel readiness).
+    pub tunnel_port: Option<u16>,
+    pub auto_reconnect: bool,
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -110,6 +114,27 @@ impl BackendClient for WeeChatClient {
             let max_backoff = Duration::from_secs(30);
 
             loop {
+                // If connecting through an SSH tunnel, wait until the local
+                // forwarded port is listening before attempting the WebSocket
+                // handshake. We probe by trying to *bind* to the port: if that
+                // fails with AddrInUse, ssh's listener is up. We must NOT
+                // connect to the tunnel port here — doing so causes ssh to
+                // forward the probe to the relay, producing a spurious
+                // "Handshake not finished" error on the next real attempt.
+                if let Some(tport) = config.tunnel_port {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                    loop {
+                        let listening = std::net::TcpListener::bind(("127.0.0.1", tport))
+                            .is_err(); // EADDRINUSE → something is already listening
+                        if listening { break; }
+                        if tokio::time::Instant::now() >= deadline {
+                            send!(BackendEvent::Error("SSH tunnel did not become ready within 15 s".to_string()));
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+
                 let url = match Url::parse(&url_str) {
                     Ok(u) => u,
                     Err(e) => {
@@ -265,6 +290,7 @@ impl BackendClient for WeeChatClient {
                     }
                 }
 
+                if !config.auto_reconnect { return; }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
             }
