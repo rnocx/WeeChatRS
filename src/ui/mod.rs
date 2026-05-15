@@ -14,3 +14,4 @@ mod url_safety;
 pub(crate) mod notify;
 mod np;
 pub(crate) mod fileshare;
+pub(crate) mod ssh_tunnel;

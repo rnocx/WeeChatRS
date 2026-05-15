@@ -222,7 +222,18 @@ pub struct ConnectionProfile {
     pub save_password: bool,
     #[serde(default)]
     pub channel: String,
+    // SSH tunnel
+    #[serde(default)]
+    pub ssh_enabled: bool,
+    #[serde(default)]
+    pub ssh_host: String,
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_user: String,
 }
+
+fn default_ssh_port() -> u16 { 22 }
 
 impl ConnectionProfile {
     /// Stable, filesystem-safe prefix derived from label.
@@ -252,6 +263,10 @@ impl Default for ConnectionProfile {
             auto_connect: false,
             save_password: false,
             channel: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
         }
     }
 }
@@ -268,6 +283,7 @@ pub struct ConnectionHandle {
     pub auth_error: Option<String>,
     pub auto_reconnect: bool,
     pub connection_log: VecDeque<String>,
+    pub ssh_tunnel: Option<crate::ui::ssh_tunnel::SshTunnel>,
 }
 
 fn spawn_event_forwarder(
@@ -592,6 +608,10 @@ impl WeeChatApp {
                 auto_connect: false,
                 save_password: settings.save_password,
                 channel: String::new(),
+                ssh_enabled: false,
+                ssh_host: String::new(),
+                ssh_port: 22,
+                ssh_user: String::new(),
             });
         }
 
@@ -830,7 +850,34 @@ impl WeeChatApp {
         self.connections.retain(|c| c.prefix != prefix);
 
         let (per_conn_tx, per_conn_rx) = mpsc::unbounded_channel::<BackendEvent>();
-        let port = profile.port.parse::<u16>().unwrap_or(9001);
+        let relay_port = profile.port.parse::<u16>().unwrap_or(9001);
+
+        // Start SSH tunnel if configured; relay client connects to localhost:local_port.
+        // The SSH tunnel provides transport encryption, so SSL is not needed on the
+        // relay connection itself (though the profile's use_ssl setting is still honoured
+        // for users who want belt-and-suspenders TLS — in that case accept_invalid_certs
+        // should also be checked since the cert won't match 127.0.0.1).
+        let (effective_host, effective_port, ssh_tunnel) = if profile.ssh_enabled && !profile.ssh_host.is_empty() {
+            match crate::ui::ssh_tunnel::SshTunnel::spawn(
+                &profile.ssh_host,
+                profile.ssh_port,
+                &profile.ssh_user,
+                &profile.host,
+                relay_port,
+            ) {
+                Ok(t) => {
+                    let lp = t.local_port;
+                    ("127.0.0.1".to_string(), lp, Some(t))
+                }
+                Err(e) => {
+                    log::warn!("SSH tunnel failed to start: {}", e);
+                    (profile.host.clone(), relay_port, None)
+                }
+            }
+        } else {
+            (profile.host.clone(), relay_port, None)
+        };
+
         let (proto, path) = match profile.backend_type {
             BackendType::Soju    => (if profile.use_ssl { "ircs" } else { "irc" }, ""),
             BackendType::WeeChat => (if profile.use_ssl { "wss"  } else { "ws"  }, "/api"),
@@ -840,8 +887,8 @@ impl WeeChatApp {
             BackendType::Soju => {
                 let config = crate::relay::irc::IrcConfig {
                     label: profile.label.clone(),
-                    host: profile.host.clone(),
-                    port,
+                    host: effective_host.clone(),
+                    port: effective_port,
                     nick: if profile.nick.is_empty() { "user".to_string() } else { profile.nick.clone() },
                     username: profile.username.clone(),
                     sasl_username: profile.sasl_username.clone(),
@@ -854,8 +901,8 @@ impl WeeChatApp {
             }
             BackendType::WeeChat => {
                 let config = WeeChatConfig {
-                    host: profile.host.clone(),
-                    port,
+                    host: effective_host.clone(),
+                    port: effective_port,
                     password: password.clone(),
                     use_ssl: profile.use_ssl,
                     accept_invalid_certs: profile.accept_invalid_certs,
@@ -878,10 +925,16 @@ impl WeeChatApp {
             auth_error: None,
             auto_reconnect: self.auto_reconnect,
             connection_log: VecDeque::new(),
+            ssh_tunnel,
         };
 
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-        conn.connection_log.push_back(format!("[{}]  Connecting to {}://{}:{}{}", ts, proto, profile.host, port, path));
+        if conn.ssh_tunnel.is_some() {
+            let lp = conn.ssh_tunnel.as_ref().map(|t| t.local_port).unwrap_or(effective_port);
+            conn.connection_log.push_back(format!("[{}]  SSH tunnel: {}:{} → {}:{}", ts, "127.0.0.1", lp, profile.host, relay_port));
+        }
+        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        conn.connection_log.push_back(format!("[{}]  Connecting to {}://{}:{}{}", ts, proto, profile.host, relay_port, path));
         let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
         conn.connection_log.push_back(format!("[{}]  SSL/TLS: {}", ts2, if profile.use_ssl { "enabled" } else { "disabled" }));
 
