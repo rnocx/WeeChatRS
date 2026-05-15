@@ -562,11 +562,18 @@ impl WeeChatApp {
                                                     .hint_text("user@host or host"));
                                                 ui.end_row();
                                                 ui.label("SSH Port:");
-                                                let mut ssh_port_str = self.editing_profile.ssh_port.to_string();
-                                                if ui.add(egui::TextEdit::singleline(&mut ssh_port_str).desired_width(80.0)).changed() {
-                                                    if let Ok(p) = ssh_port_str.parse::<u16>() {
-                                                        self.editing_profile.ssh_port = p;
-                                                    }
+                                                let mut ssh_port_str = self.editing_profile.ssh_port
+                                                    .map(|p| p.to_string())
+                                                    .unwrap_or_default();
+                                                if ui.add(egui::TextEdit::singleline(&mut ssh_port_str)
+                                                    .desired_width(80.0)
+                                                    .hint_text("22")).changed()
+                                                {
+                                                    self.editing_profile.ssh_port = if ssh_port_str.is_empty() {
+                                                        None
+                                                    } else {
+                                                        ssh_port_str.parse::<u16>().ok()
+                                                    };
                                                 }
                                                 ui.end_row();
                                                 ui.label("SSH User:");
