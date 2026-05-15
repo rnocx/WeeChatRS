@@ -851,11 +851,8 @@ impl WeeChatApp {
         let (per_conn_tx, per_conn_rx) = mpsc::unbounded_channel::<BackendEvent>();
         let relay_port = profile.port.parse::<u16>().unwrap_or(9001);
 
-        // Start SSH tunnel if configured; relay client connects to localhost:local_port.
-        // The SSH tunnel provides transport encryption, so SSL is not needed on the
-        // relay connection itself (though the profile's use_ssl setting is still honoured
-        // for users who want belt-and-suspenders TLS — in that case accept_invalid_certs
-        // should also be checked since the cert won't match 127.0.0.1).
+        // Start SSH tunnel if configured. Capture a log message for both success and failure.
+        let mut ssh_tunnel_log: Option<String> = None;
         let (effective_host, effective_port, ssh_tunnel) = if profile.ssh_enabled && !profile.ssh_host.is_empty() {
             match crate::ui::ssh_tunnel::SshTunnel::spawn(
                 &profile.ssh_host,
@@ -866,10 +863,14 @@ impl WeeChatApp {
             ) {
                 Ok(t) => {
                     let lp = t.local_port;
+                    ssh_tunnel_log = Some(format!(
+                        "SSH tunnel started: 127.0.0.1:{} → {}:{}",
+                        lp, profile.host, relay_port
+                    ));
                     ("127.0.0.1".to_string(), lp, Some(t))
                 }
                 Err(e) => {
-                    log::warn!("SSH tunnel failed to start: {}", e);
+                    ssh_tunnel_log = Some(format!("SSH tunnel failed to start: {} — connecting directly", e));
                     (profile.host.clone(), relay_port, None)
                 }
             }
@@ -877,9 +878,14 @@ impl WeeChatApp {
             (profile.host.clone(), relay_port, None)
         };
 
+        // When the SSH tunnel is active it provides transport encryption, so the relay
+        // connection itself runs plain (no TLS). This avoids cert-mismatch errors
+        // against 127.0.0.1.
+        let use_ssl_effective = profile.use_ssl && ssh_tunnel.is_none();
+
         let (proto, path) = match profile.backend_type {
-            BackendType::Soju    => (if profile.use_ssl { "ircs" } else { "irc" }, ""),
-            BackendType::WeeChat => (if profile.use_ssl { "wss"  } else { "ws"  }, "/api"),
+            BackendType::Soju    => (if use_ssl_effective { "ircs" } else { "irc" }, ""),
+            BackendType::WeeChat => (if use_ssl_effective { "wss"  } else { "ws"  }, "/api"),
         };
 
         let mut client: Box<dyn BackendClient> = match profile.backend_type {
@@ -892,7 +898,7 @@ impl WeeChatApp {
                     username: profile.username.clone(),
                     sasl_username: profile.sasl_username.clone(),
                     password: password.clone(),
-                    use_ssl: profile.use_ssl,
+                    use_ssl: use_ssl_effective,
                     accept_invalid_certs: profile.accept_invalid_certs,
                     channel: profile.channel.clone(),
                 };
@@ -903,7 +909,7 @@ impl WeeChatApp {
                     host: effective_host.clone(),
                     port: effective_port,
                     password: password.clone(),
-                    use_ssl: profile.use_ssl,
+                    use_ssl: use_ssl_effective,
                     accept_invalid_certs: profile.accept_invalid_certs,
                 };
                 Box::new(WeeChatClient::new(config, per_conn_tx.clone(), ctx.clone()))
@@ -928,14 +934,20 @@ impl WeeChatApp {
         };
 
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-        if conn.ssh_tunnel.is_some() {
-            let lp = conn.ssh_tunnel.as_ref().map(|t| t.local_port).unwrap_or(effective_port);
-            conn.connection_log.push_back(format!("[{}]  SSH tunnel: {}:{} → {}:{}", ts, "127.0.0.1", lp, profile.host, relay_port));
+        if let Some(msg) = ssh_tunnel_log {
+            conn.connection_log.push_back(format!("[{}]  {}", ts, msg));
         }
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         conn.connection_log.push_back(format!("[{}]  Connecting to {}://{}:{}{}", ts, proto, profile.host, relay_port, path));
-        let ts2 = chrono::Local::now().format("%H:%M:%S").to_string();
-        conn.connection_log.push_back(format!("[{}]  SSL/TLS: {}", ts2, if profile.use_ssl { "enabled" } else { "disabled" }));
+        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        let ssl_note = if profile.use_ssl && !use_ssl_effective {
+            "disabled (SSH tunnel provides encryption)"
+        } else if use_ssl_effective {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        conn.connection_log.push_back(format!("[{}]  SSL/TLS: {}", ts, ssl_note));
 
         if self.selected_conn_log.is_none() {
             self.selected_conn_log = Some(prefix.clone());
