@@ -192,8 +192,16 @@ impl WeeChatApp {
                     tokio::spawn(async move {
                         let text = if let Some(c) = custom {
                             format!("{} 🎵", c)
-                        } else if let Some(track) = crate::ui::np::get_now_playing().await {
-                            format!("{} 🎵", track)
+                        } else if let Some(np) = crate::ui::np::get_now_playing().await {
+                            let mut s = np.track;
+                            if !np.source.is_empty() {
+                                s.push_str(&format!(" @ {}", np.source));
+                            }
+                            s.push_str(" 🎵");
+                            if !np.url.is_empty() {
+                                s.push_str(&format!(" {}", np.url));
+                            }
+                            s
                         } else {
                             return;
                         };
