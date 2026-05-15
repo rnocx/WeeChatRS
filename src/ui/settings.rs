@@ -581,7 +581,16 @@ impl WeeChatApp {
                                                     .desired_width(200.0)
                                                     .hint_text("leave blank to use SSH config / system user"));
                                                 ui.end_row();
+                                                ui.label("SSH Password:");
+                                                ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password)
+                                                    .password(true)
+                                                    .desired_width(200.0)
+                                                    .hint_text("leave blank to use SSH agent / keys"));
+                                                ui.end_row();
                                             });
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(&mut self.editing_profile.ssh_save_password, "Save SSH password");
+                                        });
                                         ui.add_space(2.0);
                                         ui.label(
                                             egui::RichText::new(
@@ -595,6 +604,7 @@ impl WeeChatApp {
                                     }
                                     ui.horizontal(|ui| {
                                         ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
+                                        ui.checkbox(&mut self.editing_profile.auto_reconnect, "Auto-reconnect");
                                         ui.checkbox(&mut self.editing_profile.save_password, "Save password");
                                     });
                                     ui.add_space(8.0);
@@ -607,6 +617,18 @@ impl WeeChatApp {
                                                 let key = self.editing_profile.keyring_host_key();
                                                 let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_password);
                                             }
+                                            if self.editing_profile.ssh_save_password && !self.editing_ssh_password.is_empty() {
+                                                let key = self.editing_profile.ssh_keyring_key();
+                                                let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_ssh_password);
+                                            }
+                                            // Cache passwords for the session so connect skips prompts.
+                                            let pfx = self.editing_profile.prefix();
+                                            if !self.editing_password.is_empty() {
+                                                self.session_passwords.insert(pfx.clone(), self.editing_password.clone());
+                                            }
+                                            if !self.editing_ssh_password.is_empty() {
+                                                self.session_ssh_passwords.insert(pfx, self.editing_ssh_password.clone());
+                                            }
                                             let profile = self.editing_profile.clone();
                                             if let Some(idx) = self.editing_profile_idx {
                                                 if idx < self.profiles.len() { self.profiles[idx] = profile; }
@@ -616,12 +638,14 @@ impl WeeChatApp {
                                             self.conn_show_add = false;
                                             self.editing_profile = ConnectionProfile::default();
                                             self.editing_password.clear();
+                                            self.editing_ssh_password.clear();
                                             self.editing_profile_idx = None;
                                         }
                                         if ui.button("Cancel").clicked() {
                                             self.conn_show_add = false;
                                             self.editing_profile = ConnectionProfile::default();
                                             self.editing_password.clear();
+                                            self.editing_ssh_password.clear();
                                             self.editing_profile_idx = None;
                                         }
                                     });
@@ -662,18 +686,38 @@ impl WeeChatApp {
                                                 if is_connected || is_pending {
                                                     if ui.button("Disconnect").clicked() { do_disconnect = Some(prefix.clone()); }
                                                 } else if self.conn_connect_idx == Some(idx) {
-                                                    ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).hint_text("Password…").desired_width(120.0));
-                                                    if ui.button("OK").clicked() { do_connect_idx = Some(idx); }
-                                                    if ui.button("✕").clicked() { self.conn_connect_idx = None; self.editing_password.clear(); }
+                                                    // Inline password prompt — shown only when passwords aren't cached/stored.
+                                                    ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).hint_text("Password…").desired_width(110.0));
+                                                    if profile.ssh_enabled {
+                                                        ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password).password(true).hint_text("SSH password…").desired_width(110.0));
+                                                    }
+                                                    if ui.button("OK").clicked() {
+                                                        // Cache whatever the user entered.
+                                                        if !self.editing_ssh_password.is_empty() {
+                                                            self.session_ssh_passwords.insert(prefix.clone(), std::mem::take(&mut self.editing_ssh_password));
+                                                        }
+                                                        do_connect_idx = Some(idx);
+                                                    }
+                                                    if ui.button("✕").clicked() {
+                                                        self.conn_connect_idx = None;
+                                                        self.editing_password.clear();
+                                                        self.editing_ssh_password.clear();
+                                                    }
                                                 } else {
                                                     if ui.button("Connect").clicked() {
-                                                        let key = profile.keyring_host_key();
-                                                        if let Some(pw) = crate::ui::secure_storage::load_by_key(&key) {
-                                                            self.editing_password = pw;
+                                                        // Check session cache, then keyring — skip prompt if password found.
+                                                        let relay_pw = self.session_passwords.get(&prefix).cloned()
+                                                            .or_else(|| crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()));
+                                                        let ssh_pw_known = !profile.ssh_enabled
+                                                            || self.session_ssh_passwords.contains_key(&prefix)
+                                                            || profile.ssh_save_password;
+                                                        if relay_pw.is_some() && ssh_pw_known {
+                                                            self.editing_password = relay_pw.unwrap_or_default();
                                                             do_connect_idx = Some(idx);
                                                         } else {
+                                                            // Pre-fill what we do know.
+                                                            self.editing_password = relay_pw.unwrap_or_default();
                                                             self.conn_connect_idx = Some(idx);
-                                                            self.editing_password.clear();
                                                         }
                                                     }
                                                 }
@@ -702,6 +746,10 @@ impl WeeChatApp {
                                 let profile = self.profiles[idx].clone();
                                 let password = std::mem::take(&mut self.editing_password);
                                 self.conn_connect_idx = None;
+                                // Cache the SSH password from the prompt if provided.
+                                if !self.editing_ssh_password.is_empty() {
+                                    self.session_ssh_passwords.insert(profile.prefix(), std::mem::take(&mut self.editing_ssh_password));
+                                }
                                 self.do_connect(&profile, password, ui.ctx());
                             }
                         }
@@ -718,9 +766,10 @@ impl WeeChatApp {
                         }
                         if let Some(idx) = do_edit {
                             if idx < self.profiles.len() {
-                                let key = self.profiles[idx].keyring_host_key();
-                                self.editing_profile = self.profiles[idx].clone();
-                                self.editing_password = crate::ui::secure_storage::load_by_key(&key).unwrap_or_default();
+                                let profile = &self.profiles[idx];
+                                self.editing_password = crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()).unwrap_or_default();
+                                self.editing_ssh_password = crate::ui::secure_storage::load_by_key(&profile.ssh_keyring_key()).unwrap_or_default();
+                                self.editing_profile = profile.clone();
                                 self.editing_profile_idx = Some(idx);
                                 self.conn_show_add = true;
                             }
@@ -728,6 +777,7 @@ impl WeeChatApp {
                         if toggle_add {
                             self.editing_profile = ConnectionProfile::default();
                             self.editing_password.clear();
+                            self.editing_ssh_password.clear();
                             self.editing_profile_idx = None;
                             self.conn_show_add = true;
                         }
