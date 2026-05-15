@@ -1075,6 +1075,25 @@ pub fn spawn(
         let mut line_counter: u64 = 0;
 
         loop {
+            // Wait for the SSH tunnel local port to start accepting connections
+            // before trying to connect (avoids ECONNREFUSED while ssh is still
+            // authenticating).
+            if let Some(tport) = config.tunnel_port {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    match TcpStream::connect(("127.0.0.1", tport)).await {
+                        Ok(_) => break,
+                        Err(_) => {
+                            if tokio::time::Instant::now() >= deadline {
+                                send!(BackendEvent::Error("SSH tunnel did not become ready within 15 s".to_string()));
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                    }
+                }
+            }
+
             let addr = format!("{}:{}", config.host.trim(), config.port);
 
             let tcp = match TcpStream::connect(&addr).await {
@@ -1082,6 +1101,7 @@ pub fn spawn(
                 Err(e) => {
                     connected.store(false, Ordering::Relaxed);
                     send!(BackendEvent::Error(format!("Connection failed: {}", e)));
+                    if !config.auto_reconnect { return; }
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
                     continue;
@@ -1319,7 +1339,7 @@ pub fn spawn(
             }
 
             connected.store(false, Ordering::Relaxed);
-            if clean { return; }
+            if clean || !config.auto_reconnect { return; }
 
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(max_backoff);
