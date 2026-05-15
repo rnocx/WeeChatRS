@@ -557,7 +557,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                             if let Some(cmd) = session.read_marker_cmd() {
                                 session.whois_lines.push(format!("{} {}", cmd, target));
                             }
-                            session.whois_lines.push(format!("CHATHISTORY LATEST {} * 100", target));
+                            session.whois_lines.push(format!("CHATHISTORY LATEST {} * 300", target));
                         }
                     }
                 }
@@ -592,7 +592,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                     if let Some(cmd) = session.read_marker_cmd() {
                         session.whois_lines.push(format!("{} {}", cmd, channel));
                     }
-                    session.whois_lines.push(format!("CHATHISTORY LATEST {} * 100", channel));
+                    session.whois_lines.push(format!("CHATHISTORY LATEST {} * 300", channel));
                 }
             } else if session.joined.contains(&chan_lower) {
                 let new_nick = Nick { name: nick.clone(), prefix: String::new(), color_ansi: nick_color_ansi(&nick), away: false };
@@ -1112,7 +1112,7 @@ pub fn spawn(
                     connected.store(true, Ordering::Relaxed);
                     backoff = Duration::from_secs(1);
 
-                    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+                    let mut ping_interval = tokio::time::interval(Duration::from_secs(60));
                     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     ping_interval.tick().await; // skip the immediate first tick
 
@@ -1271,7 +1271,7 @@ pub fn spawn(
                                     }
                                     Some(IrcCommand::FetchBefore { buffer_id, before_ts }) => {
                                         if session.has_chathistory() {
-                                            let _ = write_half.write_all(format!("CHATHISTORY BEFORE {} timestamp={} 100\r\n", buffer_id, before_ts).as_bytes()).await;
+                                            let _ = write_half.write_all(format!("CHATHISTORY BEFORE {} timestamp={} 300\r\n", buffer_id, before_ts).as_bytes()).await;
                                         }
                                     }
                                 }

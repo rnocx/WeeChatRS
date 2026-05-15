@@ -175,11 +175,11 @@ impl BackendClient for WeeChatClient {
                         let mut clean = false;
                         let mut last_received = std::time::Instant::now();
 
-                        // Check for dead connection every 30 s; disconnect if silent for 90 s.
+                        // Check for dead connection every 60 s; disconnect if silent for 5 min.
                         // We do NOT send WebSocket Ping frames because many relay setups (nginx
                         // proxies, WeeChat itself) close the connection on receiving an
-                        // application-initiated Ping, causing spurious 30-second reconnect loops.
-                        let mut idle_check = tokio::time::interval(Duration::from_secs(30));
+                        // application-initiated Ping, causing spurious reconnect loops.
+                        let mut idle_check = tokio::time::interval(Duration::from_secs(60));
                         idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                         idle_check.tick().await; // skip the immediate first tick
 
@@ -232,8 +232,8 @@ impl BackendClient for WeeChatClient {
                                     }
                                 },
                                 _ = idle_check.tick() => {
-                                    if last_received.elapsed() > Duration::from_secs(90) {
-                                        // No data from server in 90 s — connection is dead
+                                    if last_received.elapsed() > Duration::from_secs(300) {
+                                        // No data from server in 5 min — connection is dead
                                         connected.store(false, Ordering::Relaxed);
                                         send!(BackendEvent::Disconnected);
                                         break;

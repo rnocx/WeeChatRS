@@ -132,7 +132,7 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
     Ok(LinkPreview { title, description, image_url, site_name })
 }
 
-pub const INITIAL_LINES: usize = 1000;
+pub const INITIAL_LINES: usize = 300;
 const IMAGE_CACHE_MAX: usize = 200;
 const PREVIEW_CACHE_MAX: usize = 200;
 const PREFIX_COL_WIDTHS_MAX: usize = 500;
@@ -149,7 +149,7 @@ fn cap_map<V>(map: &mut HashMap<String, V>, cap: usize) {
         map.remove(&victim);
     }
 }
-pub const LOAD_MORE_LINES: usize = 1000;
+pub const LOAD_MORE_LINES: usize = 300;
 pub const MAX_STORED_LINES: usize = 10_000;
 
 /// Reorder `buffers` by moving the dragged item (and its whole server group when it is a server
