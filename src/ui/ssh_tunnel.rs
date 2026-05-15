@@ -10,7 +10,7 @@ pub struct SshTunnel {
 impl SshTunnel {
     pub fn spawn(
         ssh_host: &str,
-        ssh_port: u16,
+        ssh_port: Option<u16>,
         ssh_user: &str,
         relay_host: &str,
         relay_port: u16,
@@ -31,9 +31,11 @@ impl SshTunnel {
             "-o", "ServerAliveInterval=10",
             "-o", "ServerAliveCountMax=3",
             "-L", &forward,
-            "-p", &ssh_port.to_string(),
-            &target,
         ]);
+        if let Some(port) = ssh_port {
+            cmd.args(["-p", &port.to_string()]);
+        }
+        cmd.arg(&target);
 
         // Prevent a console window flashing on Windows.
         #[cfg(target_os = "windows")]

@@ -227,13 +227,12 @@ pub struct ConnectionProfile {
     pub ssh_enabled: bool,
     #[serde(default)]
     pub ssh_host: String,
-    #[serde(default = "default_ssh_port")]
-    pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
     #[serde(default)]
     pub ssh_user: String,
 }
 
-fn default_ssh_port() -> u16 { 22 }
 
 impl ConnectionProfile {
     /// Stable, filesystem-safe prefix derived from label.
@@ -265,7 +264,7 @@ impl Default for ConnectionProfile {
             channel: String::new(),
             ssh_enabled: false,
             ssh_host: String::new(),
-            ssh_port: 22,
+            ssh_port: None,
             ssh_user: String::new(),
         }
     }
@@ -610,7 +609,7 @@ impl WeeChatApp {
                 channel: String::new(),
                 ssh_enabled: false,
                 ssh_host: String::new(),
-                ssh_port: 22,
+                ssh_port: None,
                 ssh_user: String::new(),
             });
         }
