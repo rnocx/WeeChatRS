@@ -282,6 +282,7 @@ pub struct ConnectionHandle {
     pub auth_error: Option<String>,
     pub auto_reconnect: bool,
     pub connection_log: VecDeque<String>,
+    #[allow(dead_code)] // held for Drop — kills the ssh process on disconnect
     pub ssh_tunnel: Option<crate::ui::ssh_tunnel::SshTunnel>,
 }
 
