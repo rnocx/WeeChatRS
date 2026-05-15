@@ -231,6 +231,10 @@ pub struct ConnectionProfile {
     pub ssh_port: Option<u16>,
     #[serde(default)]
     pub ssh_user: String,
+    #[serde(default)]
+    pub ssh_save_password: bool,
+    #[serde(default = "default_true")]
+    pub auto_reconnect: bool,
 }
 
 
@@ -243,8 +247,10 @@ impl ConnectionProfile {
             .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
             .collect()
     }
-    /// Keyring key for this profile's password.
+    /// Keyring key for this profile's relay password.
     pub fn keyring_host_key(&self) -> String { format!("{}@{}", self.label, self.host) }
+    /// Keyring key for this profile's SSH tunnel password.
+    pub fn ssh_keyring_key(&self) -> String { format!("ssh:{}@{}", self.label, self.ssh_host) }
 }
 
 impl Default for ConnectionProfile {
@@ -266,6 +272,8 @@ impl Default for ConnectionProfile {
             ssh_host: String::new(),
             ssh_port: None,
             ssh_user: String::new(),
+            ssh_save_password: false,
+            auto_reconnect: true,
         }
     }
 }
@@ -433,10 +441,15 @@ pub struct WeeChatApp {
     pub(crate) selected_conn_log: Option<String>,
     pub(crate) editing_profile: ConnectionProfile,
     pub(crate) editing_password: String,
+    pub(crate) editing_ssh_password: String,
     pub(crate) editing_profile_idx: Option<usize>,
     pub(crate) show_connections: bool,      // connections manager window
     pub(crate) conn_show_add: bool,         // add/edit form inside connections window
     pub(crate) conn_connect_idx: Option<usize>, // index awaiting password before connect
+    /// Per-session relay password cache — avoids re-prompting within a session.
+    pub(crate) session_passwords: std::collections::HashMap<String, String>,
+    /// Per-session SSH password cache.
+    pub(crate) session_ssh_passwords: std::collections::HashMap<String, String>,
 
     pub(crate) buffers: Vec<Buffer>,
     /// id → index into `buffers`. Maintained in lock-step via `rebuild_buffer_idx`
@@ -486,6 +499,7 @@ pub struct WeeChatApp {
     // Command History
     pub(crate) command_history: VecDeque<String>,
     pub(crate) history_index: Option<usize>,
+    pub(crate) focus_input: bool,
 
     // Search state
     pub(crate) show_search: bool,
@@ -612,6 +626,8 @@ impl WeeChatApp {
                 ssh_host: String::new(),
                 ssh_port: None,
                 ssh_user: String::new(),
+                ssh_save_password: false,
+                auto_reconnect: true,
             });
         }
 
@@ -637,10 +653,13 @@ impl WeeChatApp {
             selected_conn_log: None,
             editing_profile: ConnectionProfile::default(),
             editing_password: String::new(),
+            editing_ssh_password: String::new(),
             editing_profile_idx: None,
             show_connections: false,
             conn_show_add: false,
             conn_connect_idx: None,
+            session_passwords: std::collections::HashMap::new(),
+            session_ssh_passwords: std::collections::HashMap::new(),
             buffers: Vec::new(),
             buffer_idx: HashMap::new(),
             selected_buffer_id: None,
@@ -676,6 +695,7 @@ impl WeeChatApp {
             completion: None,
             command_history: VecDeque::new(),
             history_index: None,
+            focus_input: false,
             show_search: false,
             search_text: String::new(),
             pending_buffer_switch: None,
@@ -813,6 +833,7 @@ impl WeeChatApp {
         }
 
         self.selected_buffer_id = Some(id.clone());
+        self.focus_input = true;
         self.selected_view_since = Some(std::time::Instant::now());
         self.cleared_buffer_ids.insert(id.clone());
         if let Some(buffer) = self.buffer_by_id_mut(&id) {
@@ -852,13 +873,24 @@ impl WeeChatApp {
         let (per_conn_tx, per_conn_rx) = mpsc::unbounded_channel::<BackendEvent>();
         let relay_port = profile.port.parse::<u16>().unwrap_or(9001);
 
+        // Cache the relay password for this session so future connects skip the prompt.
+        if !password.is_empty() {
+            self.session_passwords.insert(prefix.clone(), password.clone());
+        }
+
         // Start SSH tunnel if configured. Capture a log message for both success and failure.
+        let ssh_password = self.session_ssh_passwords.get(&prefix).cloned()
+            .or_else(|| if profile.ssh_save_password {
+                crate::ui::secure_storage::load_by_key(&profile.ssh_keyring_key())
+            } else { None });
+
         let mut ssh_tunnel_log: Option<String> = None;
         let (effective_host, effective_port, ssh_tunnel) = if profile.ssh_enabled && !profile.ssh_host.is_empty() {
             match crate::ui::ssh_tunnel::SshTunnel::spawn(
                 &profile.ssh_host,
                 profile.ssh_port,
                 &profile.ssh_user,
+                ssh_password.as_deref(),
                 &profile.host,
                 relay_port,
             ) {
@@ -884,6 +916,9 @@ impl WeeChatApp {
             BackendType::WeeChat => (if profile.use_ssl { "wss"  } else { "ws"  }, "/api"),
         };
 
+        let tunnel_port = ssh_tunnel.as_ref().map(|t| t.local_port);
+        let effective_auto_reconnect = profile.auto_reconnect && self.auto_reconnect;
+
         let mut client: Box<dyn BackendClient> = match profile.backend_type {
             BackendType::Soju => {
                 let config = crate::relay::irc::IrcConfig {
@@ -897,6 +932,8 @@ impl WeeChatApp {
                     use_ssl: profile.use_ssl,
                     accept_invalid_certs: profile.accept_invalid_certs,
                     channel: profile.channel.clone(),
+                    tunnel_port,
+                    auto_reconnect: effective_auto_reconnect,
                 };
                 Box::new(crate::relay::irc::IrcClient::new(config, per_conn_tx.clone(), ctx.clone()))
             }
@@ -907,6 +944,8 @@ impl WeeChatApp {
                     password: password.clone(),
                     use_ssl: profile.use_ssl,
                     accept_invalid_certs: profile.accept_invalid_certs,
+                    tunnel_port,
+                    auto_reconnect: effective_auto_reconnect,
                 };
                 Box::new(WeeChatClient::new(config, per_conn_tx.clone(), ctx.clone()))
             }
@@ -924,7 +963,7 @@ impl WeeChatApp {
             is_connecting: true,
             connecting_pending: true,
             auth_error: None,
-            auto_reconnect: self.auto_reconnect,
+            auto_reconnect: effective_auto_reconnect,
             connection_log: VecDeque::new(),
             ssh_tunnel,
         };
@@ -1854,6 +1893,11 @@ impl eframe::App for WeeChatApp {
                                 .desired_width(ui.available_width() - 80.0);
 
                             let res = ui.add(text_edit);
+
+                            if self.focus_input {
+                                res.request_focus();
+                                self.focus_input = false;
+                            }
 
                             if res.has_focus() {
                                 if tab_pressed {
