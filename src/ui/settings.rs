@@ -548,6 +548,44 @@ impl WeeChatApp {
                                             ui.checkbox(&mut self.editing_profile.accept_invalid_certs, "Accept self-signed");
                                         }
                                     });
+                                    ui.add_space(4.0);
+                                    ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel");
+                                    if self.editing_profile.ssh_enabled {
+                                        ui.add_space(4.0);
+                                        egui::Grid::new("ssh_grid")
+                                            .num_columns(2)
+                                            .spacing([8.0, 4.0])
+                                            .show(ui, |ui| {
+                                                ui.label("SSH Host:");
+                                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_host)
+                                                    .desired_width(200.0)
+                                                    .hint_text("user@host or host"));
+                                                ui.end_row();
+                                                ui.label("SSH Port:");
+                                                let mut ssh_port_str = self.editing_profile.ssh_port.to_string();
+                                                if ui.add(egui::TextEdit::singleline(&mut ssh_port_str).desired_width(80.0)).changed() {
+                                                    if let Ok(p) = ssh_port_str.parse::<u16>() {
+                                                        self.editing_profile.ssh_port = p;
+                                                    }
+                                                }
+                                                ui.end_row();
+                                                ui.label("SSH User:");
+                                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_user)
+                                                    .desired_width(200.0)
+                                                    .hint_text("leave blank to use SSH config / system user"));
+                                                ui.end_row();
+                                            });
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Connects via ssh -L tunnel. Uses your SSH agent / ~/.ssh keys.\n\
+                                                 The relay host/port above is where the tunnel forwards to."
+                                            )
+                                            .small()
+                                            .color(ui.visuals().weak_text_color()),
+                                        );
+                                        ui.add_space(4.0);
+                                    }
                                     ui.horizontal(|ui| {
                                         ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
                                         ui.checkbox(&mut self.editing_profile.save_password, "Save password");
