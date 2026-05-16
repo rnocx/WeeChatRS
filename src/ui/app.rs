@@ -95,6 +95,16 @@ fn decode_entities(s: &str) -> String {
      .replace("&nbsp;", " ")
 }
 
+async fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let bytes = client.get(url).send().await.map_err(|e| e.to_string())?
+        .bytes().await.map_err(|e| e.to_string())?;
+    Ok(bytes.to_vec())
+}
+
 async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
     if !is_safe_public_url(&url) {
         return Err("blocked: non-public URL".to_string());
@@ -1079,6 +1089,7 @@ impl eframe::App for WeeChatApp {
             self.last_notif_at.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(300));
         }
 
+        let mut got_image = false;
         while let Ok((url, result)) = self.image_rx.try_recv() {
             match result {
                 Ok(bytes) => {
@@ -1096,8 +1107,11 @@ impl eframe::App for WeeChatApp {
                 Err(_) => { self.image_cache.insert(url, ImageState::Failed); }
             }
             cap_map(&mut self.image_cache, IMAGE_CACHE_MAX);
+            got_image = true;
         }
+        if got_image { ctx.request_repaint(); }
 
+        let mut got_preview = false;
         while let Ok((url, result)) = self.preview_rx.try_recv() {
             match result {
                 Ok(preview) => {
@@ -1106,12 +1120,11 @@ impl eframe::App for WeeChatApp {
                             self.image_cache.insert(img_url.clone(), ImageState::Loading);
                             let tx = self.image_tx.clone();
                             let img_url_owned = img_url.clone();
+                            let ctx2 = ctx.clone();
                             tokio::spawn(async move {
-                                let result = async {
-                                    let bytes = reqwest::get(&img_url_owned).await?.bytes().await?;
-                                    Ok::<Vec<u8>, reqwest::Error>(bytes.to_vec())
-                                }.await;
-                                let _ = tx.send((img_url_owned, result.map_err(|e| e.to_string())));
+                                let result = fetch_image_bytes(&img_url_owned).await;
+                                let _ = tx.send((img_url_owned, result));
+                                ctx2.request_repaint();
                             });
                         }
                     }
@@ -1120,7 +1133,9 @@ impl eframe::App for WeeChatApp {
                 Err(_) => { self.preview_cache.insert(url, PreviewState::Failed); }
             }
             cap_map(&mut self.preview_cache, PREVIEW_CACHE_MAX);
+            got_preview = true;
         }
+        if got_preview { ctx.request_repaint(); }
 
         // /np drain: send the formatted now-playing message to the active buffer.
         while let Ok((buf_id, np_text)) = self.np_rx.try_recv() {
@@ -1754,6 +1769,7 @@ impl eframe::App for WeeChatApp {
         let current_buf = current_buffer_id.as_ref().and_then(|id| self.buffer_by_id(id));
         let current_buffer_nicks = current_buf.map(|b| b.nicks.clone());
         let current_buffer_full_name = current_buf.map(|b| b.full_name.clone());
+        let is_fset_buffer = current_buffer_full_name.as_deref().map_or(false, |n| n.contains("fset"));
         let current_buffer_messages = current_buf.map(|b| b.messages.clone());
         let _current_buffer_last_read_id = current_buf.and_then(|b| b.last_read_id.clone());
         let current_buffer_visit_marker_id = current_buf.and_then(|b| b.visit_start_marker_id.clone());
@@ -1830,7 +1846,7 @@ impl eframe::App for WeeChatApp {
             self.nicklist_width = nicks_resp.response.rect.width();
         }
 
-        if current_buffer_id.is_some() {
+        if current_buffer_id.is_some() && !is_fset_buffer {
             // Is the SELECTED buffer's connection up? Different from any_connected when
             // multiple connections are configured and only some are alive.
             let selected_buffer_connected = current_buffer_id.as_ref()
@@ -2049,8 +2065,7 @@ impl eframe::App for WeeChatApp {
                             }
                         });
                 });
-            } else if let Some(full_name) = current_buffer_full_name {
-                let is_fset_buffer = full_name.contains("fset");
+            } else if current_buffer_full_name.is_some() {
                 ui.vertical(|ui| {
                     ui.set_max_width(ui.available_width());
                     if self.show_search {
@@ -2106,6 +2121,7 @@ impl eframe::App for WeeChatApp {
                                 ui,
                                 messages,
                                 &mut self.fset_state,
+                                &mut self.input_text,
                                 self.font_size,
                                 self.use_monospace,
                                 surface_color,
@@ -2247,7 +2263,9 @@ impl eframe::App for WeeChatApp {
                                     } else {
                                         Color32::TRANSPARENT
                                     };
+                                    ui.push_id(&line.id, |ui| {
                                     let mut row_hovered_url: Option<String> = None;
+                                    let mut bg_resp: Option<egui::Response> = None;
                                     let row_resp = Frame::none()
                                         .fill(row_bg)
                                         .rounding(Rounding::same(3.0))
@@ -2329,12 +2347,11 @@ impl eframe::App for WeeChatApp {
                                                                         self.image_cache.insert(url.clone(), ImageState::Loading);
                                                                         let tx = self.image_tx.clone();
                                                                         let url_owned = url.clone();
+                                                                        let ctx2 = ctx.clone();
                                                                         tokio::spawn(async move {
-                                                                            let result = async {
-                                                                                let bytes = reqwest::get(&url_owned).await?.bytes().await?;
-                                                                                Ok::<Vec<u8>, reqwest::Error>(bytes.to_vec())
-                                                                            }.await;
-                                                                            let _ = tx.send((url_owned, result.map_err(|e| e.to_string())));
+                                                                            let result = fetch_image_bytes(&url_owned).await;
+                                                                            let _ = tx.send((url_owned, result));
+                                                                            ctx2.request_repaint();
                                                                         });
                                                                     }
                                                                 }
@@ -2352,9 +2369,11 @@ impl eframe::App for WeeChatApp {
                                                                         self.preview_cache.insert(url.clone(), PreviewState::Loading);
                                                                         let tx = self.preview_tx.clone();
                                                                         let url_owned = url.clone();
+                                                                        let ctx2 = ctx.clone();
                                                                         tokio::spawn(async move {
                                                                             let result = fetch_link_preview(url_owned.clone()).await;
                                                                             let _ = tx.send((url_owned, result));
+                                                                            ctx2.request_repaint();
                                                                         });
                                                                     }
                                                                 }
@@ -2380,13 +2399,7 @@ impl eframe::App for WeeChatApp {
                                                                         let tx = self.image_tx.clone();
                                                                         let url_owned = eurl.clone();
                                                                         tokio::spawn(async move {
-                                                                            let result: Result<Vec<u8>, String> = async {
-                                                                                let bytes = reqwest::get(&url_owned).await
-                                                                                    .map_err(|e| e.to_string())?
-                                                                                    .bytes().await
-                                                                                    .map_err(|e| e.to_string())?;
-                                                                                Ok(bytes.to_vec())
-                                                                            }.await;
+                                                                            let result = fetch_image_bytes(&url_owned).await;
                                                                             let _ = tx.send((url_owned, result));
                                                                         });
                                                                     }
@@ -2490,10 +2503,13 @@ impl eframe::App for WeeChatApp {
                                             }
                                         }); // end vertical (message column)
                                     }); // end horizontal (full message row)
+                                    // Register the row background BEFORE children (pre-reserved slot)
+                                    // so the hit test picks buttons (registered later = "topmost") over the bg.
+                                    bg_resp = Some(ui.interact_bg(egui::Sense::click()));
                                     }); // end highlight frame
                                     let plain_message = line.plain_message.clone();
                                     let plain_prefix = line.plain_prefix.clone();
-                                    let interactable = row_resp.response.interact(egui::Sense::click());
+                                    let interactable = bg_resp.unwrap_or_else(|| row_resp.response.clone());
                                     // While the row is hovered (pointer in Middle layer, popup not
                                     // open), keep the stored URL current.  Once the popup opens the
                                     // pointer moves into the Foreground layer so the row is no longer
@@ -2525,6 +2541,7 @@ impl eframe::App for WeeChatApp {
                                             }
                                         }
                                     });
+                                    }); // end push_id
                                 }
                             }
                         });

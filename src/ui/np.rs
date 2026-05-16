@@ -156,41 +156,56 @@ mod linux {
     fn map_player_name(player: &str) -> &'static str {
         let p = player.to_lowercase();
         if p.contains("spotify") { "Spotify" }
-        else if p.contains("youtube") || p.contains("chrome") || p.contains("chromium") || p.contains("msedge") { "YouTube Music" }
+        else if p.contains("youtube") || p.contains("chrome") || p.contains("chromium")
+            || p.contains("msedge") || p.contains("brave") || p.contains("orion")
+            || p.contains("vivaldi") || p.contains("firefox")
+        { "YouTube Music" }
         else { "" }
     }
 
-    pub async fn detect() -> Option<NowPlaying> {
+    async fn playerctl(args: &[&str]) -> Option<String> {
         let out = Command::new("playerctl")
-            .args(["metadata", "--format", "{{ playerName }}|||{{ artist }} - {{ title }}|||{{ xesam:url }}"])
+            .args(args)
             .output()
             .await
             .ok()?;
         if !out.status.success() { return None; }
-        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if raw.is_empty() || raw.contains("No players found") { return None; }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() || s.contains("No players found") { None } else { Some(s) }
+    }
 
-        let mut parts = raw.splitn(3, "|||");
-        let player_id = parts.next().unwrap_or("").trim();
-        let track = parts.next().unwrap_or("").trim();
-        let xesam_url = parts.next().unwrap_or("").trim();
+    pub async fn detect() -> Option<NowPlaying> {
+        // Use separate fields so we can handle a missing artist without producing " - title".
+        let raw = playerctl(&[
+            "metadata",
+            "--format",
+            "{{ playerName }}|||{{ artist }}|||{{ title }}|||{{ xesam:url }}",
+        ]).await?;
 
-        if track.is_empty() || track == " - " { return None; }
+        let mut parts = raw.splitn(4, "|||");
+        let player_id  = parts.next().unwrap_or("").trim();
+        let artist     = parts.next().unwrap_or("").trim();
+        let title      = parts.next().unwrap_or("").trim();
+        let xesam_url  = parts.next().unwrap_or("").trim();
+
+        if title.is_empty() { return None; }
+
+        let track = if artist.is_empty() {
+            title.to_string()
+        } else {
+            format!("{} - {}", artist, title)
+        };
 
         let source = map_player_name(player_id);
-        // Use the real track URL from MPRIS if it's a known music URL, otherwise fall back to search.
         let url = if !xesam_url.is_empty()
             && (xesam_url.contains("music.youtube.com") || xesam_url.contains("open.spotify.com"))
         {
             xesam_url.to_string()
         } else {
-            search_url(source, track)
+            search_url(source, &track)
         };
-        Some(NowPlaying {
-            track: track.to_string(),
-            source: source.to_string(),
-            url,
-        })
+
+        Some(NowPlaying { track, source: source.to_string(), url })
     }
 }
 
@@ -232,15 +247,25 @@ mod windows {
         let id = app_id.to_lowercase();
         if id.contains("applemusic") || id.contains("itunes") { "Apple Music" }
         else if id.contains("spotify") { "Spotify" }
+        else if id.contains("youtube") || id.contains("chrome") || id.contains("msedge")
+             || id.contains("brave") || id.contains("vivaldi") || id.contains("orion")
+             || id.contains("firefox") { "YouTube Music" }
         else { "" }
     }
 
+    // Output format from PS scripts: "src|||artist|||title"
     fn parse_output(raw: &str) -> (String, String) {
-        if let Some((src_id, track)) = raw.split_once("|||") {
-            (classify_source(src_id.trim()).to_string(), track.trim().to_string())
+        let mut parts = raw.splitn(3, "|||");
+        let src_id = parts.next().unwrap_or("").trim();
+        let artist  = parts.next().unwrap_or("").trim();
+        let title   = parts.next().unwrap_or("").trim();
+        let source  = classify_source(src_id).to_string();
+        let track = if artist.is_empty() {
+            title.to_string()
         } else {
-            (String::new(), raw.to_string())
-        }
+            format!("{} - {}", artist, title)
+        };
+        (source, track)
     }
 
     const SMTC_CURRENT_SCRIPT: &str = r#"
@@ -258,7 +283,7 @@ if ([string]::IsNullOrWhiteSpace($props.Title)) { exit 1 }
 $artist = ([string]$props.Artist -replace '[\p{Cc}\p{Cf}]', '').Trim()
 $title  = ([string]$props.Title  -replace '[\p{Cc}\p{Cf}]', '').Trim()
 $src = $session.SourceAppUserModelId
-if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output "$src|||$title" } else { Write-Output "$src|||$artist - $title" }
+Write-Output "$src|||$artist|||$title"
 "#;
 
     const SMTC_ALL_SCRIPT: &str = r#"
@@ -277,7 +302,7 @@ foreach ($s in $sessions) {
         $pi = $s.TryGetMediaPropertiesAsync(); $pi.AsTask().Wait()
         $props = $pi.Result
         if ([string]::IsNullOrWhiteSpace($props.Title)) { continue }
-        $isKnown = $s.SourceAppUserModelId -match 'chrome|msedge|applemusic|itunes|spotify'
+        $isKnown = $s.SourceAppUserModelId -match 'youtube|chrome|msedge|brave|vivaldi|orion|firefox|applemusic|itunes|spotify'
         if ($isKnown -and -not $bestIsKnown) { $best = $props; $bestSrc = $s.SourceAppUserModelId; $bestIsKnown = $true }
         elseif ($null -eq $best) { $best = $props; $bestSrc = $s.SourceAppUserModelId }
     } catch { }
@@ -285,7 +310,7 @@ foreach ($s in $sessions) {
 if ($null -eq $best) { exit 1 }
 $artist = ([string]$best.Artist -replace '[\p{Cc}\p{Cf}]', '').Trim()
 $title  = ([string]$best.Title  -replace '[\p{Cc}\p{Cf}]', '').Trim()
-if ([string]::IsNullOrWhiteSpace($artist)) { Write-Output "$bestSrc|||$title" } else { Write-Output "$bestSrc|||$artist - $title" }
+Write-Output "$bestSrc|||$artist|||$title"
 "#;
 
     pub async fn detect() -> Option<NowPlaying> {

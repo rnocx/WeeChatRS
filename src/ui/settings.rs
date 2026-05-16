@@ -262,52 +262,51 @@ impl WeeChatApp {
                         }
 
                         ui.add_space(6.0);
-                        ui.set_enabled(!adaptive_theme);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Background:").small());
-                            let mut bg = self.theme.background
-                                .map(Color32::from)
-                                .unwrap_or(Color32::from_rgb(18, 18, 18));
-                            if color_edit_button_srgba(ui, &mut bg, Alpha::Opaque).changed() {
-                                self.theme.background = Some(ThemeColor::from(bg));
-                            }
-                            ui.add_space(12.0);
-                            ui.label(RichText::new("Foreground:").small());
-                            let mut fg = self.theme.foreground
-                                .map(Color32::from)
-                                .unwrap_or(Color32::from_rgb(204, 204, 204));
-                            if color_edit_button_srgba(ui, &mut fg, Alpha::Opaque).changed() {
-                                self.theme.foreground = Some(ThemeColor::from(fg));
-                            }
-                        });
-
-                        ui.add_space(6.0);
-                        const LABELS: [&str; 16] = [
-                            "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
-                            "Br.Black", "Br.Red", "Br.Green", "Br.Yellow", "Br.Blue", "Br.Magenta", "Br.Cyan", "Br.White",
-                        ];
-                        for row in 0..2usize {
+                        ui.add_enabled_ui(!adaptive_theme, |ui| {
                             ui.horizontal(|ui| {
-                                for col in 0..8usize {
-                                    let i = row * 8 + col;
-                                    ui.vertical(|ui| {
-                                        ui.set_width(46.0);
-                                        let mut c = Color32::from(self.theme.ansi[i]);
-                                        if color_edit_button_srgba(ui, &mut c, Alpha::Opaque).changed() {
-                                            self.theme.ansi[i] = ThemeColor::from(c);
-                                        }
-                                        ui.label(
-                                            RichText::new(LABELS[i])
-                                                .size(9.0)
-                                                .color(ui.visuals().weak_text_color()),
-                                        );
-                                    });
+                                ui.label(RichText::new("Background:").small());
+                                let mut bg = self.theme.background
+                                    .map(Color32::from)
+                                    .unwrap_or(Color32::from_rgb(18, 18, 18));
+                                if color_edit_button_srgba(ui, &mut bg, Alpha::Opaque).changed() {
+                                    self.theme.background = Some(ThemeColor::from(bg));
+                                }
+                                ui.add_space(12.0);
+                                ui.label(RichText::new("Foreground:").small());
+                                let mut fg = self.theme.foreground
+                                    .map(Color32::from)
+                                    .unwrap_or(Color32::from_rgb(204, 204, 204));
+                                if color_edit_button_srgba(ui, &mut fg, Alpha::Opaque).changed() {
+                                    self.theme.foreground = Some(ThemeColor::from(fg));
                                 }
                             });
-                            ui.add_space(2.0);
-                        }
 
-                        ui.set_enabled(true);
+                            ui.add_space(6.0);
+                            const LABELS: [&str; 16] = [
+                                "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
+                                "Br.Black", "Br.Red", "Br.Green", "Br.Yellow", "Br.Blue", "Br.Magenta", "Br.Cyan", "Br.White",
+                            ];
+                            for row in 0..2usize {
+                                ui.horizontal(|ui| {
+                                    for col in 0..8usize {
+                                        let i = row * 8 + col;
+                                        ui.vertical(|ui| {
+                                            ui.set_width(46.0);
+                                            let mut c = Color32::from(self.theme.ansi[i]);
+                                            if color_edit_button_srgba(ui, &mut c, Alpha::Opaque).changed() {
+                                                self.theme.ansi[i] = ThemeColor::from(c);
+                                            }
+                                            ui.label(
+                                                RichText::new(LABELS[i])
+                                                    .size(9.0)
+                                                    .color(ui.visuals().weak_text_color()),
+                                            );
+                                        });
+                                    }
+                                });
+                                ui.add_space(2.0);
+                            }
+                        });
 
                         // ── Keybinds ───────────────────────────────────────────
                         ui.add_space(8.0);
@@ -547,9 +546,9 @@ impl WeeChatApp {
                                         if self.editing_profile.use_ssl {
                                             ui.checkbox(&mut self.editing_profile.accept_invalid_certs, "Accept self-signed");
                                         }
+                                        ui.add_space(12.0);
+                                        ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel");
                                     });
-                                    ui.add_space(4.0);
-                                    ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel");
                                     if self.editing_profile.ssh_enabled {
                                         ui.add_space(4.0);
                                         egui::Grid::new("ssh_grid")
