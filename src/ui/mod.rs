@@ -2,6 +2,7 @@ pub mod app;
 pub mod ansi;
 pub mod theme;
 pub mod keybinds;
+pub mod fset;
 pub(crate) mod wallpaper;
 mod sysinfo;
 
