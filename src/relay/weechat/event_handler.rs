@@ -622,7 +622,8 @@ impl WeeChatApp {
                         activity = existing.activity;
                         unread_count = existing.unread_count;
                         last_read_id = existing.last_read_id.clone();
-                        visit_start_marker_id = existing.visit_start_marker_id.clone();
+                        // visit_start_marker_id intentionally NOT copied — reset on every
+                        // reconnect so the divider re-anchors to the new last_read_id.
                     }
                     let muted = self.muted_buffer_names.contains(&full_full_name);
                     if relay_last_read_id.is_some() {
@@ -823,6 +824,12 @@ impl WeeChatApp {
             ));
             buffer.messages = deque;
             if is_selected {
+                // Anchor the unread divider before advancing last_read_id.
+                // Handles the case where the buffer was already active at reconnect
+                // (select_buffer never re-fires), so the marker is still None here.
+                if buffer.visit_start_marker_id.is_none() {
+                    buffer.visit_start_marker_id = buffer.last_read_id.clone();
+                }
                 if let Some(last) = buffer.messages.back() {
                     buffer.last_read_id = Some(last.id.clone());
                 }

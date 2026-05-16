@@ -133,6 +133,7 @@ pub struct FsetState {
     pub edit_value: std::string::String,
     /// Optimistic values shown immediately after a change, before WeeChat echoes back.
     pub pending_values: HashMap<std::string::String, std::string::String>,
+    pub search: std::string::String,
 }
 
 impl Default for FsetState {
@@ -141,17 +142,16 @@ impl Default for FsetState {
             editing_option: None,
             edit_value: std::string::String::new(),
             pending_values: HashMap::new(),
+            search: std::string::String::new(),
         }
     }
 }
 
 /// Render the fset panel. Returns a list of actions the caller should process.
-/// `search` is an external string (the input bar text) used as the filter field.
 pub fn show_fset_panel(
     ui: &mut egui::Ui,
     lines: &VecDeque<Line>,
     state: &mut FsetState,
-    search: &mut String,
     font_size: f32,
     use_monospace: bool,
     surface_color: Color32,
@@ -177,35 +177,9 @@ pub fn show_fset_panel(
     let row_height = font_size + 8.0;
 
     // -----------------------------------------------------------------------
-    // Search / filter bar — driven by the external `search` string (input bar)
-    // -----------------------------------------------------------------------
-    Frame::none()
-        .fill(surface_color.linear_multiply(0.8))
-        .inner_margin(Margin::symmetric(16.0, 8.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("🔍").size(font_size));
-                let res = ui.add(
-                    TextEdit::singleline(search)
-                        .hint_text("Filter options…")
-                        .desired_width(ui.available_width() - 60.0)
-                        .font(font_id.clone()),
-                );
-                if res.changed() {
-                    state.editing_option = None;
-                }
-                if !search.is_empty() && ui.small_button("✕").clicked() {
-                    search.clear();
-                }
-            });
-        });
-
-    ui.separator();
-
-    // -----------------------------------------------------------------------
     // Filter options
     // -----------------------------------------------------------------------
-    let query = search.to_lowercase();
+    let query = state.search.to_lowercase();
     let filtered: Vec<&FsetOption> = options.iter()
         .filter(|o| query.is_empty() || o.name.to_lowercase().contains(&query))
         .collect();

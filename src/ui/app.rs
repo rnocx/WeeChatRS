@@ -857,7 +857,9 @@ impl WeeChatApp {
         if let Some(buffer) = self.buffer_by_id_mut(&id) {
             buffer.activity = BufferActivity::None;
             buffer.unread_count = 0;
-            buffer.visit_start_marker_id = buffer.last_read_id.clone();
+            if buffer.visit_start_marker_id.is_none() {
+                buffer.visit_start_marker_id = buffer.last_read_id.clone();
+            }
             let fetch_nicks = buffer.has_nicklist;
             if let Some((client, raw_id)) = self.client_for_buffer(&id) {
                 client.refresh_buffer(&raw_id);
@@ -1846,7 +1848,7 @@ impl eframe::App for WeeChatApp {
             self.nicklist_width = nicks_resp.response.rect.width();
         }
 
-        if current_buffer_id.is_some() && !is_fset_buffer {
+        if current_buffer_id.is_some() {
             // Is the SELECTED buffer's connection up? Different from any_connected when
             // multiple connections are configured and only some are alive.
             let selected_buffer_connected = current_buffer_id.as_ref()
@@ -2121,7 +2123,6 @@ impl eframe::App for WeeChatApp {
                                 ui,
                                 messages,
                                 &mut self.fset_state,
-                                &mut self.input_text,
                                 self.font_size,
                                 self.use_monospace,
                                 surface_color,
