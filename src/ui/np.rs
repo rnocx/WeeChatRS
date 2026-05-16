@@ -22,7 +22,7 @@ pub async fn get_now_playing() -> Option<NowPlaying> {
     return linux::detect().await;
 
     #[cfg(target_os = "windows")]
-    return windows::detect().await;
+    return smtc::detect().await;
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     return None;
@@ -210,38 +210,13 @@ mod linux {
 }
 
 #[cfg(target_os = "windows")]
-mod windows {
-    use std::os::windows::process::CommandExt;
+mod smtc {
+    use windows::Media::Control::{
+        GlobalSystemMediaTransportControlsSession,
+        GlobalSystemMediaTransportControlsSessionManager,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
+    };
     use super::{NowPlaying, search_url};
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    fn run_ps(script: &str) -> Option<String> {
-        let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .ok()?;
-        if !out.status.success() { return None; }
-        let raw = String::from_utf8_lossy(&out.stdout);
-        let s: String = raw
-            .chars()
-            .filter(|&c| {
-                if c.is_control() { return false; }
-                !matches!(c as u32,
-                    0x00AD |
-                    0x034F |
-                    0x200B..=0x200F |
-                    0x2028 | 0x2029 |
-                    0xFEFF |
-                    0xFFF9..=0xFFFB
-                )
-            })
-            .collect::<String>()
-            .trim()
-            .to_string();
-        if s.is_empty() { None } else { Some(s) }
-    }
 
     fn classify_source(app_id: &str) -> &'static str {
         let id = app_id.to_lowercase();
@@ -253,76 +228,71 @@ mod windows {
         else { "" }
     }
 
-    // Output format from PS scripts: "src|||artist|||title"
-    fn parse_output(raw: &str) -> (String, String) {
-        let mut parts = raw.splitn(3, "|||");
-        let src_id = parts.next().unwrap_or("").trim();
-        let artist  = parts.next().unwrap_or("").trim();
-        let title   = parts.next().unwrap_or("").trim();
-        let source  = classify_source(src_id).to_string();
+    async fn np_from_session(session: &GlobalSystemMediaTransportControlsSession) -> Option<NowPlaying> {
+        let info = session.GetPlaybackInfo().ok()?;
+        if info.PlaybackStatus().ok()? != PlaybackStatus::Playing { return None; }
+
+        let props = session.TryGetMediaPropertiesAsync().ok()?.await.ok()?;
+        let title = props.Title().ok()?.to_string();
+        let title = title.trim();
+        if title.is_empty() { return None; }
+
+        let artist = props.Artist().ok().map(|s| s.to_string()).unwrap_or_default();
+        let artist = artist.trim().to_string();
         let track = if artist.is_empty() {
             title.to_string()
         } else {
             format!("{} - {}", artist, title)
         };
-        (source, track)
-    }
 
-    const SMTC_CURRENT_SCRIPT: &str = r#"
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,
-         Windows.Media.Control, ContentType=WindowsRuntime]
-$mgr = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()
-$mgr.AsTask().Wait()
-$session = $mgr.Result.GetCurrentSession()
-if ($null -eq $session) { exit 1 }
-if ($session.GetPlaybackInfo().PlaybackStatus -ne 4) { exit 1 }
-$pi = $session.TryGetMediaPropertiesAsync(); $pi.AsTask().Wait()
-$props = $pi.Result
-if ([string]::IsNullOrWhiteSpace($props.Title)) { exit 1 }
-$artist = ([string]$props.Artist -replace '[\p{Cc}\p{Cf}]', '').Trim()
-$title  = ([string]$props.Title  -replace '[\p{Cc}\p{Cf}]', '').Trim()
-$src = $session.SourceAppUserModelId
-Write-Output "$src|||$artist|||$title"
-"#;
-
-    const SMTC_ALL_SCRIPT: &str = r#"
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,
-         Windows.Media.Control, ContentType=WindowsRuntime]
-$mgr = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()
-$mgr.AsTask().Wait()
-$sessions = $mgr.Result.GetSessions()
-$best = $null
-$bestSrc = ""
-$bestIsKnown = $false
-foreach ($s in $sessions) {
-    try {
-        if ($s.GetPlaybackInfo().PlaybackStatus -ne 4) { continue }
-        $pi = $s.TryGetMediaPropertiesAsync(); $pi.AsTask().Wait()
-        $props = $pi.Result
-        if ([string]::IsNullOrWhiteSpace($props.Title)) { continue }
-        $isKnown = $s.SourceAppUserModelId -match 'youtube|chrome|msedge|brave|vivaldi|orion|firefox|applemusic|itunes|spotify'
-        if ($isKnown -and -not $bestIsKnown) { $best = $props; $bestSrc = $s.SourceAppUserModelId; $bestIsKnown = $true }
-        elseif ($null -eq $best) { $best = $props; $bestSrc = $s.SourceAppUserModelId }
-    } catch { }
-}
-if ($null -eq $best) { exit 1 }
-$artist = ([string]$best.Artist -replace '[\p{Cc}\p{Cf}]', '').Trim()
-$title  = ([string]$best.Title  -replace '[\p{Cc}\p{Cf}]', '').Trim()
-Write-Output "$bestSrc|||$artist|||$title"
-"#;
-
-    pub async fn detect() -> Option<NowPlaying> {
-        let raw = tokio::task::spawn_blocking(|| {
-            run_ps(SMTC_CURRENT_SCRIPT).or_else(|| run_ps(SMTC_ALL_SCRIPT))
-        })
-        .await
-        .ok()??;
-
-        let (source, track) = parse_output(&raw);
-        if track.is_empty() { return None; }
+        let app_id = session.SourceAppUserModelId().ok()
+            .map(|s| s.to_string()).unwrap_or_default();
+        let source = classify_source(&app_id).to_string();
         let url = search_url(&source, &track);
         Some(NowPlaying { track, source, url })
+    }
+
+    // Not Send (WinRT types), run via block_on inside spawn_blocking.
+    async fn detect_winrt() -> Option<NowPlaying> {
+        let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+            .ok()?.await.ok()?;
+
+        if let Ok(session) = manager.GetCurrentSession() {
+            if let Some(np) = np_from_session(&session).await {
+                return Some(np);
+            }
+        }
+
+        let sessions = manager.GetSessions().ok()?;
+        let count = sessions.Size().unwrap_or(0);
+        let mut fallback: Option<NowPlaying> = None;
+
+        for i in 0..count {
+            if let Ok(session) = sessions.GetAt(i) {
+                let app_id = session.SourceAppUserModelId().ok()
+                    .map(|s| s.to_string()).unwrap_or_default();
+                if let Some(np) = np_from_session(&session).await {
+                    if !classify_source(&app_id).is_empty() {
+                        return Some(np);
+                    }
+                    if fallback.is_none() {
+                        fallback = Some(np);
+                    }
+                }
+            }
+        }
+
+        fallback
+    }
+
+    pub async fn detect() -> Option<NowPlaying> {
+        tokio::task::spawn_blocking(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .ok()?
+                .block_on(detect_winrt())
+        })
+        .await
+        .ok()?
     }
 }

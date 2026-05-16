@@ -45,6 +45,7 @@ block2 = ">=0.6.1, <0.8.0"
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 notify-rust = "4.11"
+windows = { version = "0.57", features = ["Media_Control", "Foundation_Collections"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
