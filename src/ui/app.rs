@@ -375,7 +375,9 @@ pub struct AppSettings {
     /// Separator between prefix column and message (matches weechat.look.prefix_suffix).
     #[serde(default = "default_prefix_suffix")]
     pub prefix_suffix: String,
-    /// Duration passed to files.interdo.me upload API (default "24h").
+    #[serde(default)]
+    pub file_share_service: crate::ui::fileshare::FileShareService,
+    /// Duration passed to Jirafeau upload API (default "day"). Ignored for 0x0.st.
     #[serde(default = "default_file_share_duration")]
     pub file_share_duration: String,
     #[serde(default)]
@@ -430,6 +432,7 @@ impl Default for AppSettings {
             connections: Vec::new(),
             prefix_align_max: 0,
             prefix_suffix: "│".to_string(),
+            file_share_service: crate::ui::fileshare::FileShareService::default(),
             file_share_duration: "day".to_string(),
             keybinds: KeybindsMap::default(),
             collapsed_servers: HashSet::new(),
@@ -592,6 +595,7 @@ pub struct WeeChatApp {
     pub(crate) file_share_rx: mpsc::UnboundedReceiver<Result<(String, String), String>>,
     pub(crate) file_share_uploading: bool,
     pub(crate) file_share_error: Option<String>,
+    pub(crate) file_share_service: crate::ui::fileshare::FileShareService,
     pub(crate) file_share_duration: String,
 
     // fset buffer panel state (search filter + inline edit)
@@ -745,6 +749,7 @@ impl WeeChatApp {
             file_share_rx,
             file_share_uploading: false,
             file_share_error: None,
+            file_share_service: settings.file_share_service,
             file_share_duration: settings.file_share_duration,
             keybinds: settings.keybinds,
             editing_keybind: None,
@@ -1048,6 +1053,7 @@ impl eframe::App for WeeChatApp {
             connections: self.profiles.clone(),
             prefix_align_max: self.prefix_align_max,
             prefix_suffix: self.prefix_suffix.clone(),
+            file_share_service: self.file_share_service.clone(),
             file_share_duration: self.file_share_duration.clone(),
             keybinds: self.keybinds.clone(),
             collapsed_servers: self.collapsed_servers.clone(),
@@ -1180,9 +1186,10 @@ impl eframe::App for WeeChatApp {
                     self.file_share_uploading = true;
                     self.file_share_error = None;
                     let duration = self.file_share_duration.clone();
+                    let service = self.file_share_service.clone();
                     let tx = self.file_share_tx.clone();
                     tokio::spawn(async move {
-                        let result = crate::ui::fileshare::upload(path, &duration).await;
+                        let result = crate::ui::fileshare::upload(path, &service, &duration).await;
                         let _ = tx.send(result.map(|url| (buf_id, url)));
                     });
                 }
@@ -1897,6 +1904,7 @@ impl eframe::App for WeeChatApp {
                                 self.file_share_uploading = true;
                                 self.file_share_error = None;
                                 let duration = self.file_share_duration.clone();
+                                let service = self.file_share_service.clone();
                                 let tx = self.file_share_tx.clone();
                                 tokio::spawn(async move {
                                     let handle = rfd::AsyncFileDialog::new().pick_file().await;
@@ -1908,7 +1916,7 @@ impl eframe::App for WeeChatApp {
                                         }
                                         Some(h) => h,
                                     };
-                                    let result = crate::ui::fileshare::upload(h.path().to_path_buf(), &duration).await;
+                                    let result = crate::ui::fileshare::upload(h.path().to_path_buf(), &service, &duration).await;
                                     let _ = tx.send(result.map(|url| (buf_id, url)));
                                 });
                             }

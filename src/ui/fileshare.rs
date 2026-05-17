@@ -1,15 +1,39 @@
 use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 
-const UPLOAD_URL: &str = "https://files.interdo.me/script.php";
-const DOWNLOAD_BASE: &str = "https://files.interdo.me/f.php";
+const JIRAFEAU_UPLOAD_URL: &str = "https://files.interdo.me/script.php";
+const JIRAFEAU_DOWNLOAD_BASE: &str = "https://files.interdo.me/f.php";
+const LITTERBOX_URL: &str = "https://litterbox.catbox.moe/resources/internals/api.php";
 
 /// Valid Jirafeau expiry keywords. Anything else falls back to "day".
-const VALID_TIMES: &[&str] = &[
+const JIRAFEAU_VALID_TIMES: &[&str] = &[
     "minute", "hour", "day", "week", "fortnight", "month", "quarter", "year", "none",
 ];
 
-/// Upload `path` to the file-share service and return the public download URL on success.
-pub async fn upload(path: PathBuf, duration: &str) -> Result<String, String> {
+/// Valid Litterbox expiry keywords. Anything else falls back to "24h".
+pub const LITTERBOX_TIMES: &[(&str, &str)] = &[
+    ("1h",  "1 hour"),
+    ("12h", "12 hours"),
+    ("24h", "24 hours"),
+    ("72h", "72 hours"),
+];
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default, Debug)]
+pub enum FileShareService {
+    #[default]
+    Jirafeau,
+    Litterbox,
+}
+
+/// Upload `path` to the selected service and return the public download URL on success.
+pub async fn upload(path: PathBuf, service: &FileShareService, duration: &str) -> Result<String, String> {
+    match service {
+        FileShareService::Jirafeau => upload_jirafeau(path, duration).await,
+        FileShareService::Litterbox => upload_litterbox(path, duration).await,
+    }
+}
+
+async fn upload_litterbox(path: PathBuf, duration: &str) -> Result<String, String> {
     let filename = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -21,7 +45,72 @@ pub async fn upload(path: PathBuf, duration: &str) -> Result<String, String> {
 
     let mime = mime_for(&filename);
 
-    let time = if VALID_TIMES.contains(&duration) { duration } else { "day" };
+    let time = if LITTERBOX_TIMES.iter().any(|(v, _)| *v == duration) {
+        duration
+    } else {
+        "24h"
+    };
+
+    let file_part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(filename)
+        .mime_str(mime)
+        .map_err(|e| format!("MIME error: {}", e))?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("reqtype", "fileupload")
+        .text("time", time.to_string())
+        .part("fileToUpload", file_part);
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("WeechatRS/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let resp = client
+        .post(LITTERBOX_URL)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Upload failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let body = body.trim();
+        return Err(if body.is_empty() {
+            format!("Server returned {}", status)
+        } else {
+            format!("Server returned {}: {}", status, body)
+        });
+    }
+
+    let url = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?
+        .trim()
+        .to_string();
+
+    if url.is_empty() || url.starts_with("err") {
+        return Err(format!("Server error: {}", url));
+    }
+
+    Ok(url)
+}
+
+async fn upload_jirafeau(path: PathBuf, duration: &str) -> Result<String, String> {
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("Cannot read file: {}", e))?;
+
+    let mime = mime_for(&filename);
+
+    let time = if JIRAFEAU_VALID_TIMES.contains(&duration) { duration } else { "day" };
 
     let file_part = reqwest::multipart::Part::bytes(bytes)
         .file_name(filename)
@@ -42,7 +131,7 @@ pub async fn upload(path: PathBuf, duration: &str) -> Result<String, String> {
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
     let resp = client
-        .post(UPLOAD_URL)
+        .post(JIRAFEAU_UPLOAD_URL)
         .header("Connection", "close")
         .multipart(form)
         .send()
@@ -69,7 +158,7 @@ pub async fn upload(path: PathBuf, duration: &str) -> Result<String, String> {
         return Err(format!("Server error: {}", first_line));
     }
 
-    Ok(format!("{}?h={}", DOWNLOAD_BASE, first_line))
+    Ok(format!("{}?h={}", JIRAFEAU_DOWNLOAD_BASE, first_line))
 }
 
 fn mime_for(filename: &str) -> &'static str {
