@@ -559,8 +559,10 @@ pub struct WeeChatApp {
     // Per-buffer max prefix pixel width tracked across frames for stable column alignment.
     pub(crate) prefix_col_widths: HashMap<String, f32>,
 
-    // URL captured at right-click time; stays stable while the context menu is open.
-    pub(crate) ctx_menu_hovered_url: Option<String>,
+    // Context menu opened by secondary click on a message row.
+    // Tuple: (click_pos, plain_message, plain_prefix, hovered_url)
+    ctx_menu_state: Option<(egui::Pos2, String, String, Option<String>)>,
+    ctx_menu_just_opened: bool,
 
     // Keybinds
     pub(crate) keybinds: KeybindsMap,
@@ -733,7 +735,8 @@ impl WeeChatApp {
             prefix_align_max: settings.prefix_align_max,
             prefix_suffix: settings.prefix_suffix,
             prefix_col_widths: HashMap::new(),
-            ctx_menu_hovered_url: None,
+            ctx_menu_state: None,
+            ctx_menu_just_opened: false,
             np_tx,
             np_rx,
             sysinfo_tx,
@@ -2510,38 +2513,17 @@ impl eframe::App for WeeChatApp {
                                     }); // end highlight frame
                                     let plain_message = line.plain_message.clone();
                                     let plain_prefix = line.plain_prefix.clone();
-                                    let interactable = bg_resp.unwrap_or_else(|| row_resp.response.clone());
-                                    // While the row is hovered (pointer in Middle layer, popup not
-                                    // open), keep the stored URL current.  Once the popup opens the
-                                    // pointer moves into the Foreground layer so the row is no longer
-                                    // hovered, which freezes ctx_menu_hovered_url at the right value.
-                                    if interactable.hovered() {
-                                        self.ctx_menu_hovered_url = row_hovered_url.clone();
+                                    // Detect secondary (right) click via raw input — bypasses the
+                                    // egui hit test so image/expand buttons still win primary clicks.
+                                    let row_rect = row_resp.response.rect;
+                                    if ui.input(|i| {
+                                        i.pointer.button_clicked(egui::PointerButton::Secondary)
+                                        && i.pointer.interact_pos().map_or(false, |p| row_rect.contains(p))
+                                    }) {
+                                        let click_pos = ui.input(|i| i.pointer.interact_pos().unwrap_or(row_rect.left_bottom()));
+                                        self.ctx_menu_state = Some((click_pos, plain_message, plain_prefix, row_hovered_url.clone()));
+                                        self.ctx_menu_just_opened = true;
                                     }
-                                    let menu_url = self.ctx_menu_hovered_url.clone();
-                                    interactable.context_menu(|ui| {
-                                        if let Some(ref url) = menu_url {
-                                            if ui.button("Open URL").clicked() {
-                                                ui.ctx().output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url.clone())));
-                                                ui.close_menu();
-                                            }
-                                            if ui.button("Copy URL").clicked() {
-                                                ui.ctx().output_mut(|o| o.copied_text = url.clone());
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                        }
-                                        if ui.button("Copy message").clicked() {
-                                            ui.ctx().output_mut(|o| o.copied_text = plain_message.clone());
-                                            ui.close_menu();
-                                        }
-                                        if !plain_prefix.is_empty() {
-                                            if ui.button("Copy with sender").clicked() {
-                                                ui.ctx().output_mut(|o| o.copied_text = format!("<{}> {}", plain_prefix, plain_message));
-                                                ui.close_menu();
-                                            }
-                                        }
-                                    });
                                     }); // end push_id
                                 }
                             }
@@ -2553,6 +2535,65 @@ impl eframe::App for WeeChatApp {
                 ui.centered_and_justified(|ui| { ui.label(egui::RichText::new("Select a buffer to start chatting").color(text_muted).size(16.0)); });
             }
         });
+
+        // -----------------------------------------------------------------------
+        // Row context menu (rendered as a Foreground Area to avoid egui hit-test
+        // conflicts with the image/expand buttons in the Middle layer).
+        // -----------------------------------------------------------------------
+        let mut close_ctx_menu = false;
+        if let Some((pos, ref msg, ref prefix, ref url)) = self.ctx_menu_state {
+            let msg = msg.clone();
+            let prefix = prefix.clone();
+            let url = url.clone();
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close_ctx_menu = true;
+            }
+            let area_resp = egui::Area::new(egui::Id::new("row_context_menu"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos)
+                .show(ctx, |ui| {
+                    egui::Frame::menu(ui.style())
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            ui.visuals().window_fill.r(),
+                            ui.visuals().window_fill.g(),
+                            ui.visuals().window_fill.b(),
+                            242,
+                        ))
+                        .show(ui, |ui| {
+                            ui.set_max_width(200.0);
+                            if let Some(ref u) = url {
+                                if ui.button("Open URL").clicked() {
+                                    ctx.output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(u.clone())));
+                                    close_ctx_menu = true;
+                                }
+                                if ui.button("Copy URL").clicked() {
+                                    ctx.output_mut(|o| o.copied_text = u.clone());
+                                    close_ctx_menu = true;
+                                }
+                                ui.separator();
+                            }
+                            if ui.button("Copy message").clicked() {
+                                ctx.output_mut(|o| o.copied_text = msg.clone());
+                                close_ctx_menu = true;
+                            }
+                            if !prefix.is_empty() {
+                                if ui.button("Copy with sender").clicked() {
+                                    ctx.output_mut(|o| o.copied_text = format!("<{}> {}", prefix, msg));
+                                    close_ctx_menu = true;
+                                }
+                            }
+                        });
+                });
+            // Don't close on the same frame we opened (avoids immediate dismiss
+            // when a secondary click also registers as clicked_elsewhere).
+            if !self.ctx_menu_just_opened && area_resp.response.clicked_elsewhere() {
+                close_ctx_menu = true;
+            }
+        }
+        self.ctx_menu_just_opened = false;
+        if close_ctx_menu {
+            self.ctx_menu_state = None;
+        }
 
         if let Some((buf_id, count)) = pending_load_more {
             self.loading_more_buffer_id = Some(buf_id.clone());

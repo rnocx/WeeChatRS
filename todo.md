@@ -12,7 +12,7 @@
 ## ⌨️ UX & Productivity
 - [x] Command history — Arrow Up/Down cycles sent messages in the input bar
 - [x] Buffer search — `Ctrl+F` filters current buffer scrollback
-- [x] Context menus — right-click nicks (query, whois); right-click buffers (leave, close)
+- [x] Context menus — right-click nicks (query, whois); right-click buffers (leave, hide, close); right-click messages (copy message, copy URL)
 - [x] Tab completion — nick completion with cycling
 - [x] Emoji completion — `:name` + Tab inserts emoji (e.g. `:fire` → 🔥), cycles through matches
 - [x] Server group headers — labeled dividers between networks in buffer list, toggleable in Settings
@@ -21,9 +21,10 @@
 - [x] Buffer reordering — drag and drop buffers and server group headers; moving a server header moves its entire channel tree; order persists across restarts and reconnects
 - [ ] Spell checking — client-side via `symspell` (pure Rust, no system deps); check words as the user types and show a suggestions popup above the input bar when the cursor is on a misspelled word; stretch goal: paint red underlines over the `TextEdit` using `ui.painter()` and galley word positions
 - [ ] `Ctrl+K` quick buffer switcher — fuzzy find across all buffers
-- [ ] `Alt+1-9` jump to buffer by number
-- [ ] Keybinding editor — a window listing all keyboard shortcuts with the ability to rebind them; shortcuts stored in `AppSettings` and read at runtime instead of being hardcoded; accessible from the Settings window
-- [ ] `/set` and `/fset` UX — currently users must type the full option path (e.g. `/set irc.look.highlight_pv " "`); add Tab completion for option names and, for `/fset`, a browsable settings panel similar to the WeeChat TUI `fset` buffer
+- [x] `Alt+1-9` jump to buffer by number
+- [x] Keybinding editor — Settings window lists all shortcuts with live rebinding; stored in `AppSettings` via `KeybindsMap`, dispatched at runtime via `keybinds.rs`
+- [x] `/fset` browsable panel *(beta)* — `/fset` opens an inline settings browser; click any value to edit, reset-to-default button for modified options
+- [ ] `/set` tab completion — Tab completion for WeeChat option names in the input bar
 
 ## 🎨 Styling & Polishing
 - [x] Modern UI redesign — card-style login, layered surfaces, rounded aesthetic
@@ -44,7 +45,8 @@
 ## 📷 Media & Attachments
 - [x] Inline images — `🖼 preview` button on image URLs (.png/.jpg/.gif/.webp); click to load and display inline, toggleable in Settings
 - [x] Link previews — `🔗 preview` button on non-image URLs; fetches OG tags (title, description, og:image), renders card with left accent bar, toggleable in Settings
-- [ ] File drag & drop — upload via common paste services
+- [x] File & image sharing — `/share` uploads a file from disk to a paste service and posts the URL; configurable upload duration; progress indicator in the toolbar
+- [ ] File drag & drop — drag a file onto the chat window to upload and share, without using `/share`
 - [ ] Code syntax highlighting — `syntect` for fenced code blocks in chat ( debatable if this should exist)
 
 ---

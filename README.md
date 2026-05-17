@@ -8,41 +8,91 @@
 
 ## Features
 
+### Connectivity
 - **Dual backend** — connects to a WeeChat Relay (WebSocket) *or* directly to any IRC server / soju bouncer (TCP/TLS)
 - **Full WeeChat Relay API v2** over WebSocket with SSL/TLS
 - **IRCv3** — extensive capability negotiation; see [IRCv3 support](#ircv3-support) below
 - **soju bouncer support** — network list, per-network buffers, read-marker sync; see [Soju support](#soju-support) below
+- **SSH tunnel** — built-in SSH port-forwarding; connect to relays on private networks without VPN; uses your SSH agent, `~/.ssh` keys, or a saved password
+- **Auto-reconnect** — exponential backoff on dropped connections, with dead-connection detection (IRC PING/PONG keepalive; WebSocket idle timeout)
+- **Multiple connection profiles** — save and switch between named relay/IRC/bouncer profiles
+
+### Chat & UI
 - **Advanced ANSI engine** — 16-color, 256-color, and TrueColor (RGB) sequences rendered natively
 - **Read synchronization** — bidirectional sync of read markers; unread divider line shows where you left off
-- **Server group headers** — buffer list automatically groups channels by network with labeled dividers (toggleable)
+- **Inline images** — `🖼 preview` button on image URLs (`.png` `.jpg` `.gif` `.webp`); click to load and display inline
+- **Link previews** — `🔗 preview` button on non-image URLs; fetches OpenGraph tags and renders a preview card
+- **Server group headers** — buffer list groups channels by network with labeled dividers (toggleable)
 - **Tab completion** — nicknames and emoji (`:fire` + Tab → 🔥), cycling through all matches
 - **Command history** — Arrow Up/Down in the input bar
 - **Inline search** — `Ctrl+F` filters current buffer scrollback
-- **Context menus** — right-click nicks for `/query` and `/whois`; right-click buffers to leave or close
+- **Context menus** — right-click messages to copy; right-click nicks for `/query` and `/whois`; right-click buffers to leave, hide, or close
 - **Buffer reordering** — drag and drop buffers and server groups in the buffer list; order persists across restarts
-- **Auto-reconnect** — exponential backoff on dropped connections, with dead-connection detection (IRC PING/PONG keepalive; WebSocket idle timeout)
+- **fset integration** *(beta)* — `/fset` opens a browsable settings panel directly in the chat area; edit WeeChat options by clicking values, with reset-to-default support
+
+### Commands
+- **`/np`** — posts now-playing track to the current channel; detects Apple Music, Spotify, Vox, and YouTube Music on macOS; playerctl on Linux; System Media Transport Controls (WinRT) on Windows
+- **`/sysinfo`** — posts system information (OS, CPU, memory) to the current channel
+- **`/share`** — uploads a file or image from disk and posts the URL; supports duration control
+
+### Settings & Customization
+- **Keybind editor** — configure all keyboard shortcuts from the Settings window; shortcuts are saved per-profile and take effect immediately
 - **Theming** — import any `.itermcolors` file; background, foreground, and all 16 ANSI colors applied live
-- **Native notifications** — system alerts for highlights and private messages
+- **Adaptive theme** — automatically derives accent color and surface tones from the imported palette
+- **Native notifications** — system alerts for highlights and private messages (macOS, Windows, Linux)
 - **Opacity control** — real-time transparency adjustment
+- **Font & layout options** — font size, monospace toggle, prefix column alignment, timestamp display
 
 ## Keyboard Shortcuts
 
+Default shortcuts — all are rebindable in **Settings → Keybinds**.
+
 | Shortcut | Action |
 | :--- | :--- |
-| `Meta + ↑ / ↓` | Cycle buffers |
-| `Meta + B` | Toggle buffer list |
-| `Meta + N` | Toggle nick list |
-| `Meta + T` | Toggle toolbar |
-| `Ctrl + F` | Toggle message search |
+| `⌘/Ctrl + ↑ / ↓` | Cycle buffers |
+| `⌘/Ctrl + B` | Toggle buffer list |
+| `⌘/Ctrl + N` | Toggle nick list |
+| `⌘/Ctrl + T` | Toggle toolbar |
+| `⌘/Ctrl + F` | Toggle message search |
+| `⌘/Ctrl + K` | Jump to next unread buffer |
+| `Alt + 1–9` | Jump to buffer by number |
 | `Tab` | Complete nick or emoji (cycles matches) |
 | `Arrow ↑ / ↓` | Cycle command history (input bar) |
 | `Enter` | Send message |
+| Right-click message | Copy message / Copy URL |
 | Right-click nick | Query / Whois |
-| Right-click buffer | Leave / Close |
+| Right-click buffer | Mute / Hide / Leave / Close |
+
+## Screenshots
+
+![Main chat view](screenshots/scrnshot_default.png)
+*Main chat window — buffer list on the left, ANSI-colored IRC messages in the center, nick list on the right*
+
+![WeeChat Relay connection dialog](screenshots/connection_weechat.png)
+*WeeChat Relay connection — host, port, password, SSL toggle, and optional SSH tunnel*
+
+![IRC connection dialog](screenshots/connection_irc.png)
+*Direct IRC/soju connection — server, port, nick, SASL auth, and TLS options*
+
+![fset settings panel](screenshots/fset_integration.png)
+*fset integration (beta) — browse and edit WeeChat options directly in the client*
+
+![Settings window](screenshots/scrnshot_settings.png)
+*Settings panel — display options, keybind editor, font size, opacity, and theme import*
+
+![Highlight notification in chat](screenshots/scrnshot_with_hilight.png)
+*Highlight — nick mention shown with accent color and native system notification*
+
+![Light theme](screenshots/scrnshot_with_light_theme.png)
+*Light color theme — full UI with imported `.itermcolors` palette*
 
 ## Platform Support
 
-> **Note:** WeeChatRS has only been tested on **macOS**. It may build and run on Linux and Windows, but these platforms are untested. Contributions and bug reports for other platforms are welcome.
+| Platform | Status |
+| :--- | :--- |
+| macOS (Apple Silicon + Intel) | Fully supported |
+| Linux x86_64 | Supported |
+| Windows x86_64 | Supported |
 
 ## WeeChat Requirements
 
@@ -145,35 +195,19 @@ src/
     ansi.rs                  — ANSI SGR parser (8-color, 256-color, TrueColor,
                                bold, italic, underline, URL detection)
     theme.rs                 — AppTheme, .itermcolors plist parser, accent color derivation
-    settings.rs              — Settings and Connections window UI
+    settings.rs              — Settings and Connections window UI, SSH tunnel config
+    keybinds.rs              — KeybindAction enum, SerdeModifiers, KeybindsMap,
+                               rebindable shortcut storage and runtime dispatch
+    fset.rs                  — fset buffer parser and inline settings panel renderer
+    np.rs                    — /np now-playing detection (macOS osascript, Linux
+                               playerctl, Windows WinRT SMTC)
+    ssh_tunnel.rs            — SSH port-forward tunnel via openssh subprocess
     emoji.rs                 — emoji shortcode table (~150 entries)
 ```
 
-## Screenshots
-
-![Main chat view with dark theme](screenshots/scrnshot_default.png)
-*Main chat window — buffer list on the left, ANSI-colored IRC messages in the center, nick list on the right*
-
-![Login dialog](screenshots/scrnshot_login.png)
-*Connection dialog — host, port, password, SSL toggle, and auto-reconnect option*
-
-![Settings window](screenshots/scrnshot_settings.png)
-*Settings panel — display options, font size, opacity slider, and theme import*
-
-![Highlight notification in chat](screenshots/scrnshot_with_hilight.png)
-*Highlight notification — nick mention shown with accent color in the message view*
-
-![Light theme](screenshots/scrnshot_with_light_theme.png)
-*Light color theme applied — full UI with settings window open*
-
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. See `todo.md` for planned features and known issues.
-
-## Development Notes
-
-[Claude Code](https://claude.ai/code) was used throughout development for debugging, refactoring, and release management and logo generation. All code has been reviewed and tested by the project author.
-a new logo is something we are looking for, but we are no graphical artists. 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. See `TODO.md` for planned features and known issues.
 
 ## License
 
