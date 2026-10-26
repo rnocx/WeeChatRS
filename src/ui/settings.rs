@@ -2,478 +2,390 @@ use crate::ui::theme::{AppTheme, ThemeColor};
 use crate::ui::app::{WeeChatApp, ConnectionProfile, BackendType};
 use crate::ui::fonts;
 use crate::ui::icons;
-use egui::{Color32, Vec2, RichText, ScrollArea, Frame, CornerRadius, Margin, Stroke};
+use egui::{Color32, Vec2, RichText, ScrollArea, Frame, CornerRadius, Margin, Stroke, ViewportBuilder, ViewportCommand, ViewportId};
 use egui::color_picker::{color_edit_button_srgba, Alpha};
 
+/// Sections in the Settings window sidebar.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(crate) enum SettingsSection {
+    #[default]
+    General,
+    Chat,
+    Appearance,
+    Theme,
+    FileSharing,
+    Keybinds,
+}
+
+impl SettingsSection {
+    const ALL: [Self; 6] = [Self::General, Self::Chat, Self::Appearance, Self::Theme, Self::FileSharing, Self::Keybinds];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Chat => "Chat",
+            Self::Appearance => "Appearance",
+            Self::Theme => "Theme",
+            Self::FileSharing => "File sharing",
+            Self::Keybinds => "Keybinds",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::General => icons::GEAR,
+            Self::Chat => icons::CHAT_CIRCLE_TEXT,
+            Self::Appearance => icons::PALETTE,
+            Self::Theme => icons::SWATCHES,
+            Self::FileSharing => icons::UPLOAD_SIMPLE,
+            Self::Keybinds => icons::KEYBOARD,
+        }
+    }
+}
+
+/// Colours shared by the Settings and Connections windows.
+struct Palette {
+    accent: Color32,
+    /// Opaque window background (the main window's fills carry the opacity setting).
+    window: Color32,
+    sidebar: Color32,
+    card: Color32,
+    border: Color32,
+    secondary_fill: Color32,
+    secondary_stroke: Stroke,
+    danger: Color32,
+}
+
+impl Palette {
+    fn new(accent: Color32, is_light: bool) -> Self {
+        Self {
+            accent,
+            window: if is_light { Color32::from_gray(240) } else { Color32::from_rgb(30, 30, 38) },
+            sidebar: if is_light { Color32::from_gray(228) } else { Color32::from_rgb(24, 24, 31) },
+            card: if is_light { Color32::from_gray(228) } else { Color32::from_rgb(38, 38, 48) },
+            border: if is_light { Color32::from_gray(200) } else { Color32::from_gray(55) },
+            secondary_fill: Color32::from_rgba_unmultiplied(100, 149, 237, if is_light { 30 } else { 40 }),
+            secondary_stroke: Stroke::new(1.0, accent.linear_multiply(0.6)),
+            danger: Color32::from_rgb(185, 55, 55),
+        }
+    }
+}
+
+/// Builder for a tool window: titled, sized, and on first show centred over the main window.
+fn tool_window(title: &str, size: [f32; 2], min_size: [f32; 2], pos: egui::Pos2) -> ViewportBuilder {
+    let builder = ViewportBuilder::default()
+        .with_title(title)
+        .with_inner_size(size)
+        .with_min_inner_size(min_size)
+        .with_position(pos);
+    // macOS: same opaque, theme-coloured titlebar as the main window (see macos_titlebar).
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .with_fullsize_content_view(true)
+        .with_titlebar_shown(false)
+        .with_title_shown(false);
+    builder
+}
+
+/// Where to open a window of `size` so it's centred over the main window. Called from the
+/// main viewport; the result is kept while the window is open so egui doesn't move it back
+/// after the user drags it.
+fn centered_over_main(ctx: &egui::Context, size: [f32; 2]) -> egui::Pos2 {
+    let main = ctx.input(|i| i.viewport().outer_rect).unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 768.0)));
+    (main.center() - egui::vec2(size[0], size[1]) / 2.0).max(main.min)
+}
+
+fn section_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(14.0);
+    ui.label(RichText::new(text).strong());
+    ui.add_space(4.0);
+}
+
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).small().color(ui.visuals().weak_text_color()));
+}
+
+const SETTINGS_SIZE: [f32; 2] = [760.0, 560.0];
+const CONNECTIONS_SIZE: [f32; 2] = [620.0, 520.0];
+
 impl WeeChatApp {
-    /// Renders settings directly into `ui` (called from inside the central panel so it works
-    /// in macOS fullscreen and every other windowing mode without z-order issues).
-    pub(crate) fn show_settings_window(&mut self, ui: &mut egui::Ui, accent_color: Color32, is_light: bool) {
-        let mut show_filtered_lines = self.show_filtered_lines;
-        let mut colored_nicks = self.colored_nicks;
-        let mut font_size = self.font_size;
-        let mut use_monospace = self.use_monospace;
-        let mut show_timestamps = self.show_timestamps;
-        let mut auto_reconnect = self.auto_reconnect;
-        let mut show_titlebar = self.show_titlebar;
-        let mut show_server_headers = self.show_server_headers;
-        let mut show_inline_images = self.show_inline_images;
-        let mut show_link_previews = self.show_link_previews;
-        let mut show_hidden_buffers = self.show_hidden_buffers;
-        let mut emoji_rendering = self.emoji_rendering;
-        let mut opacity = self.opacity;
-        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-        let mut blur_background = self.blur_background;
-        let mut prefix_align_max = self.prefix_align_max;
-        let mut prefix_suffix = self.prefix_suffix.clone();
-        let mut close = false;
-        let mut reset_theme = false;
-        let mut new_font: Option<(String, String)> = None;
-        let mut reset_font = false;
-        let mut adaptive_theme = self.adaptive_theme;
+    fn settings_viewport_id() -> ViewportId { ViewportId::from_hash_of("weechatrs_settings") }
+    fn connections_viewport_id() -> ViewportId { ViewportId::from_hash_of("weechatrs_connections") }
 
-        let danger_color = Color32::from_rgb(185, 55, 55);
-        let secondary_fill = if is_light {
-            Color32::from_rgba_unmultiplied(100, 149, 237, 30)
-        } else {
-            Color32::from_rgba_unmultiplied(100, 149, 237, 40)
-        };
-        let secondary_stroke = Stroke::new(1.0, accent_color.linear_multiply(0.6));
-        let opaque_fill = if is_light { Color32::from_gray(235) } else { Color32::from_rgb(38, 38, 48) };
-        let border_color = if is_light { Color32::from_gray(200) } else { Color32::from_gray(55) };
+    /// Open the Settings window, or bring it to the front if it's already open.
+    pub(crate) fn open_settings(&mut self, ctx: &egui::Context) {
+        if self.show_settings {
+            ctx.send_viewport_cmd_to(Self::settings_viewport_id(), ViewportCommand::Focus);
+        }
+        self.show_settings = true;
+    }
 
-        // Close on Escape.
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.show_settings = false;
+    /// Open the Connections window, or bring it to the front if it's already open.
+    pub(crate) fn open_connections(&mut self, ctx: &egui::Context) {
+        if self.show_connections {
+            ctx.send_viewport_cmd_to(Self::connections_viewport_id(), ViewportCommand::Focus);
+        }
+        self.show_connections = true;
+    }
+
+    /// Settings as its own native window (an in-app window where the platform can't open
+    /// more windows). Call once per frame from the main viewport.
+    pub(crate) fn show_settings_window(&mut self, ctx: &egui::Context, accent_color: Color32, is_light: bool) {
+        if !self.show_settings {
+            self.settings_window_pos = None;
             return;
         }
+        if self.settings_window_pos.is_none() {
+            // Just opened: an immediate viewport only repaints with the main window, so ask for
+            // another pass or it can stay blank until the next input event.
+            ctx.request_repaint();
+        }
+        let pos = *self.settings_window_pos.get_or_insert_with(|| centered_over_main(ctx, SETTINGS_SIZE));
+        let builder = tool_window("WeeChatRS Settings", SETTINGS_SIZE, [560.0, 380.0], pos);
+        let palette = Palette::new(accent_color, is_light);
+        let mut close = false;
+        ctx.show_viewport_immediate(Self::settings_viewport_id(), builder, |ui, class| {
+            #[cfg(target_os = "macos")]
+            if class == egui::ViewportClass::Immediate {
+                let title_color = ui.visuals().weak_text_color();
+                crate::ui::app::macos_titlebar(ui, "WeeChatRS Settings", palette.window, palette.border, title_color);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = class;
+            // Esc closes, except while a keybind is being captured (Esc cancels that).
+            if ui.input(|i| i.viewport().close_requested()
+                || (self.editing_keybind.is_none() && i.key_pressed(egui::Key::Escape)))
+            {
+                close = true;
+            }
+            self.settings_contents(ui, &palette);
+        });
+        if close {
+            self.show_settings = false;
+            self.editing_keybind = None;
+        }
+    }
 
-        ui.vertical_centered(|ui| {
-            ui.add_space(24.0);
-            Frame::NONE
-                .fill(opaque_fill)
-                .corner_radius(CornerRadius::same(12))
-                .stroke(Stroke::new(1.0, border_color))
-                .inner_margin(Margin::same(24))
-                .show(ui, |ui| {
-                    ui.set_max_width(540.0);
-
-                    // Header row
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new("Settings").strong().size(18.0));
-                            ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(11.0).color(accent_color.linear_multiply(0.7)));
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(RichText::new(icons::X).size(16.0)).clicked() {
-                                close = true;
-                            }
-                        });
-                    });
+    fn settings_contents(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        egui::Panel::left("settings_nav")
+            .resizable(false)
+            .exact_size(184.0)
+            .frame(Frame::NONE.fill(p.sidebar).inner_margin(Margin::symmetric(10, 16)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
                     ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-
-                    ScrollArea::vertical().show(ui, |ui| {
-                        // ── General settings ───────────────────────────────────
-                        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                            ui.checkbox(&mut show_filtered_lines, "Show filtered lines");
-                            ui.checkbox(&mut colored_nicks, "Colored nicknames in list");
-                            ui.checkbox(&mut show_timestamps, "Show timestamps");
-                            ui.horizontal(|ui| {
-                                ui.label("Nick column max width (chars):");
-                                ui.add(egui::DragValue::new(&mut prefix_align_max).range(0usize..=64usize).speed(1));
-                                ui.label(RichText::new("0 = auto").small().color(ui.visuals().weak_text_color()));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Nick/message separator:");
-                                ui.add(egui::TextEdit::singleline(&mut prefix_suffix).desired_width(40.0));
-                                ui.label(RichText::new("weechat.look.prefix_suffix").small().color(ui.visuals().weak_text_color()));
-                            });
-                            ui.checkbox(&mut auto_reconnect, "Auto-reconnect on drop");
-                            ui.checkbox(&mut show_titlebar, "Show Topic/Modes Titlebar");
-                            ui.checkbox(&mut show_server_headers, "Show server group headers in buffer list");
-                            ui.checkbox(&mut show_inline_images, "Show inline image previews (preview button on image URLs)");
-                            ui.checkbox(&mut show_link_previews, "Show link previews (preview button on URLs)");
-                            ui.checkbox(&mut show_hidden_buffers, "Show hidden buffers in buffer list");
-                            ui.checkbox(&mut emoji_rendering, "Color emoji rendering (requires emojinize script on WeeChat server)");
-                            if ui.button(format!("{} Send test notification", icons::BELL)).clicked() {
-                                crate::ui::notify::show(crate::ui::notify::Notification {
-                                    app_name: "WeeChatRS".to_string(),
-                                    title: "WeeChatRS".to_string(),
-                                    body: "Notifications are working.".to_string(),
-                                });
-                            }
-                        });
-
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("File Sharing").strong());
-                        ui.horizontal(|ui| {
-                            use crate::ui::fileshare::FileShareService;
-                            ui.label("Service:");
-                            egui::ComboBox::from_id_salt("file_share_service_combo")
-                                .selected_text(match self.file_share_service {
-                                    FileShareService::Jirafeau => "Jirafeau (files.interdo.me)",
-                                    FileShareService::Litterbox => "Litterbox (litterbox.catbox.moe)",
-                                })
-                                .width(240.0)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.file_share_service, FileShareService::Jirafeau,  "Jirafeau (files.interdo.me)");
-                                    ui.selectable_value(&mut self.file_share_service, FileShareService::Litterbox, "Litterbox (litterbox.catbox.moe)");
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            use crate::ui::fileshare::FileShareService;
-                            ui.label("Upload expiry:");
-                            match self.file_share_service {
-                                FileShareService::Jirafeau => {
-                                    const DURATIONS: &[(&str, &str)] = &[
-                                        ("minute",    "1 minute"),
-                                        ("hour",      "1 hour"),
-                                        ("day",       "1 day"),
-                                        ("week",      "1 week"),
-                                        ("fortnight", "2 weeks"),
-                                        ("month",     "1 month"),
-                                        ("quarter",   "3 months"),
-                                        ("year",      "1 year"),
-                                        ("none",      "Never expires"),
-                                    ];
-                                    let selected_label = DURATIONS.iter()
-                                        .find(|(v, _)| *v == self.file_share_duration)
-                                        .map(|(_, l)| *l)
-                                        .unwrap_or("1 day");
-                                    egui::ComboBox::from_id_salt("file_share_duration_combo")
-                                        .selected_text(selected_label)
-                                        .width(120.0)
-                                        .show_ui(ui, |ui| {
-                                            for &(value, label) in DURATIONS {
-                                                ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
-                                            }
-                                        });
-                                }
-                                FileShareService::Litterbox => {
-                                    let selected_label = crate::ui::fileshare::LITTERBOX_TIMES.iter()
-                                        .find(|(v, _)| *v == self.file_share_duration)
-                                        .map(|(_, l)| *l)
-                                        .unwrap_or("24 hours");
-                                    egui::ComboBox::from_id_salt("file_share_duration_combo")
-                                        .selected_text(selected_label)
-                                        .width(120.0)
-                                        .show_ui(ui, |ui| {
-                                            for &(value, label) in crate::ui::fileshare::LITTERBOX_TIMES {
-                                                ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
-                                            }
-                                        });
-                                }
-                            }
-                        });
-
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("Appearance").strong());
-                        ui.horizontal(|ui| {
-                            ui.label("Font size:");
-                            let sizes: &[f32] = &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 20.0, 22.0, 24.0];
-                            egui::ComboBox::from_id_salt("font_size_combo")
-                                .selected_text(format!("{}px", font_size as u32))
-                                .width(80.0)
-                                .show_ui(ui, |ui| {
-                                    for &size in sizes {
-                                        ui.selectable_value(&mut font_size, size, format!("{}px", size as u32));
-                                    }
-                                });
-                        });
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            ui.label("Font family:");
-                            let selected_label = if self.font_name.is_empty() {
-                                "Default".to_string()
-                            } else {
-                                self.font_name.clone()
-                            };
-                            let combo_resp = egui::ComboBox::from_id_salt("font_family_combo")
-                                .selected_text(&selected_label)
-                                .width(220.0)
-                                .show_ui(ui, |ui| {
-                                    // Search field at the top of the popup.
-                                    let search_edit = ui.add(
-                                        egui::TextEdit::singleline(&mut self.font_search)
-                                            .hint_text("Search fonts…")
-                                            .desired_width(f32::INFINITY),
-                                    );
-                                    // Auto-focus the search field when the popup first opens.
-                                    if search_edit.gained_focus() || (!search_edit.has_focus() && egui::Popup::is_any_open(ui.ctx()) ) {
-                                        search_edit.request_focus();
-                                    }
-                                    ui.separator();
-                                    if ui.selectable_label(self.font_name.is_empty(), "Default").clicked() {
-                                        reset_font = true;
-                                        self.font_search.clear();
-                                    }
-                                    ui.separator();
-                                    let query = self.font_search.to_lowercase();
-                                    for (name, path) in &self.available_fonts {
-                                        if query.is_empty() || name.to_lowercase().contains(&query) {
-                                            let selected = name.as_str() == self.font_name.as_str();
-                                            if ui.selectable_label(selected, name.as_str()).clicked() {
-                                                new_font = Some((name.clone(), path.clone()));
-                                                self.font_search.clear();
-                                            }
-                                        }
-                                    }
-                                });
-                            // Clear search when the dropdown closes.
-                            if combo_resp.inner.is_none() {
-                                self.font_search.clear();
-                            }
-                            if ui.add(
-                                egui::Button::new(RichText::new("Browse…").color(accent_color))
-                                    .fill(secondary_fill)
-                                    .stroke(secondary_stroke)
-                            ).clicked() {
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("Font files", &["ttf", "otf", "ttc"])
-                                    .pick_file()
-                                {
-                                    let path_str = path.to_string_lossy().into_owned();
-                                    let name = fonts::family_from_file(&path_str)
-                                        .unwrap_or_else(|| path.file_stem()
-                                            .map(|s| s.to_string_lossy().into_owned())
-                                            .unwrap_or_default());
-                                    new_font = Some((name, path_str));
-                                }
-                            }
-                        });
-                        ui.checkbox(&mut use_monospace, "Use Monospace font everywhere");
-
-                        ui.horizontal(|ui| {
-                            ui.label("Opacity:");
-                            ui.add(egui::Slider::new(&mut opacity, 0.1..=1.0));
-                        });
-                        #[cfg(target_os = "macos")]
-                        ui.checkbox(&mut blur_background, "Blur background (lower opacity to see it)");
-
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Theme").strong());
-                            ui.label(
-                                RichText::new(format!("({})", self.theme.name))
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(
-                                    egui::Button::new(RichText::new("Reset").color(Color32::WHITE))
-                                        .fill(danger_color)
-                                        .min_size(Vec2::new(70.0, 24.0))
-                                ).clicked() {
-                                    reset_theme = true;
-                                }
-                                if ui.add(
-                                    egui::Button::new(RichText::new("Import .itermcolors").color(accent_color))
-                                        .fill(secondary_fill)
-                                        .stroke(secondary_stroke)
-                                        .min_size(Vec2::new(140.0, 24.0))
-                                ).clicked() {
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("itermcolors", &["itermcolors"])
-                                        .pick_file()
-                                    {
-                                        if let Ok(data) = std::fs::read(&path) {
-                                            let name = path.file_stem().unwrap().to_string_lossy().to_string();
-                                            if let Ok(new_theme) = AppTheme::parse_itermcolors(&data, name) {
-                                                self.theme = new_theme;
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                        });
-
-                        ui.add_space(4.0);
-                        ui.checkbox(&mut adaptive_theme, "Adaptive theme (from wallpaper)");
-                        if adaptive_theme {
-                            ui.add_space(2.0);
-                            ui.label(
-                                RichText::new("Colours are derived from the current desktop wallpaper. Manual editing is disabled while active.")
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                        }
-
-                        ui.add_space(6.0);
-                        ui.add_enabled_ui(!adaptive_theme, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Background:").small());
-                                let mut bg = self.theme.background
-                                    .map(Color32::from)
-                                    .unwrap_or(Color32::from_rgb(18, 18, 18));
-                                if color_edit_button_srgba(ui, &mut bg, Alpha::Opaque).changed() {
-                                    self.theme.background = Some(ThemeColor::from(bg));
-                                }
-                                ui.add_space(12.0);
-                                ui.label(RichText::new("Foreground:").small());
-                                let mut fg = self.theme.foreground
-                                    .map(Color32::from)
-                                    .unwrap_or(Color32::from_rgb(204, 204, 204));
-                                if color_edit_button_srgba(ui, &mut fg, Alpha::Opaque).changed() {
-                                    self.theme.foreground = Some(ThemeColor::from(fg));
-                                }
-                            });
-
-                            ui.add_space(6.0);
-                            const LABELS: [&str; 16] = [
-                                "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
-                                "Br.Black", "Br.Red", "Br.Green", "Br.Yellow", "Br.Blue", "Br.Magenta", "Br.Cyan", "Br.White",
-                            ];
-                            for row in 0..2usize {
-                                ui.horizontal(|ui| {
-                                    for col in 0..8usize {
-                                        let i = row * 8 + col;
-                                        ui.vertical(|ui| {
-                                            ui.set_width(46.0);
-                                            let mut c = Color32::from(self.theme.ansi[i]);
-                                            if color_edit_button_srgba(ui, &mut c, Alpha::Opaque).changed() {
-                                                self.theme.ansi[i] = ThemeColor::from(c);
-                                            }
-                                            ui.label(
-                                                RichText::new(LABELS[i])
-                                                    .size(9.0)
-                                                    .color(ui.visuals().weak_text_color()),
-                                            );
-                                        });
-                                    }
-                                });
-                                ui.add_space(2.0);
-                            }
-                        });
-
-                        // ── Keybinds ───────────────────────────────────────────
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Keybinds").strong());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("Reset all").clicked() {
-                                    self.keybinds = crate::ui::keybinds::KeybindsMap::default();
-                                    self.editing_keybind = None;
-                                }
-                            });
-                        });
-                        ui.add_space(4.0);
-
-                        // Capture mode: consume the next key event and store it.
-                        if let Some(capturing) = self.editing_keybind {
-                            let mut captured: Option<(crate::ui::keybinds::SerdeModifiers, crate::ui::keybinds::AppKey)> = None;
-                            let mut cancel = false;
-                            ui.input_mut(|i| {
-                                let events = std::mem::take(&mut i.events);
-                                let mut remaining = Vec::new();
-                                let mut found = false;
-                                for event in events {
-                                    if !found {
-                                        if let egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } = &event {
-                                            if *key == egui::Key::Escape {
-                                                cancel = true;
-                                                found = true;
-                                                continue;
-                                            } else if let Some(app_key) = crate::ui::keybinds::AppKey::from_egui(*key) {
-                                                let mods = crate::ui::keybinds::SerdeModifiers::from_egui(*modifiers);
-                                                captured = Some((mods, app_key));
-                                                found = true;
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    remaining.push(event);
-                                }
-                                i.events = remaining;
-                            });
-                            if cancel { self.editing_keybind = None; }
-                            if let Some((mods, key)) = captured {
-                                self.keybinds.0.insert(capturing, (mods, key));
-                                self.editing_keybind = None;
-                            }
-                        }
-
-                        egui::Grid::new("keybinds_grid")
-                            .num_columns(3)
-                            .spacing([12.0, 4.0])
-                            .show(ui, |ui| {
-                                for &action in crate::ui::keybinds::KeybindAction::ALL {
-                                    ui.label(action.label());
-                                    let label = self.keybinds.shortcut_label(action);
-                                    let is_capturing = self.editing_keybind == Some(action);
-                                    let btn_text = if is_capturing {
-                                        RichText::new("Press a key…").color(accent_color)
-                                    } else {
-                                        RichText::new(&label)
-                                    };
-                                    let btn = egui::Button::new(btn_text)
-                                        .min_size(Vec2::new(90.0, 0.0));
-                                    if ui.add(btn).clicked() {
-                                        self.editing_keybind = if is_capturing { None } else { Some(action) };
-                                    }
-                                    if ui.small_button(icons::ARROW_COUNTER_CLOCKWISE).on_hover_text("Reset to default").clicked() {
-                                        let defaults = crate::ui::keybinds::KeybindsMap::default();
-                                        if let Some(default) = defaults.0.get(&action) {
-                                            self.keybinds.0.insert(action, *default);
-                                        }
-                                        if self.editing_keybind == Some(action) {
-                                            self.editing_keybind = None;
-                                        }
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-
-                        if self.editing_keybind.is_some() {
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new("Press a key combination to bind, or Esc to cancel.")
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                        }
-
-                        ui.add_space(16.0);
-                        ui.vertical_centered_justified(|ui| {
-                            if ui.add(
-                                egui::Button::new(RichText::new("Close").strong().color(Color32::WHITE))
-                                    .fill(accent_color)
-                                    .min_size(Vec2::new(0.0, 34.0))
-                            ).clicked() {
-                                close = true;
-                            }
-                        });
-                    });
+                    ui.label(RichText::new("Settings").strong().size(17.0));
                 });
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(11.0).color(p.accent.linear_multiply(0.7)));
+                });
+                ui.add_space(14.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for section in SettingsSection::ALL {
+                    let selected = self.settings_section == section;
+                    let text = RichText::new(format!("{}   {}", section.icon(), section.label()));
+                    let text = if selected { text.color(p.accent).strong() } else { text };
+                    let button = egui::Button::selectable(selected, text)
+                        .min_size(Vec2::new(ui.available_width(), 30.0));
+                    if ui.add(button).clicked() {
+                        self.settings_section = section;
+                        self.editing_keybind = None;
+                    }
+                }
+            });
+
+        egui::CentralPanel::default()
+            .frame(Frame::NONE.fill(p.window).inner_margin(Margin::symmetric(24, 18)))
+            .show(ui, |ui| {
+                ui.label(RichText::new(self.settings_section.label()).strong().size(20.0));
+                ui.add_space(4.0);
+                ui.separator();
+                ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    match self.settings_section {
+                        SettingsSection::General => self.general_section(ui),
+                        SettingsSection::Chat => self.chat_section(ui),
+                        SettingsSection::Appearance => self.appearance_section(ui, p),
+                        SettingsSection::Theme => self.theme_section(ui, p),
+                        SettingsSection::FileSharing => self.file_sharing_section(ui),
+                        SettingsSection::Keybinds => self.keybinds_section(ui, p),
+                    }
+                    ui.add_space(12.0);
+                });
+            });
+    }
+
+    fn general_section(&mut self, ui: &mut egui::Ui) {
+        section_heading(ui, "Connections");
+        ui.checkbox(&mut self.auto_reconnect, "Auto-reconnect when a connection drops");
+
+        section_heading(ui, "Buffer list");
+        ui.checkbox(&mut self.show_server_headers, "Show server group headers");
+        ui.checkbox(&mut self.show_hidden_buffers, "Show hidden buffers");
+        ui.checkbox(&mut self.show_titlebar, "Show topic and modes bar above the chat");
+
+        section_heading(ui, "Notifications");
+        hint(ui, "Highlights and private messages show a system notification.");
+        if ui.button(format!("{} Send test notification", icons::BELL)).clicked() {
+            crate::ui::notify::show(crate::ui::notify::Notification {
+                app_name: "WeeChatRS".to_string(),
+                title: "WeeChatRS".to_string(),
+                body: "Notifications are working.".to_string(),
+            });
+        }
+    }
+
+    fn chat_section(&mut self, ui: &mut egui::Ui) {
+        section_heading(ui, "Messages");
+        ui.checkbox(&mut self.show_timestamps, "Show timestamps");
+        ui.checkbox(&mut self.show_filtered_lines, "Show filtered lines");
+        ui.checkbox(&mut self.colored_nicks, "Coloured nicknames in the nick list");
+        ui.checkbox(&mut self.emoji_rendering, "Colour emoji rendering");
+        hint(ui, "Requires the emojinize script on the WeeChat server.");
+
+        section_heading(ui, "Nick column");
+        egui::Grid::new("chat_nick_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Max width (chars):");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut self.prefix_align_max).range(0usize..=64usize).speed(1));
+                hint(ui, "0 = auto");
+            });
+            ui.end_row();
+            ui.label("Nick/message separator:");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.prefix_suffix).desired_width(40.0));
+                hint(ui, "weechat.look.prefix_suffix");
+            });
+            ui.end_row();
         });
 
-        if close { self.show_settings = false; }
-        self.show_filtered_lines = show_filtered_lines;
-        self.colored_nicks = colored_nicks;
-        self.font_size = font_size;
-        self.use_monospace = use_monospace;
-        self.show_timestamps = show_timestamps;
-        self.auto_reconnect = auto_reconnect;
-        self.show_titlebar = show_titlebar;
-        self.show_server_headers = show_server_headers;
-        self.show_inline_images = show_inline_images;
-        self.show_link_previews = show_link_previews;
-        self.show_hidden_buffers = show_hidden_buffers;
-        self.emoji_rendering = emoji_rendering;
-        self.opacity = opacity;
-        self.blur_background = blur_background;
-        self.prefix_align_max = prefix_align_max;
-        if self.prefix_suffix != prefix_suffix {
-            self.prefix_suffix = prefix_suffix;
+        section_heading(ui, "Previews");
+        ui.checkbox(&mut self.show_inline_images, "Inline image previews");
+        hint(ui, "Adds a preview button to image links.");
+        ui.checkbox(&mut self.show_link_previews, "Link previews");
+        hint(ui, "Adds a preview button to other links (title, description, image).");
+    }
+
+    fn appearance_section(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        section_heading(ui, "Font");
+        egui::Grid::new("appearance_font_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Size:");
+            let sizes: &[f32] = &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 20.0, 22.0, 24.0];
+            egui::ComboBox::from_id_salt("font_size_combo")
+                .selected_text(format!("{}px", self.font_size as u32))
+                .width(80.0)
+                .show_ui(ui, |ui| {
+                    for &size in sizes {
+                        ui.selectable_value(&mut self.font_size, size, format!("{}px", size as u32));
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Family:");
+            ui.horizontal(|ui| self.font_family_picker(ui, p));
+            ui.end_row();
+        });
+        ui.checkbox(&mut self.use_monospace, "Use a monospace font everywhere");
+
+        section_heading(ui, "Window");
+        ui.horizontal(|ui| {
+            ui.label("Opacity:");
+            ui.add(egui::Slider::new(&mut self.opacity, 0.1..=1.0));
+        });
+        #[cfg(target_os = "macos")]
+        {
+            ui.checkbox(&mut self.blur_background, "Blur background");
+            hint(ui, "Lower the opacity to see the blur.");
         }
-        if reset_theme { self.theme = AppTheme::default(); }
+    }
+
+    fn font_family_picker(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let selected_label = if self.font_name.is_empty() { "Default".to_string() } else { self.font_name.clone() };
+        let mut new_font: Option<(String, String)> = None;
+        let combo_resp = egui::ComboBox::from_id_salt("font_family_combo")
+            .selected_text(&selected_label)
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                let search_edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.font_search)
+                        .hint_text("Search fonts…")
+                        .desired_width(f32::INFINITY),
+                );
+                if search_edit.gained_focus() || (!search_edit.has_focus() && egui::Popup::is_any_open(ui.ctx())) {
+                    search_edit.request_focus();
+                }
+                ui.separator();
+                if ui.selectable_label(self.font_name.is_empty(), "Default").clicked() {
+                    new_font = Some((String::new(), String::new()));
+                }
+                ui.separator();
+                let query = self.font_search.to_lowercase();
+                for (name, path) in &self.available_fonts {
+                    if query.is_empty() || name.to_lowercase().contains(&query) {
+                        if ui.selectable_label(name == &self.font_name, name.as_str()).clicked() {
+                            new_font = Some((name.clone(), path.clone()));
+                        }
+                    }
+                }
+            });
+        if combo_resp.inner.is_none() {
+            self.font_search.clear();
+        }
+        if ui.add(
+            egui::Button::new(RichText::new("Browse…").color(p.accent))
+                .fill(p.secondary_fill)
+                .stroke(p.secondary_stroke)
+        ).clicked() {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Font files", &["ttf", "otf", "ttc"]).pick_file() {
+                let path_str = path.to_string_lossy().into_owned();
+                let name = fonts::family_from_file(&path_str)
+                    .unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+                new_font = Some((name, path_str));
+            }
+        }
+        if let Some((name, path)) = new_font {
+            self.font_name = name;
+            self.font_path = path;
+            self.font_search.clear();
+        }
+    }
+
+    fn theme_section(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        section_heading(ui, "Colour scheme");
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&self.theme.name).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(
+                    egui::Button::new(RichText::new("Reset").color(Color32::WHITE))
+                        .fill(p.danger)
+                        .min_size(Vec2::new(70.0, 24.0))
+                ).clicked() {
+                    self.theme = AppTheme::default();
+                }
+                if ui.add(
+                    egui::Button::new(RichText::new("Import .itermcolors").color(p.accent))
+                        .fill(p.secondary_fill)
+                        .stroke(p.secondary_stroke)
+                        .min_size(Vec2::new(140.0, 24.0))
+                ).clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("itermcolors", &["itermcolors"]).pick_file() {
+                        if let Ok(data) = std::fs::read(&path) {
+                            let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                            if let Ok(new_theme) = AppTheme::parse_itermcolors(&data, name) {
+                                self.theme = new_theme;
+                            }
+                        }
+                    }
+                }
+            });
+        });
+
+        let mut adaptive_theme = self.adaptive_theme;
+        ui.checkbox(&mut adaptive_theme, "Adaptive theme (from wallpaper)");
+        if adaptive_theme {
+            hint(ui, "Colours are derived from the desktop wallpaper. Manual editing is disabled while active.");
+        }
         if adaptive_theme != self.adaptive_theme {
             self.adaptive_theme = adaptive_theme;
             if adaptive_theme {
@@ -483,25 +395,226 @@ impl WeeChatApp {
                 self.adaptive_theme_result = None;
             }
         }
-        if reset_font {
-            self.font_name.clear();
-            self.font_path.clear();
+
+        section_heading(ui, "Colours");
+        ui.add_enabled_ui(!self.adaptive_theme, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Background:");
+                let mut bg = self.theme.background.map(Color32::from).unwrap_or(Color32::from_rgb(18, 18, 18));
+                if color_edit_button_srgba(ui, &mut bg, Alpha::Opaque).changed() {
+                    self.theme.background = Some(ThemeColor::from(bg));
+                }
+                ui.add_space(12.0);
+                ui.label("Foreground:");
+                let mut fg = self.theme.foreground.map(Color32::from).unwrap_or(Color32::from_rgb(204, 204, 204));
+                if color_edit_button_srgba(ui, &mut fg, Alpha::Opaque).changed() {
+                    self.theme.foreground = Some(ThemeColor::from(fg));
+                }
+            });
+            ui.add_space(6.0);
+            const LABELS: [&str; 16] = [
+                "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
+                "Br.Black", "Br.Red", "Br.Green", "Br.Yellow", "Br.Blue", "Br.Magenta", "Br.Cyan", "Br.White",
+            ];
+            for row in 0..2usize {
+                ui.horizontal(|ui| {
+                    for col in 0..8usize {
+                        let i = row * 8 + col;
+                        ui.vertical(|ui| {
+                            ui.set_width(52.0);
+                            let mut c = Color32::from(self.theme.ansi[i]);
+                            if color_edit_button_srgba(ui, &mut c, Alpha::Opaque).changed() {
+                                self.theme.ansi[i] = ThemeColor::from(c);
+                            }
+                            ui.label(RichText::new(LABELS[i]).size(9.0).color(ui.visuals().weak_text_color()));
+                        });
+                    }
+                });
+                ui.add_space(2.0);
+            }
+        });
+    }
+
+    fn file_sharing_section(&mut self, ui: &mut egui::Ui) {
+        use crate::ui::fileshare::FileShareService;
+        section_heading(ui, "Uploads");
+        hint(ui, "Files dropped on the chat or attached with the paperclip are uploaded here.");
+        egui::Grid::new("file_sharing_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Service:");
+            egui::ComboBox::from_id_salt("file_share_service_combo")
+                .selected_text(match self.file_share_service {
+                    FileShareService::Jirafeau => "Jirafeau (files.interdo.me)",
+                    FileShareService::Litterbox => "Litterbox (litterbox.catbox.moe)",
+                })
+                .width(260.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.file_share_service, FileShareService::Jirafeau, "Jirafeau (files.interdo.me)");
+                    ui.selectable_value(&mut self.file_share_service, FileShareService::Litterbox, "Litterbox (litterbox.catbox.moe)");
+                });
+            ui.end_row();
+
+            ui.label("Expiry:");
+            match self.file_share_service {
+                FileShareService::Jirafeau => {
+                    const DURATIONS: &[(&str, &str)] = &[
+                        ("minute",    "1 minute"),
+                        ("hour",      "1 hour"),
+                        ("day",       "1 day"),
+                        ("week",      "1 week"),
+                        ("fortnight", "2 weeks"),
+                        ("month",     "1 month"),
+                        ("quarter",   "3 months"),
+                        ("year",      "1 year"),
+                        ("none",      "Never expires"),
+                    ];
+                    let selected_label = DURATIONS.iter()
+                        .find(|(v, _)| *v == self.file_share_duration)
+                        .map(|(_, l)| *l)
+                        .unwrap_or("1 day");
+                    egui::ComboBox::from_id_salt("file_share_duration_combo")
+                        .selected_text(selected_label)
+                        .width(140.0)
+                        .show_ui(ui, |ui| {
+                            for &(value, label) in DURATIONS {
+                                ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
+                            }
+                        });
+                }
+                FileShareService::Litterbox => {
+                    let selected_label = crate::ui::fileshare::LITTERBOX_TIMES.iter()
+                        .find(|(v, _)| *v == self.file_share_duration)
+                        .map(|(_, l)| *l)
+                        .unwrap_or("24 hours");
+                    egui::ComboBox::from_id_salt("file_share_duration_combo")
+                        .selected_text(selected_label)
+                        .width(140.0)
+                        .show_ui(ui, |ui| {
+                            for &(value, label) in crate::ui::fileshare::LITTERBOX_TIMES {
+                                ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
+                            }
+                        });
+                }
+            }
+            ui.end_row();
+        });
+    }
+
+    fn keybinds_section(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            hint(ui, "Click a shortcut, then press the new key combination.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reset all").clicked() {
+                    self.keybinds = crate::ui::keybinds::KeybindsMap::default();
+                    self.editing_keybind = None;
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        // Capture mode: consume the next key event and store it.
+        if let Some(capturing) = self.editing_keybind {
+            let mut captured: Option<(crate::ui::keybinds::SerdeModifiers, crate::ui::keybinds::AppKey)> = None;
+            let mut cancel = false;
+            ui.input_mut(|i| {
+                let events = std::mem::take(&mut i.events);
+                let mut remaining = Vec::new();
+                let mut found = false;
+                for event in events {
+                    if !found {
+                        if let egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } = &event {
+                            if *key == egui::Key::Escape {
+                                cancel = true;
+                                found = true;
+                                continue;
+                            } else if let Some(app_key) = crate::ui::keybinds::AppKey::from_egui(*key) {
+                                captured = Some((crate::ui::keybinds::SerdeModifiers::from_egui(*modifiers), app_key));
+                                found = true;
+                                continue;
+                            }
+                        }
+                    }
+                    remaining.push(event);
+                }
+                i.events = remaining;
+            });
+            if cancel { self.editing_keybind = None; }
+            if let Some((mods, key)) = captured {
+                self.keybinds.0.insert(capturing, (mods, key));
+                self.editing_keybind = None;
+            }
         }
-        if let Some((name, path)) = new_font {
-            self.font_name = name;
-            self.font_path = path;
+
+        egui::Grid::new("keybinds_grid")
+            .num_columns(3)
+            .spacing([16.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for &action in crate::ui::keybinds::KeybindAction::ALL {
+                    ui.label(action.label());
+                    let is_capturing = self.editing_keybind == Some(action);
+                    let btn_text = if is_capturing {
+                        RichText::new("Press a key…").color(p.accent)
+                    } else {
+                        RichText::new(self.keybinds.shortcut_label(action))
+                    };
+                    if ui.add(egui::Button::new(btn_text).min_size(Vec2::new(110.0, 0.0))).clicked() {
+                        self.editing_keybind = if is_capturing { None } else { Some(action) };
+                    }
+                    if ui.small_button(icons::ARROW_COUNTER_CLOCKWISE).on_hover_text("Reset to default").clicked() {
+                        if let Some(default) = crate::ui::keybinds::KeybindsMap::default().0.get(&action) {
+                            self.keybinds.0.insert(action, *default);
+                        }
+                        if self.editing_keybind == Some(action) {
+                            self.editing_keybind = None;
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+
+        if self.editing_keybind.is_some() {
+            ui.add_space(4.0);
+            hint(ui, "Press a key combination to bind, or Esc to cancel.");
         }
     }
 
-    pub(crate) fn show_connections_window(&mut self, ui: &mut egui::Ui, accent_color: Color32, is_light: bool) {
-        let mut close = false;
-        let opaque_fill = if is_light { Color32::from_gray(235) } else { Color32::from_rgb(38, 38, 48) };
-        let border_color = if is_light { Color32::from_gray(200) } else { Color32::from_gray(55) };
-
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.show_connections = false;
+    /// Connections as its own native window (an in-app window where the platform can't
+    /// open more windows). Call once per frame from the main viewport.
+    pub(crate) fn show_connections_window(&mut self, ctx: &egui::Context, accent_color: Color32, is_light: bool) {
+        if !self.show_connections {
+            self.connections_window_pos = None;
             return;
         }
+        if self.connections_window_pos.is_none() {
+            ctx.request_repaint(); // see show_settings_window
+        }
+        let pos = *self.connections_window_pos.get_or_insert_with(|| centered_over_main(ctx, CONNECTIONS_SIZE));
+        let builder = tool_window("WeeChatRS Connections", CONNECTIONS_SIZE, [460.0, 320.0], pos);
+        let palette = Palette::new(accent_color, is_light);
+        let mut close = false;
+        ctx.show_viewport_immediate(Self::connections_viewport_id(), builder, |ui, class| {
+            #[cfg(target_os = "macos")]
+            if class == egui::ViewportClass::Immediate {
+                let title_color = ui.visuals().weak_text_color();
+                crate::ui::app::macos_titlebar(ui, "WeeChatRS Connections", palette.window, palette.border, title_color);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = class;
+            if ui.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+            egui::CentralPanel::default()
+                .frame(Frame::NONE.fill(palette.window).inner_margin(Margin::symmetric(24, 18)))
+                .show(ui, |ui| self.connections_contents(ui, &palette));
+        });
+        if close {
+            self.show_connections = false;
+        }
+    }
+
+    fn connections_contents(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let accent_color = p.accent;
 
         // Pending deferred actions
         let mut do_connect_idx: Option<usize> = None;
@@ -510,335 +623,284 @@ impl WeeChatApp {
         let mut do_edit: Option<usize> = None;
         let mut toggle_add = false;
 
-        ui.vertical_centered(|ui| {
-            ui.add_space(24.0);
-            Frame::NONE
-                .fill(opaque_fill)
-                .corner_radius(CornerRadius::same(12))
-                .stroke(Stroke::new(1.0, border_color))
-                .inner_margin(Margin::same(24))
-                .show(ui, |ui| {
-                    ui.set_max_width(540.0);
+        ui.label(RichText::new("Connections").strong().size(20.0));
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(8.0);
 
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Connections").strong().size(18.0));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(RichText::new(icons::X).size(16.0)).clicked() {
-                                close = true;
-                            }
-                        });
-                    });
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(8.0);
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if self.conn_show_add {
+                Frame::NONE
+                    .fill(p.card)
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.0, accent_color.linear_multiply(0.4)))
+                    .inner_margin(Margin::same(14))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let title = if self.editing_profile_idx.is_some() { "Edit Connection" } else { "New Connection" };
+                        ui.label(RichText::new(title).strong());
+                        ui.add_space(8.0);
 
-                    ScrollArea::vertical().show(ui, |ui| {
-                        if self.conn_show_add {
-                            Frame::NONE
-                                .fill(if is_light { Color32::from_gray(225) } else { Color32::from_rgb(32, 32, 42) })
-                                .corner_radius(CornerRadius::same(8))
-                                .stroke(Stroke::new(1.0, accent_color.linear_multiply(0.4)))
-                                .inner_margin(Margin::same(14))
-                                .show(ui, |ui| {
-                                    let title = if self.editing_profile_idx.is_some() { "Edit Connection" } else { "New Connection" };
-                                    ui.label(RichText::new(title).strong());
-                                    ui.add_space(8.0);
-
-                                    egui::Grid::new("conn_add_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                                        ui.label("Label:");
-                                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.label).desired_width(200.0));
-                                        ui.end_row();
-                                        ui.label("Backend:");
-                                        ui.horizontal(|ui| {
-                                            ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::WeeChat, "WeeChat");
-                                            ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::Soju, "IRC");
-                                        });
-                                        ui.end_row();
-                                        ui.label("Host:");
-                                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.host).desired_width(200.0));
-                                        ui.end_row();
-                                        ui.label("Port:");
-                                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.port).desired_width(200.0));
-                                        ui.end_row();
-                                        if self.editing_profile.backend_type == BackendType::Soju {
-                                            ui.label("Nick:");
-                                            ui.add(egui::TextEdit::singleline(&mut self.editing_profile.nick).desired_width(200.0));
-                                            ui.end_row();
-                                            ui.label("Username:");
-                                            ui.vertical(|ui| {
-                                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.username).desired_width(200.0).hint_text("leave blank to use nick"));
-                                                ui.label(RichText::new("IRC USER field — use nick/network for ZNC").small().color(ui.visuals().weak_text_color()));
-                                            });
-                                            ui.end_row();
-                                            ui.label("SASL username:");
-                                            ui.vertical(|ui| {
-                                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.sasl_username).desired_width(200.0).hint_text("leave blank to use nick"));
-                                                ui.label(RichText::new("Leave blank to disable SASL").small().color(ui.visuals().weak_text_color()));
-                                            });
-                                            ui.end_row();
-                                            ui.label("Channel:");
-                                            ui.add(egui::TextEdit::singleline(&mut self.editing_profile.channel).desired_width(200.0).hint_text("#channel (optional)"));
-                                            ui.end_row();
-                                        }
-                                        ui.label("Password:");
-                                        ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).desired_width(200.0));
-                                        ui.end_row();
-                                    });
-                                    ui.add_space(6.0);
-                                    ui.horizontal(|ui| {
-                                        ui.checkbox(&mut self.editing_profile.use_ssl, "SSL");
-                                        if self.editing_profile.use_ssl {
-                                            ui.checkbox(&mut self.editing_profile.accept_invalid_certs, "Accept self-signed");
-                                        }
-                                        ui.add_space(12.0);
-                                        ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel");
-                                    });
-                                    if self.editing_profile.ssh_enabled {
-                                        ui.add_space(4.0);
-                                        egui::Grid::new("ssh_grid")
-                                            .num_columns(2)
-                                            .spacing([8.0, 4.0])
-                                            .show(ui, |ui| {
-                                                ui.label("SSH Host:");
-                                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_host)
-                                                    .desired_width(200.0)
-                                                    .hint_text("user@host or host"));
-                                                ui.end_row();
-                                                ui.label("SSH Port:");
-                                                let mut ssh_port_str = self.editing_profile.ssh_port
-                                                    .map(|p| p.to_string())
-                                                    .unwrap_or_default();
-                                                if ui.add(egui::TextEdit::singleline(&mut ssh_port_str)
-                                                    .desired_width(80.0)
-                                                    .hint_text("22")).changed()
-                                                {
-                                                    self.editing_profile.ssh_port = if ssh_port_str.is_empty() {
-                                                        None
-                                                    } else {
-                                                        ssh_port_str.parse::<u16>().ok()
-                                                    };
-                                                }
-                                                ui.end_row();
-                                                ui.label("SSH User:");
-                                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_user)
-                                                    .desired_width(200.0)
-                                                    .hint_text("leave blank to use SSH config / system user"));
-                                                ui.end_row();
-                                                ui.label("SSH Password:");
-                                                ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password)
-                                                    .password(true)
-                                                    .desired_width(200.0)
-                                                    .hint_text("leave blank to use SSH agent / keys"));
-                                                ui.end_row();
-                                            });
-                                        ui.horizontal(|ui| {
-                                            ui.checkbox(&mut self.editing_profile.ssh_save_password, "Save SSH password");
-                                        });
-                                        ui.add_space(2.0);
-                                        ui.label(
-                                            egui::RichText::new(
-                                                "Connects via ssh -L tunnel. Uses your SSH agent / ~/.ssh keys.\n\
-                                                 The relay host/port above is where the tunnel forwards to."
-                                            )
-                                            .small()
-                                            .color(ui.visuals().weak_text_color()),
-                                        );
-                                        ui.add_space(4.0);
-                                    }
-                                    ui.horizontal(|ui| {
-                                        ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
-                                        ui.checkbox(&mut self.editing_profile.auto_reconnect, "Auto-reconnect");
-                                        ui.checkbox(&mut self.editing_profile.save_password, "Save password");
-                                    });
-                                    ui.add_space(8.0);
-                                    ui.horizontal(|ui| {
-                                        if ui.add(
-                                            egui::Button::new(RichText::new("Save").strong().color(Color32::WHITE))
-                                                .fill(accent_color).min_size(Vec2::new(80.0, 28.0))
-                                        ).clicked() {
-                                            if self.editing_profile.save_password && !self.editing_password.is_empty() {
-                                                let key = self.editing_profile.keyring_host_key();
-                                                let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_password);
-                                            }
-                                            if self.editing_profile.ssh_save_password && !self.editing_ssh_password.is_empty() {
-                                                let key = self.editing_profile.ssh_keyring_key();
-                                                let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_ssh_password);
-                                            }
-                                            // Cache passwords for the session so connect skips prompts.
-                                            let pfx = self.editing_profile.prefix();
-                                            if !self.editing_password.is_empty() {
-                                                self.session_passwords.insert(pfx.clone(), self.editing_password.clone());
-                                            }
-                                            if !self.editing_ssh_password.is_empty() {
-                                                self.session_ssh_passwords.insert(pfx, self.editing_ssh_password.clone());
-                                            }
-                                            let profile = self.editing_profile.clone();
-                                            if let Some(idx) = self.editing_profile_idx {
-                                                if idx < self.profiles.len() { self.profiles[idx] = profile; }
-                                            } else {
-                                                self.profiles.push(profile);
-                                            }
-                                            self.conn_show_add = false;
-                                            self.editing_profile = ConnectionProfile::default();
-                                            self.editing_password.clear();
-                                            self.editing_ssh_password.clear();
-                                            self.editing_profile_idx = None;
-                                        }
-                                        if ui.button("Cancel").clicked() {
-                                            self.conn_show_add = false;
-                                            self.editing_profile = ConnectionProfile::default();
-                                            self.editing_password.clear();
-                                            self.editing_ssh_password.clear();
-                                            self.editing_profile_idx = None;
-                                        }
-                                    });
+                        egui::Grid::new("conn_add_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                            ui.label("Label:");
+                            ui.add(egui::TextEdit::singleline(&mut self.editing_profile.label).desired_width(240.0));
+                            ui.end_row();
+                            ui.label("Backend:");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::WeeChat, "WeeChat");
+                                ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::Soju, "IRC");
+                            });
+                            ui.end_row();
+                            ui.label("Host:");
+                            ui.add(egui::TextEdit::singleline(&mut self.editing_profile.host).desired_width(240.0));
+                            ui.end_row();
+                            ui.label("Port:");
+                            ui.add(egui::TextEdit::singleline(&mut self.editing_profile.port).desired_width(240.0));
+                            ui.end_row();
+                            if self.editing_profile.backend_type == BackendType::Soju {
+                                ui.label("Nick:");
+                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.nick).desired_width(240.0));
+                                ui.end_row();
+                                ui.label("Username:");
+                                ui.vertical(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut self.editing_profile.username).desired_width(240.0).hint_text("leave blank to use nick"));
+                                    hint(ui, "IRC USER field — use nick/network for ZNC");
                                 });
-                        } else {
-                            for (idx, profile) in self.profiles.iter().enumerate() {
-                                let prefix = profile.prefix();
-                                let conn_opt = self.connections.iter().find(|c| c.prefix == prefix);
-                                let is_connected = conn_opt.map(|c| c.client.is_connected()).unwrap_or(false);
-                                let is_pending = conn_opt.map(|c| c.connecting_pending).unwrap_or(false);
-                                let has_error = conn_opt.and_then(|c| c.auth_error.as_ref()).is_some();
-                                let dot_color = if is_connected && !is_pending {
-                                    Color32::from_rgb(50, 205, 50)
-                                } else if is_pending {
-                                    Color32::from_rgb(255, 165, 0)
-                                } else if has_error {
-                                    Color32::from_rgb(220, 60, 60)
-                                } else {
-                                    Color32::from_gray(120)
-                                };
-
-                                Frame::NONE
-                                    .fill(if is_light { Color32::from_gray(225) } else { Color32::from_rgb(32, 32, 42) })
-                                    .corner_radius(CornerRadius::same(6))
-                                    .inner_margin(Margin::symmetric(10, 6))
-                                    .show(ui, |ui| {
-                                        ui.set_min_width(ui.available_width());
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new("●").color(dot_color).size(11.0));
-                                            ui.label(RichText::new(&profile.label).strong());
-                                            let badge = match profile.backend_type { BackendType::WeeChat => "WeeChat", BackendType::Soju => "IRC" };
-                                            ui.label(RichText::new(badge).small().color(accent_color));
-                                            ui.label(RichText::new(format!("{}:{}", profile.host, profile.port)).small().color(ui.visuals().weak_text_color()));
-
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if ui.small_button(icons::X).on_hover_text("Delete").clicked() { do_delete = Some(idx); }
-                                                if ui.small_button(icons::PENCIL_SIMPLE).on_hover_text("Edit").clicked() { do_edit = Some(idx); }
-                                                if is_connected || is_pending {
-                                                    if ui.button("Disconnect").clicked() { do_disconnect = Some(prefix.clone()); }
-                                                } else if self.conn_connect_idx == Some(idx) {
-                                                    // Inline password prompt — shown only when passwords aren't cached/stored.
-                                                    ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).hint_text("Password…").desired_width(110.0));
-                                                    if profile.ssh_enabled {
-                                                        ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password).password(true).hint_text("SSH password…").desired_width(110.0));
-                                                    }
-                                                    if ui.button("OK").clicked() {
-                                                        // Cache whatever the user entered.
-                                                        if !self.editing_ssh_password.is_empty() {
-                                                            self.session_ssh_passwords.insert(prefix.clone(), std::mem::take(&mut self.editing_ssh_password));
-                                                        }
-                                                        do_connect_idx = Some(idx);
-                                                    }
-                                                    if ui.button(icons::X).clicked() {
-                                                        self.conn_connect_idx = None;
-                                                        self.editing_password.clear();
-                                                        self.editing_ssh_password.clear();
-                                                    }
-                                                } else {
-                                                    if ui.button("Connect").clicked() {
-                                                        // Check session cache, then keyring — skip prompt if password found.
-                                                        let relay_pw = self.session_passwords.get(&prefix).cloned()
-                                                            .or_else(|| crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()));
-                                                        let ssh_pw_known = !profile.ssh_enabled
-                                                            || self.session_ssh_passwords.contains_key(&prefix)
-                                                            || profile.ssh_save_password;
-                                                        if relay_pw.is_some() && ssh_pw_known {
-                                                            self.editing_password = relay_pw.unwrap_or_default();
-                                                            do_connect_idx = Some(idx);
-                                                        } else {
-                                                            // Pre-fill what we do know.
-                                                            self.editing_password = relay_pw.unwrap_or_default();
-                                                            self.conn_connect_idx = Some(idx);
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        });
-                                        if let Some(err) = conn_opt.and_then(|c| c.auth_error.as_ref()) {
-                                            ui.label(RichText::new(format!("{} {}", icons::WARNING, err)).small().color(Color32::from_rgb(220, 80, 80)));
-                                        }
-                                    });
-                                ui.add_space(4.0);
+                                ui.end_row();
+                                ui.label("SASL username:");
+                                ui.vertical(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut self.editing_profile.sasl_username).desired_width(240.0).hint_text("leave blank to use nick"));
+                                    hint(ui, "Leave blank to disable SASL");
+                                });
+                                ui.end_row();
+                                ui.label("Channel:");
+                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.channel).desired_width(240.0).hint_text("#channel (optional)"));
+                                ui.end_row();
                             }
-
-                            if ui.add(
-                                egui::Button::new(RichText::new("+ Add Connection").color(accent_color))
-                                    .fill(Color32::TRANSPARENT)
-                                    .stroke(Stroke::new(1.0, accent_color))
-                                    .min_size(Vec2::new(0.0, 28.0))
-                            ).clicked() {
-                                toggle_add = true;
+                            ui.label("Password:");
+                            ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).desired_width(240.0));
+                            ui.end_row();
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.editing_profile.use_ssl, "SSL");
+                            if self.editing_profile.use_ssl {
+                                ui.checkbox(&mut self.editing_profile.accept_invalid_certs, "Accept self-signed");
                             }
-                        }
-
-                        // Process deferred actions
-                        if let Some(idx) = do_connect_idx {
-                            if idx < self.profiles.len() {
-                                let profile = self.profiles[idx].clone();
-                                let password = std::mem::take(&mut self.editing_password);
-                                self.conn_connect_idx = None;
-                                // Cache the SSH password from the prompt if provided.
-                                if !self.editing_ssh_password.is_empty() {
-                                    self.session_ssh_passwords.insert(profile.prefix(), std::mem::take(&mut self.editing_ssh_password));
+                            ui.add_space(12.0);
+                            ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel");
+                        });
+                        if self.editing_profile.ssh_enabled {
+                            ui.add_space(4.0);
+                            egui::Grid::new("ssh_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                                ui.label("SSH Host:");
+                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_host)
+                                    .desired_width(240.0)
+                                    .hint_text("user@host or host"));
+                                ui.end_row();
+                                ui.label("SSH Port:");
+                                let mut ssh_port_str = self.editing_profile.ssh_port.map(|p| p.to_string()).unwrap_or_default();
+                                if ui.add(egui::TextEdit::singleline(&mut ssh_port_str).desired_width(80.0).hint_text("22")).changed() {
+                                    self.editing_profile.ssh_port = if ssh_port_str.is_empty() { None } else { ssh_port_str.parse::<u16>().ok() };
                                 }
-                                self.do_connect(&profile, password, ui.ctx());
-                            }
+                                ui.end_row();
+                                ui.label("SSH User:");
+                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_user)
+                                    .desired_width(240.0)
+                                    .hint_text("leave blank to use SSH config / system user"));
+                                ui.end_row();
+                                ui.label("SSH Password:");
+                                ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password)
+                                    .password(true)
+                                    .desired_width(240.0)
+                                    .hint_text("leave blank to use SSH agent / keys"));
+                                ui.end_row();
+                            });
+                            ui.checkbox(&mut self.editing_profile.ssh_save_password, "Save SSH password");
+                            ui.add_space(2.0);
+                            hint(ui, "Connects via an ssh -L tunnel using your SSH agent / ~/.ssh keys.\nThe relay host/port above is where the tunnel forwards to.");
+                            ui.add_space(4.0);
                         }
-                        if let Some(prefix) = do_disconnect {
-                            if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == prefix) {
-                                conn.client.disconnect();
-                            }
-                        }
-                        if let Some(idx) = do_delete {
-                            if idx < self.profiles.len() {
-                                self.profiles.remove(idx);
-                                if self.conn_connect_idx == Some(idx) { self.conn_connect_idx = None; }
-                            }
-                        }
-                        if let Some(idx) = do_edit {
-                            if idx < self.profiles.len() {
-                                let profile = &self.profiles[idx];
-                                self.editing_password = crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()).unwrap_or_default();
-                                self.editing_ssh_password = crate::ui::secure_storage::load_by_key(&profile.ssh_keyring_key()).unwrap_or_default();
-                                self.editing_profile = profile.clone();
-                                self.editing_profile_idx = Some(idx);
-                                self.conn_show_add = true;
-                            }
-                        }
-                        if toggle_add {
-                            self.editing_profile = ConnectionProfile::default();
-                            self.editing_password.clear();
-                            self.editing_ssh_password.clear();
-                            self.editing_profile_idx = None;
-                            self.conn_show_add = true;
-                        }
-
-                        ui.add_space(16.0);
-                        ui.vertical_centered_justified(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
+                            ui.checkbox(&mut self.editing_profile.auto_reconnect, "Auto-reconnect");
+                            ui.checkbox(&mut self.editing_profile.save_password, "Save password");
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
                             if ui.add(
-                                egui::Button::new(RichText::new("Close").strong().color(Color32::WHITE))
-                                    .fill(accent_color)
-                                    .min_size(Vec2::new(0.0, 34.0))
+                                egui::Button::new(RichText::new("Save").strong().color(Color32::WHITE))
+                                    .fill(accent_color).min_size(Vec2::new(80.0, 28.0))
                             ).clicked() {
-                                close = true;
+                                if self.editing_profile.save_password && !self.editing_password.is_empty() {
+                                    let key = self.editing_profile.keyring_host_key();
+                                    let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_password);
+                                }
+                                if self.editing_profile.ssh_save_password && !self.editing_ssh_password.is_empty() {
+                                    let key = self.editing_profile.ssh_keyring_key();
+                                    let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_ssh_password);
+                                }
+                                // Cache passwords for the session so connect skips prompts.
+                                let pfx = self.editing_profile.prefix();
+                                if !self.editing_password.is_empty() {
+                                    self.session_passwords.insert(pfx.clone(), self.editing_password.clone());
+                                }
+                                if !self.editing_ssh_password.is_empty() {
+                                    self.session_ssh_passwords.insert(pfx, self.editing_ssh_password.clone());
+                                }
+                                let profile = self.editing_profile.clone();
+                                if let Some(idx) = self.editing_profile_idx {
+                                    if idx < self.profiles.len() { self.profiles[idx] = profile; }
+                                } else {
+                                    self.profiles.push(profile);
+                                }
+                                self.conn_show_add = false;
+                                self.editing_profile = ConnectionProfile::default();
+                                self.editing_password.clear();
+                                self.editing_ssh_password.clear();
+                                self.editing_profile_idx = None;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.conn_show_add = false;
+                                self.editing_profile = ConnectionProfile::default();
+                                self.editing_password.clear();
+                                self.editing_ssh_password.clear();
+                                self.editing_profile_idx = None;
                             }
                         });
                     });
-                });
+            } else {
+                if self.profiles.is_empty() {
+                    hint(ui, "No connections yet. Add a WeeChat relay or an IRC server to get started.");
+                    ui.add_space(8.0);
+                }
+                for (idx, profile) in self.profiles.iter().enumerate() {
+                    let prefix = profile.prefix();
+                    let conn_opt = self.connections.iter().find(|c| c.prefix == prefix);
+                    let is_connected = conn_opt.map(|c| c.client.is_connected()).unwrap_or(false);
+                    let is_pending = conn_opt.map(|c| c.connecting_pending).unwrap_or(false);
+                    let has_error = conn_opt.and_then(|c| c.auth_error.as_ref()).is_some();
+                    let dot_color = if is_connected && !is_pending {
+                        Color32::from_rgb(50, 205, 50)
+                    } else if is_pending {
+                        Color32::from_rgb(255, 165, 0)
+                    } else if has_error {
+                        Color32::from_rgb(220, 60, 60)
+                    } else {
+                        Color32::from_gray(120)
+                    };
+
+                    Frame::NONE
+                        .fill(p.card)
+                        .corner_radius(CornerRadius::same(6))
+                        .stroke(Stroke::new(1.0, p.border))
+                        .inner_margin(Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("●").color(dot_color).size(11.0));
+                                ui.label(RichText::new(&profile.label).strong());
+                                let badge = match profile.backend_type { BackendType::WeeChat => "WeeChat", BackendType::Soju => "IRC" };
+                                ui.label(RichText::new(badge).small().color(accent_color));
+                                ui.label(RichText::new(format!("{}:{}", profile.host, profile.port)).small().color(ui.visuals().weak_text_color()));
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button(icons::X).on_hover_text("Delete").clicked() { do_delete = Some(idx); }
+                                    if ui.small_button(icons::PENCIL_SIMPLE).on_hover_text("Edit").clicked() { do_edit = Some(idx); }
+                                    if is_connected || is_pending {
+                                        if ui.button("Disconnect").clicked() { do_disconnect = Some(prefix.clone()); }
+                                    } else if self.conn_connect_idx == Some(idx) {
+                                        // Inline password prompt — shown only when passwords aren't cached/stored.
+                                        ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).hint_text("Password…").desired_width(110.0));
+                                        if profile.ssh_enabled {
+                                            ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password).password(true).hint_text("SSH password…").desired_width(110.0));
+                                        }
+                                        if ui.button("OK").clicked() {
+                                            if !self.editing_ssh_password.is_empty() {
+                                                self.session_ssh_passwords.insert(prefix.clone(), std::mem::take(&mut self.editing_ssh_password));
+                                            }
+                                            do_connect_idx = Some(idx);
+                                        }
+                                        if ui.button(icons::X).clicked() {
+                                            self.conn_connect_idx = None;
+                                            self.editing_password.clear();
+                                            self.editing_ssh_password.clear();
+                                        }
+                                    } else if ui.button("Connect").clicked() {
+                                        // Check session cache, then keyring — skip prompt if password found.
+                                        let relay_pw = self.session_passwords.get(&prefix).cloned()
+                                            .or_else(|| crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()));
+                                        let ssh_pw_known = !profile.ssh_enabled
+                                            || self.session_ssh_passwords.contains_key(&prefix)
+                                            || profile.ssh_save_password;
+                                        if relay_pw.is_some() && ssh_pw_known {
+                                            self.editing_password = relay_pw.unwrap_or_default();
+                                            do_connect_idx = Some(idx);
+                                        } else {
+                                            self.editing_password = relay_pw.unwrap_or_default();
+                                            self.conn_connect_idx = Some(idx);
+                                        }
+                                    }
+                                });
+                            });
+                            if let Some(err) = conn_opt.and_then(|c| c.auth_error.as_ref()) {
+                                ui.label(RichText::new(format!("{} {}", icons::WARNING, err)).small().color(Color32::from_rgb(220, 80, 80)));
+                            }
+                        });
+                    ui.add_space(4.0);
+                }
+
+                ui.add_space(4.0);
+                if ui.add(
+                    egui::Button::new(RichText::new("+ Add Connection").color(accent_color))
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::new(1.0, accent_color))
+                        .min_size(Vec2::new(0.0, 30.0))
+                ).clicked() {
+                    toggle_add = true;
+                }
+            }
         });
 
-        if close { self.show_connections = false; }
+        // Process deferred actions
+        if let Some(idx) = do_connect_idx {
+            if idx < self.profiles.len() {
+                let profile = self.profiles[idx].clone();
+                let password = std::mem::take(&mut self.editing_password);
+                self.conn_connect_idx = None;
+                if !self.editing_ssh_password.is_empty() {
+                    self.session_ssh_passwords.insert(profile.prefix(), std::mem::take(&mut self.editing_ssh_password));
+                }
+                self.do_connect(&profile, password, ui.ctx());
+            }
+        }
+        if let Some(prefix) = do_disconnect {
+            if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == prefix) {
+                conn.client.disconnect();
+            }
+        }
+        if let Some(idx) = do_delete {
+            if idx < self.profiles.len() {
+                self.profiles.remove(idx);
+                if self.conn_connect_idx == Some(idx) { self.conn_connect_idx = None; }
+            }
+        }
+        if let Some(idx) = do_edit {
+            if idx < self.profiles.len() {
+                let profile = &self.profiles[idx];
+                self.editing_password = crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()).unwrap_or_default();
+                self.editing_ssh_password = crate::ui::secure_storage::load_by_key(&profile.ssh_keyring_key()).unwrap_or_default();
+                self.editing_profile = profile.clone();
+                self.editing_profile_idx = Some(idx);
+                self.conn_show_add = true;
+            }
+        }
+        if toggle_add {
+            self.editing_profile = ConnectionProfile::default();
+            self.editing_password.clear();
+            self.editing_ssh_password.clear();
+            self.editing_profile_idx = None;
+            self.conn_show_add = true;
+        }
     }
 }

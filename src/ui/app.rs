@@ -170,6 +170,33 @@ const PREFIX_COL_WIDTHS_MAX: usize = 500;
 /// Drop entries from `map` until its size is at most `cap`. We don't track
 /// insertion order, so eviction picks an arbitrary key — acceptable for caches
 /// where the goal is to prevent unbounded growth, not optimal hit rate.
+/// Height of the custom macOS titlebar strip (matches the native traffic-light area).
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_TITLEBAR_HEIGHT: f32 = 28.0;
+
+/// Opaque titlebar strip for a macOS window with a full-size content view and hidden
+/// native titlebar: draws `title` centred, drags the window, double-click zooms. The native
+/// traffic lights sit on top of it. Applies to whichever viewport `ui` belongs to.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_titlebar(ui: &mut egui::Ui, title: &str, fill: Color32, border: Color32, text_color: Color32) {
+    egui::Panel::top("window_titlebar")
+        .exact_size(MACOS_TITLEBAR_HEIGHT)
+        .show_separator_line(false)
+        .frame(Frame::NONE.fill(fill).stroke(Stroke::new(1.0, border)))
+        .show(ui, |ui| {
+            let rect = ui.max_rect();
+            let res = ui.interact(rect, ui.scope_id().with("titlebar_drag"), egui::Sense::click_and_drag());
+            if res.double_clicked() {
+                let ctx = ui.ctx();
+                let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            } else if res.drag_started_by(egui::PointerButton::Primary) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, title, FontId::proportional(13.0), text_color);
+        });
+}
+
 fn cap_map<V>(map: &mut HashMap<String, V>, cap: usize) {
     while map.len() > cap {
         let victim = match map.keys().next() {
@@ -496,6 +523,10 @@ pub struct WeeChatApp {
     pub(crate) input_text: String,
     // Settings
     pub(crate) show_settings: bool,
+    pub(crate) settings_section: crate::ui::settings::SettingsSection,
+    /// Where the Settings / Connections windows opened; kept while open so they stay put.
+    pub(crate) settings_window_pos: Option<egui::Pos2>,
+    pub(crate) connections_window_pos: Option<egui::Pos2>,
     pub(crate) show_filtered_lines: bool,
     pub(crate) colored_nicks: bool,
     pub(crate) theme: AppTheme,
@@ -714,6 +745,9 @@ impl WeeChatApp {
             selected_buffer_id: None,
             input_text: String::new(),
             show_settings: false,
+            settings_section: Default::default(),
+            settings_window_pos: None,
+            connections_window_pos: None,
             show_filtered_lines: settings.show_filtered_lines,
             colored_nicks: settings.colored_nicks,
             theme: settings.theme,
@@ -822,7 +856,6 @@ impl WeeChatApp {
     /// uses a full-size content view, see main.rs). Handles drag and double-click zoom.
     #[cfg(target_os = "macos")]
     fn draw_macos_titlebar(&self, root_ui: &mut egui::Ui, surface_color: Color32, text_color: Color32, border_color: Color32) {
-        const TITLEBAR_HEIGHT: f32 = 28.0;
         let fill = Color32::from_rgb(surface_color.r(), surface_color.g(), surface_color.b());
 
         let title = self.selected_buffer_id.as_ref()
@@ -830,29 +863,7 @@ impl WeeChatApp {
             .map(|b| format!("{} — WeeChatRS", b.name))
             .unwrap_or_else(|| "WeeChatRS".to_string());
 
-        egui::Panel::top("window_titlebar")
-            .exact_size(TITLEBAR_HEIGHT)
-            .show_separator_line(false)
-            .frame(Frame::NONE.fill(fill).stroke(Stroke::new(1.0, border_color)))
-            .show(root_ui, |ui| {
-                let rect = ui.max_rect();
-                let res = ui.interact(rect, ui.scope_id().with("titlebar_drag"), egui::Sense::click_and_drag());
-                if res.double_clicked() {
-                    let ctx = ui.ctx();
-                    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                } else if res.drag_started_by(egui::PointerButton::Primary) {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
-
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    title,
-                    FontId::proportional(13.0),
-                    text_color,
-                );
-            });
+        macos_titlebar(root_ui, &title, fill, border_color, text_color);
     }
 
     pub(crate) fn draw_sidebar_icon(painter: &Painter, rect: Rect, color: Color32, is_right: bool) {
@@ -1476,12 +1487,10 @@ impl eframe::App for WeeChatApp {
                         ui.add_space(8.0);
 
                         if ui.button(egui::RichText::new(icons::GEAR).size(16.0)).on_hover_text("Settings").clicked() {
-                            self.show_settings = !self.show_settings;
-                            self.show_connections = false;
+                            self.open_settings(ui.ctx());
                         }
                         if ui.button(egui::RichText::new(icons::PLUGS).size(14.0)).on_hover_text("Connections").clicked() {
-                            self.show_connections = !self.show_connections;
-                            self.show_settings = false;
+                            self.open_connections(ui.ctx());
                         }
                         let log_icon = if self.connection_log_unread {
                             egui::RichText::new(icons::TERMINAL_WINDOW).size(16.0).color(Color32::from_rgb(255, 165, 0))
@@ -1491,8 +1500,6 @@ impl eframe::App for WeeChatApp {
                         if ui.button(log_icon).on_hover_text("Connection log").clicked() {
                             self.show_connection_log = !self.show_connection_log;
                             self.connection_log_unread = false;
-                            self.show_settings = false;
-                            self.show_connections = false;
                         }
                         // Show status indicators for each active connection
                         for conn in &self.connections {
@@ -2079,11 +2086,7 @@ impl eframe::App for WeeChatApp {
             // egui panels use screen_rect as clip_rect — explicitly restrict to this
             // panel's rect so content cannot paint into adjacent side panels.
             ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-            if self.show_settings {
-                self.show_settings_window(ui, accent_color, is_light);
-            } else if self.show_connections {
-                self.show_connections_window(ui, accent_color, is_light);
-            } else if self.show_connection_log {
+            if self.show_connection_log {
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.show_connection_log = false;
                 }
@@ -2712,6 +2715,8 @@ impl eframe::App for WeeChatApp {
         }
 
         self.show_quick_switcher(ctx, accent_color, text_muted);
+        self.show_settings_window(ctx, accent_color, is_light);
+        self.show_connections_window(ctx, accent_color, is_light);
 
         if let Some((buf_id, count)) = pending_load_more {
             self.loading_more_buffer_id = Some(buf_id.clone());
