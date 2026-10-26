@@ -2,10 +2,8 @@
 //!
 //! - **Linux**: zbus → `org.freedesktop.Notifications.Notify` with embedded
 //!   PNG passed as `image-data` hint. No subprocess, no fallback CLI.
-//! - **macOS**: `mac-notification-sys` directly (no notify-rust wrapper). Uses
-//!   the bundle's icon automatically; we do not pass an icon path so the OS
-//!   doesn't try to "open" it via LaunchServices (which previously triggered
-//!   the "Choose Application" picker).
+//! - **macOS**: `UNUserNotificationCenter` (bundled `.app` only). The banner
+//!   shows the bundle icon, plus the app icon attached as an image.
 //! - **Windows**: `notify-rust` is still used (kept for now; native Win32 toast
 //!   support can be added later).
 //!
@@ -53,7 +51,7 @@ mod backend {
         use std::sync::OnceLock;
         static CACHED: OnceLock<Option<(i32, i32, i32, bool, i32, i32, Vec<u8>)>> = OnceLock::new();
         CACHED.get_or_init(|| {
-            let bytes: &[u8] = include_bytes!("../../assets/icon.png");
+            let bytes: &[u8] = include_bytes!("../../assets/notification-icon.png");
             let img = image::load_from_memory(bytes).ok()?.to_rgba8();
             let (w, h) = (img.width() as i32, img.height() as i32);
             let rowstride = w * 4;
@@ -111,13 +109,40 @@ mod backend {
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, ProtocolObject};
     use objc2::{define_class, msg_send, AnyThread};
-    use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString, NSURL};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationAttachment,
         UNNotification, UNNotificationPresentationOptions,
         UNNotificationRequest, UNUserNotificationCenter,
         UNUserNotificationCenterDelegate,
     };
+
+    const ICON_PNG: &[u8] = include_bytes!("../../assets/notification-icon.png");
+
+    /// The banner's left-hand icon is always the bundle icon (which macOS caches
+    /// aggressively); attaching the app icon as well shows it in the banner body.
+    /// The system *moves* attachment files into its own store, so each
+    /// notification needs a fresh copy.
+    fn icon_attachment(id: &str) -> Option<Retained<UNNotificationAttachment>> {
+        let path = std::env::temp_dir().join(format!("{id}.png"));
+        std::fs::write(&path, ICON_PNG).ok()?;
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+        let attachment = unsafe {
+            UNNotificationAttachment::attachmentWithIdentifier_URL_options_error(
+                &NSString::from_str("icon"),
+                &url,
+                None,
+            )
+        };
+        match attachment {
+            Ok(a) => Some(a),
+            Err(e) => {
+                log::warn!("notification icon attachment: {:?}", e);
+                let _ = std::fs::remove_file(&path);
+                None
+            }
+        }
+    }
 
     /// Returns true only when running inside a proper `.app` bundle.
     /// `UNUserNotificationCenter::currentNotificationCenter()` crashes
@@ -204,7 +229,12 @@ mod backend {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let id = NSString::from_str(&format!("weechat-{}", ts));
+        let id_str = format!("weechat-{}", ts);
+        let id = NSString::from_str(&id_str);
+
+        if let Some(attachment) = icon_attachment(&id_str) {
+            content.setAttachments(&NSArray::from_slice(&[&*attachment]));
+        }
 
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &id,
@@ -227,7 +257,7 @@ mod backend {
     fn icon_path() -> Option<&'static str> {
         static ICON_PATH: OnceLock<Option<String>> = OnceLock::new();
         ICON_PATH.get_or_init(|| {
-            let bytes: &[u8] = include_bytes!("../../assets/icon.png");
+            let bytes: &[u8] = include_bytes!("../../assets/notification-icon.png");
             let path = std::env::temp_dir().join("weechat-rs-notification-icon.png");
             std::fs::write(&path, bytes).ok()?;
             Some(path.to_string_lossy().into_owned())

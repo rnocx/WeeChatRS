@@ -6,6 +6,7 @@ BINARY_NAME="weechat-rs"
 BUNDLE="${APP_NAME}.app"
 ASSETS_DIR="assets"
 OUT_DIR="dist/macos"
+VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 
 echo "==> Installing targets..."
 rustup target add x86_64-apple-darwin aarch64-apple-darwin
@@ -43,9 +44,9 @@ cat > "${OUT_DIR}/${BUNDLE}/Contents/Info.plist" <<EOF
     <key>CFBundleIdentifier</key>
     <string>com.github.rnocx.weechat-gui</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleExecutable</key>
     <string>${BINARY_NAME}</string>
     <key>CFBundleIconFile</key>
@@ -67,9 +68,26 @@ chmod +x "${OUT_DIR}/${BUNDLE}/Contents/MacOS/${BINARY_NAME}"
 echo "==> Signing .app bundle (ad-hoc)..."
 codesign --force --deep --sign - "${OUT_DIR}/${BUNDLE}"
 
+# Re-register so Finder, the Dock and Notification Center pick up a changed icon.
+touch "${OUT_DIR}/${BUNDLE}"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "${OUT_DIR}/${BUNDLE}" || true
+
 echo ""
 echo "==> Done: ${OUT_DIR}/${BUNDLE}"
 echo "    Universal binary: ${OUT_DIR}/${BINARY_NAME}-universal"
-echo ""
-echo "To create a DMG (optional):"
-echo "    hdiutil create -volname '${APP_NAME}' -srcfolder '${OUT_DIR}/${BUNDLE}' -ov -format UDZO '${OUT_DIR}/${APP_NAME}.dmg'"
+
+# --dmg: drag-to-install disk image. "Applications" must be a *symlink*;
+# copying /Applications into the stage dir would pull every installed app in.
+if [ "${1:-}" = "--dmg" ]; then
+    DMG="${OUT_DIR}/${APP_NAME}-${VERSION}-macos-universal.dmg"
+    STAGE="$(mktemp -d)"
+    trap 'rm -rf "${STAGE}"' EXIT
+    cp -R "${OUT_DIR}/${BUNDLE}" "${STAGE}/"
+    ln -s /Applications "${STAGE}/Applications"
+    echo "==> Creating ${DMG}..."
+    hdiutil create -volname "${APP_NAME}" -srcfolder "${STAGE}" -ov -format UDZO "${DMG}" >/dev/null
+    echo "    -> ${DMG}"
+else
+    echo ""
+    echo "Run with --dmg to also build ${OUT_DIR}/${APP_NAME}-${VERSION}-macos-universal.dmg"
+fi

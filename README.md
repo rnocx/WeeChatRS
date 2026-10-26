@@ -40,8 +40,9 @@
 - **Theming** — import any `.itermcolors` file; background, foreground, and all 16 ANSI colors applied live
 - **Adaptive theme** — automatically derives accent color and surface tones from the imported palette
 - **Native notifications** — system alerts for highlights and private messages (macOS, Windows, Linux)
-- **Opacity control** — real-time transparency adjustment
+- **Opacity control** — real-time transparency adjustment, with optional native background blur on macOS
 - **Font & layout options** — font size, monospace toggle, prefix column alignment, timestamp display
+- **Quick switcher** — fuzzy-find any buffer from the keyboard
 
 ## Keyboard Shortcuts
 
@@ -55,6 +56,7 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 | `⌘/Ctrl + T` | Toggle toolbar |
 | `⌘/Ctrl + F` | Toggle message search |
 | `⌘/Ctrl + K` | Jump to next unread buffer |
+| `⌘/Ctrl + P` | Quick switcher — fuzzy-find a buffer |
 | `Alt + 1–9` | Jump to buffer by number |
 | `Tab` | Complete nick or emoji (cycles matches) |
 | `Arrow ↑ / ↓` | Cycle command history (input bar) |

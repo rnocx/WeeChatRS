@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=WeeChatRS
+GenericName=IRC Client
+Comment=GUI client for WeeChat Relay and IRC
+Exec=weechat-rs
+Icon=weechatrs
+Terminal=false
+Categories=Network;Chat;IRCClient;
+Keywords=irc;weechat;relay;chat;
+StartupNotify=true
+StartupWMClass=weechatrs

@@ -24,6 +24,8 @@ async fn main() -> eframe::Result<()> {
         .with_inner_size([1024.0, 768.0])
         .with_min_inner_size([400.0, 300.0])
         .with_transparent(true)
+        // Linux: Wayland app_id / X11 WM_CLASS, matched against weechatrs.desktop.
+        .with_app_id("weechatrs")
         .with_icon(icon);
 
     // On macOS a transparent window also makes the native titlebar see-through.

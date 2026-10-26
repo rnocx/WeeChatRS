@@ -1,6 +1,6 @@
 # Building WeeChatRS from Source
 
-Requires **Rust stable 1.75+**. Install via [rustup](https://rustup.rs) if needed.
+Requires **Rust stable 1.95+** (egui 0.37). Install via [rustup](https://rustup.rs) or update with `rustup update stable`.
 
 ## macOS
 
@@ -13,6 +13,15 @@ cd WeeChatRS
 cargo build --release
 # output: ./target/release/weechat-rs
 ```
+
+To build the universal `.app` bundle (and optionally a drag-to-install DMG):
+
+```bash
+./build-macos.sh          # dist/macos/WeeChatRS.app
+./build-macos.sh --dmg    # + dist/macos/WeeChatRS-<version>-macos-universal.dmg
+```
+
+Notifications only work from the `.app` bundle, not from `target/release/weechat-rs`.
 
 ## Linux
 
@@ -28,6 +37,19 @@ cd WeeChatRS
 cargo build --release
 # output: ./target/release/weechat-rs
 ```
+
+`./build-linux.sh` builds x86_64 and aarch64 in Docker and writes
+`dist/linux/WeeChatRS-<version>-linux-<arch>.zip`, containing the binary, a
+`weechatrs.desktop` entry, icons and `install.sh`. To install from the zip:
+
+```bash
+unzip WeeChatRS-*-linux-x86_64.zip && cd WeeChatRS-*-linux-x86_64
+./install.sh              # per-user, into ~/.local (no root)
+./install.sh --uninstall
+```
+
+The desktop entry gives the app its launcher, dock and notification icon on
+GNOME/KDE (the window's Wayland app_id is `weechatrs`).
 
 ## Windows — native build
 

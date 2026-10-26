@@ -22,6 +22,7 @@ impl WeeChatApp {
         let mut show_hidden_buffers = self.show_hidden_buffers;
         let mut emoji_rendering = self.emoji_rendering;
         let mut opacity = self.opacity;
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut blur_background = self.blur_background;
         let mut prefix_align_max = self.prefix_align_max;
         let mut prefix_suffix = self.prefix_suffix.clone();
@@ -96,6 +97,13 @@ impl WeeChatApp {
                             ui.checkbox(&mut show_link_previews, "Show link previews (preview button on URLs)");
                             ui.checkbox(&mut show_hidden_buffers, "Show hidden buffers in buffer list");
                             ui.checkbox(&mut emoji_rendering, "Color emoji rendering (requires emojinize script on WeeChat server)");
+                            if ui.button(format!("{} Send test notification", icons::BELL)).clicked() {
+                                crate::ui::notify::show(crate::ui::notify::Notification {
+                                    app_name: "WeeChatRS".to_string(),
+                                    title: "WeeChatRS".to_string(),
+                                    body: "Notifications are working.".to_string(),
+                                });
+                            }
                         });
 
                         ui.add_space(8.0);

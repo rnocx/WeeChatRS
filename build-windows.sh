@@ -29,7 +29,7 @@ extract_binary() {
 build_x86() {
     local image="weechat-rs-windows-x86_64-builder"
     echo "==> Building Docker image (x86_64)..."
-    docker build -f docker/Dockerfile.windows-x86_64 -t "${image}" .
+    docker build --pull -f docker/Dockerfile.windows-x86_64 -t "${image}" .
     echo "==> Extracting x86_64 binary..."
     extract_binary "${image}" "/weechat-rs-windows-x86_64.exe" "${OUT_DIR}/${BINARY_NAME}-x86_64-windows.exe"
     echo "    -> ${OUT_DIR}/${BINARY_NAME}-x86_64-windows.exe"
@@ -38,7 +38,7 @@ build_x86() {
 build_arm64() {
     local image="weechat-rs-windows-aarch64-builder"
     echo "==> Building Docker image (aarch64)..."
-    docker build -f docker/Dockerfile.windows-aarch64 -t "${image}" .
+    docker build --pull -f docker/Dockerfile.windows-aarch64 -t "${image}" .
     echo "==> Extracting aarch64 binary..."
     extract_binary "${image}" "/weechat-rs-windows-aarch64.exe" "${OUT_DIR}/${BINARY_NAME}-aarch64-windows.exe"
     echo "    -> ${OUT_DIR}/${BINARY_NAME}-aarch64-windows.exe"
