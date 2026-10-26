@@ -4,15 +4,7 @@ Thank you for your interest in contributing. Please read the guidelines below be
 
 ## Code Review
 
-All code must be reviewed and verified by a human before being merged. Do not blindly accept or submit AI-generated output — you are responsible for understanding and standing behind every line you contribute.
-
-## Use of LLMs
-
-Using LLMs (such as ChatGPT, Claude, Copilot, or similar tools) to assist with development is welcome. However:
-
-- You must read, understand, and verify any LLM-generated code before submitting it.
-- LLM output is a starting point, not a finished contribution. Test it, reason about it, and own it.
-- Do include AI attribution in commit messages or source code comments.
+All code must be reviewed and verified by a human before being merged. You are responsible for understanding and standing behind every line you contribute.
 
 ## General Guidelines
 
