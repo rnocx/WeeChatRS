@@ -162,6 +162,28 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
     Ok(LinkPreview { title, description, image_url, site_name })
 }
 
+/// Longest gap between two messages from the same nick that still groups them.
+const GROUP_MAX_GAP_SECS: i64 = 5 * 60;
+
+/// Whether a line's prefix is a nick (a chat message) rather than a WeeChat system
+/// prefix such as `-->`, `<--`, `--`, `=!=`, or the ` *` of a `/me` action.
+fn is_chat_prefix(plain_prefix: &str) -> bool {
+    plain_prefix.chars().any(char::is_alphanumeric)
+}
+
+/// Whether `line` continues a group started by `prev`, the previous line shown: both are
+/// chat messages from the same nick, on the same local day, at most
+/// [`GROUP_MAX_GAP_SECS`] apart.
+fn continues_group(prev: Option<&Line>, line: &Line) -> bool {
+    let Some(prev) = prev else { return false };
+    let gap = (line.timestamp - prev.timestamp).num_seconds();
+    is_chat_prefix(&line.plain_prefix)
+        && line.plain_prefix == prev.plain_prefix
+        && (0..=GROUP_MAX_GAP_SECS).contains(&gap)
+        && line.timestamp.with_timezone(&chrono::Local).date_naive()
+            == prev.timestamp.with_timezone(&chrono::Local).date_naive()
+}
+
 pub const INITIAL_LINES: usize = 300;
 const IMAGE_CACHE_MAX: usize = 200;
 const PREVIEW_CACHE_MAX: usize = 200;
@@ -399,6 +421,9 @@ pub struct AppSettings {
     pub blur_background: bool,
     #[serde(default)]
     pub show_hidden_buffers: bool,
+    /// Show the nick only once for consecutive messages from the same nick.
+    #[serde(default = "default_true")]
+    pub group_messages: bool,
     #[serde(default)]
     pub buffer_order: Vec<String>,
     #[serde(default)]
@@ -471,6 +496,7 @@ impl Default for AppSettings {
             opacity: 1.0,
             blur_background: true,
             show_hidden_buffers: false,
+            group_messages: true,
             buffer_order: Vec::new(),
             cleared_buffer_ids: HashSet::new(),
             save_password: false,
@@ -548,6 +574,7 @@ pub struct WeeChatApp {
     #[cfg(target_os = "macos")]
     applied_blur: Option<bool>,
     pub(crate) show_hidden_buffers: bool,
+    pub(crate) group_messages: bool,
 
     // Image preview state
     pub(crate) image_cache: HashMap<String, ImageState>,
@@ -773,6 +800,7 @@ impl WeeChatApp {
             #[cfg(target_os = "macos")]
             applied_blur: None,
             show_hidden_buffers: settings.show_hidden_buffers,
+            group_messages: settings.group_messages,
             image_cache: HashMap::new(),
             image_expanded: HashSet::new(),
             image_tx,
@@ -1130,6 +1158,7 @@ impl eframe::App for WeeChatApp {
             opacity: self.opacity,
             blur_background: self.blur_background,
             show_hidden_buffers: self.show_hidden_buffers,
+            group_messages: self.group_messages,
             buffer_order: self.buffer_order.clone(),
             cleared_buffer_ids: self.cleared_buffer_ids.clone(),
             save_password: false,
@@ -2321,6 +2350,8 @@ impl eframe::App for WeeChatApp {
 
                             if let Some(messages) = &current_buffer_messages {
                                 let mut marker_shown = false;
+                                // Previous line actually shown, for grouping consecutive messages from one nick.
+                                let mut prev_shown: Option<&Line> = None;
                                 let search_query = if self.search_text.is_empty() {
                                     None
                                 } else {
@@ -2361,6 +2392,7 @@ impl eframe::App for WeeChatApp {
                                         }
                                         ui.add_space(8.0);
                                         marker_shown = true;
+                                        prev_shown = None; // a group never spans the unread divider
                                     }
 
                                     let msg_sections = &line.parsed_message;
@@ -2390,6 +2422,11 @@ impl eframe::App for WeeChatApp {
                                     } else {
                                         Color32::TRANSPARENT
                                     };
+                                    let grouped = self.group_messages && continues_group(prev_shown, line);
+                                    prev_shown = Some(line);
+                                    // Grouped rows reserve the timestamp and nick columns as empty space of
+                                    // the same size (nothing to select or copy); the timestamp shows on hover.
+                                    let mut hidden_timestamp: Option<(Rect, String)> = None;
                                     ui.push_id(&line.id, |ui| {
                                     let mut row_hovered_url: Option<String> = None;
                                     let row_resp = Frame::NONE
@@ -2399,7 +2436,14 @@ impl eframe::App for WeeChatApp {
                                     ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
                                         if self.show_timestamps {
-                                            ui.label(egui::RichText::new(line.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()).font(font_id.clone()).color(text_muted));
+                                            let ts = line.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+                                            if grouped {
+                                                let size = ui.fonts_mut(|f| f.layout_no_wrap(ts.clone(), font_id.clone(), text_muted).size());
+                                                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                                                hidden_timestamp = Some((rect, ts));
+                                            } else {
+                                                ui.label(egui::RichText::new(&ts).font(font_id.clone()).color(text_muted));
+                                            }
                                         }
                                         let prefix_sections = &line.parsed_prefix;
 
@@ -2424,12 +2468,18 @@ impl eframe::App for WeeChatApp {
                                             |ui| {
                                                 let mut prefix_job = LayoutJob::default();
                                                 prefix_job.halign = egui::Align::RIGHT;
-                                                for s in prefix_sections { prefix_job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &render_theme)); }
-                                                ui.add(Label::new(prefix_job).extend());
+                                                for s in prefix_sections {
+                                                    prefix_job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &render_theme));
+                                                }
+                                                if grouped {
+                                                    ui.allocate_exact_size(egui::vec2(measured_w, ui.text_style_height(&TextStyle::Body)), egui::Sense::hover());
+                                                } else {
+                                                    ui.add(Label::new(prefix_job).extend());
+                                                }
                                             }
                                         );
                                         if !self.prefix_suffix.is_empty() {
-                                            ui.label(egui::RichText::new(&self.prefix_suffix).font(font_id.clone()).color(text_muted));
+                                            ui.add(Label::new(egui::RichText::new(&self.prefix_suffix).font(font_id.clone()).color(text_muted)).selectable(!grouped));
                                         }
 
                                         let msg_col_width = ui.available_width();
@@ -2639,6 +2689,11 @@ impl eframe::App for WeeChatApp {
                                     // Detect secondary (right) click via raw input — bypasses the
                                     // egui hit test so image/expand buttons still win primary clicks.
                                     let row_rect = row_resp.response.rect;
+                                    if let Some((ts_rect, ts)) = hidden_timestamp {
+                                        if ui.rect_contains_pointer(row_rect) {
+                                            ui.painter().text(ts_rect.left_top(), egui::Align2::LEFT_TOP, ts, font_id.clone(), text_muted);
+                                        }
+                                    }
                                     if ui.input(|i| {
                                         i.pointer.button_clicked(egui::PointerButton::Secondary)
                                         && i.pointer.interact_pos().map_or(false, |p| row_rect.contains(p))
@@ -2745,6 +2800,31 @@ impl eframe::App for WeeChatApp {
 #[cfg(test)]
 mod tests {
     use super::WeeChatApp;
+
+    fn line(prefix: &str, secs: i64) -> crate::relay::models::Line {
+        let ts = chrono::DateTime::from_timestamp(1_790_000_000 + secs, 0).unwrap();
+        crate::relay::models::Line::new(secs.to_string(), ts, prefix.to_string(), "hi".to_string(), true, false)
+    }
+
+    #[test]
+    fn groups_consecutive_messages_from_same_nick() {
+        use super::continues_group;
+        let a = line("roniez", 0);
+        assert!(!continues_group(None, &a), "first line starts a group");
+        assert!(continues_group(Some(&a), &line("roniez", 60)));
+        assert!(continues_group(Some(&a), &line("roniez", 300)), "exactly 5 minutes still groups");
+        assert!(!continues_group(Some(&a), &line("roniez", 301)), "more than 5 minutes starts a new group");
+        assert!(!continues_group(Some(&a), &line("user", 10)), "different nick");
+        assert!(!continues_group(Some(&line("roniez", 60)), &a), "time going backwards");
+    }
+
+    #[test]
+    fn system_lines_and_actions_never_group() {
+        use super::continues_group;
+        for prefix in ["-->", "<--", "--", "=!=", " *"] {
+            assert!(!continues_group(Some(&line(prefix, 0)), &line(prefix, 10)), "{prefix:?}");
+        }
+    }
 
     #[test]
     fn image_urls_by_path_or_fragment_filename() {
