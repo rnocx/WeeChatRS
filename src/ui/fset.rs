@@ -154,7 +154,6 @@ pub fn show_fset_panel(
     lines: &VecDeque<Line>,
     state: &mut FsetState,
     font_size: f32,
-    use_monospace: bool,
     _surface_color: Color32,
     text_color: Color32,
     text_muted: Color32,
@@ -173,7 +172,7 @@ pub fn show_fset_panel(
         }
     });
 
-    let font_id = FontId::new(font_size, if use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
+    let font_id = FontId::new(font_size, crate::ui::fonts::chat_family());
     let small_id = FontId::new((font_size - 2.0).max(10.0), FontFamily::Proportional);
     let row_height = font_size + 8.0;
 

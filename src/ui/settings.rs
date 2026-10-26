@@ -105,6 +105,7 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).small().color(ui.visuals().weak_text_color()));
 }
 
+const DEFAULT_CHAT_FONT: &str = "Default (JetBrains Mono)";
 const SETTINGS_SIZE: [f32; 2] = [760.0, 560.0];
 const CONNECTIONS_SIZE: [f32; 2] = [620.0, 520.0];
 
@@ -269,6 +270,7 @@ impl WeeChatApp {
 
     fn appearance_section(&mut self, ui: &mut egui::Ui, p: &Palette) {
         section_heading(ui, "Font");
+        hint(ui, "The chat font is used for messages, buffer names, the nick list and the input bar.");
         egui::Grid::new("appearance_font_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label("Size:");
             let sizes: &[f32] = &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 20.0, 22.0, 24.0];
@@ -282,11 +284,11 @@ impl WeeChatApp {
                 });
             ui.end_row();
 
-            ui.label("Family:");
+            ui.label("Chat font:");
             ui.horizontal(|ui| self.font_family_picker(ui, p));
             ui.end_row();
         });
-        ui.checkbox(&mut self.use_monospace, "Use a monospace font everywhere");
+        ui.checkbox(&mut self.monospace_ui, "Use the chat font for the whole interface");
 
         section_heading(ui, "Window");
         ui.horizontal(|ui| {
@@ -301,7 +303,7 @@ impl WeeChatApp {
     }
 
     fn font_family_picker(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        let selected_label = if self.font_name.is_empty() { "Default".to_string() } else { self.font_name.clone() };
+        let selected_label = if self.font_name.is_empty() { DEFAULT_CHAT_FONT.to_string() } else { self.font_name.clone() };
         let mut new_font: Option<(String, String)> = None;
         let combo_resp = egui::ComboBox::from_id_salt("font_family_combo")
             .selected_text(&selected_label)
@@ -316,7 +318,7 @@ impl WeeChatApp {
                     search_edit.request_focus();
                 }
                 ui.separator();
-                if ui.selectable_label(self.font_name.is_empty(), "Default").clicked() {
+                if ui.selectable_label(self.font_name.is_empty(), DEFAULT_CHAT_FONT).clicked() {
                     new_font = Some((String::new(), String::new()));
                 }
                 ui.separator();

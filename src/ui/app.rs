@@ -379,7 +379,10 @@ pub struct AppSettings {
     pub colored_nicks: bool,
     pub theme: AppTheme,
     pub font_size: f32,
-    pub use_monospace: bool,
+    /// Use the chat font for the whole UI, not just chat content. Renamed from
+    /// `use_monospace` (whose default was on) so older settings start with it off.
+    #[serde(default)]
+    pub monospace_ui: bool,
     pub show_timestamps: bool,
     pub show_buffers: bool,
     pub show_nicklist: bool,
@@ -455,7 +458,7 @@ impl Default for AppSettings {
             colored_nicks: true,
             theme: AppTheme::default(),
             font_size: 14.0,
-            use_monospace: true,
+            monospace_ui: false,
             show_timestamps: true,
             show_buffers: true,
             show_nicklist: true,
@@ -531,7 +534,7 @@ pub struct WeeChatApp {
     pub(crate) colored_nicks: bool,
     pub(crate) theme: AppTheme,
     pub(crate) font_size: f32,
-    pub(crate) use_monospace: bool,
+    pub(crate) monospace_ui: bool,
     pub(crate) show_timestamps: bool,
     pub(crate) auto_reconnect: bool,
     pub(crate) show_titlebar: bool,
@@ -752,7 +755,7 @@ impl WeeChatApp {
             colored_nicks: settings.colored_nicks,
             theme: settings.theme,
             font_size: settings.font_size,
-            use_monospace: settings.use_monospace,
+            monospace_ui: settings.monospace_ui,
             show_timestamps: settings.show_timestamps,
             show_buffers: settings.show_buffers,
             show_nicklist: settings.show_nicklist,
@@ -1111,7 +1114,7 @@ impl eframe::App for WeeChatApp {
             colored_nicks: self.colored_nicks,
             theme: self.theme.clone(),
             font_size: self.font_size,
-            use_monospace: self.use_monospace,
+            monospace_ui: self.monospace_ui,
             show_timestamps: self.show_timestamps,
             show_buffers: self.show_buffers,
             show_nicklist: self.show_nicklist,
@@ -1370,7 +1373,7 @@ impl eframe::App for WeeChatApp {
         }
 
         let mut style = (*ctx.global_style()).clone();
-        let font_family = if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional };
+        let font_family = if self.monospace_ui { crate::ui::fonts::chat_family() } else { FontFamily::Proportional };
 
         style.text_styles = [
             (TextStyle::Small, FontId::new(self.font_size * 0.8, font_family.clone())),
@@ -1524,7 +1527,7 @@ impl eframe::App for WeeChatApp {
 
         if self.show_buffers {
             if self.buffers_width == 0.0 {
-                let buf_font_id = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
+                let buf_font_id = FontId::new(self.font_size, crate::ui::fonts::chat_family());
                 let char_w = ctx.fonts_mut(|f| f.glyph_width(&buf_font_id, 'W'));
                 self.buffers_width = char_w * 20.0 + 20.0;
             }
@@ -1680,7 +1683,7 @@ impl eframe::App for WeeChatApp {
                                     egui::RichText::new(name).color(fg).italics()
                                 } else {
                                     egui::RichText::new(name).color(fg).strong()
-                                };
+                                }.family(crate::ui::fonts::chat_family());
                                 let unread       = if is_muted || is_root { 0 } else { buffer.unread_count };
                                 let buf_activity = buffer.activity;
 
@@ -1904,7 +1907,8 @@ impl eframe::App for WeeChatApp {
         let current_buffer_modes = current_buf.map(|b| b.modes.clone()).unwrap_or_default();
         let current_buffer_kind = current_buf.map(|b| b.kind.clone()).unwrap_or_default();
 
-        let font_id = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
+        // Chat content (messages, nick list, input) uses the chat font stack.
+        let font_id = FontId::new(self.font_size, crate::ui::fonts::chat_family());
 
         let any_connected = self.is_any_connected();
 
@@ -2040,6 +2044,7 @@ impl eframe::App for WeeChatApp {
                         ui.add_enabled_ui(selected_buffer_connected, |ui| {
                             let text_edit = egui::TextEdit::singleline(&mut self.input_text)
                                 .hint_text(hint)
+                                .font(font_id.clone())
                                 .margin(Margin::symmetric(8, 4))
                                 .lock_focus(true)
                                 .desired_width(ui.available_width() - 80.0);
@@ -2224,7 +2229,7 @@ impl eframe::App for WeeChatApp {
                                         ui.label(egui::RichText::new(format!("[{}]", current_buffer_modes)).color(accent_color).small());
                                     }
                                     if !current_buffer_topic.is_empty() {
-                                        let topic_font = FontId::new(self.font_size, if self.use_monospace { FontFamily::Monospace } else { FontFamily::Proportional });
+                                        let topic_font = FontId::new(self.font_size, crate::ui::fonts::chat_family());
                                         let sections = ANSIParser::parse(&current_buffer_topic);
                                         let mut job = LayoutJob::default();
                                         for s in sections { job.append(&s.text, 0.0, s.style.to_format(topic_font.clone(), &render_theme)); }
@@ -2246,7 +2251,6 @@ impl eframe::App for WeeChatApp {
                                 messages,
                                 &mut self.fset_state,
                                 self.font_size,
-                                self.use_monospace,
                                 surface_color,
                                 text_primary,
                                 text_muted,
