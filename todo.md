@@ -79,7 +79,7 @@
 2. [x] **Upgrade egui/eframe** from 0.27 to the latest release; fix API breakage (`Rounding` → `CornerRadius`, `Frame::none()`, `Margin`, panel/viewport builder changes, `App::update` signature, etc.).
 3. [x] **macOS vibrancy** — native blur (`NSVisualEffectView`) placed behind the content view (`src/ui/vibrancy.rs`, direct `objc2-app-kit`; `window-vibrancy` covers the GL surface); "Blur background" toggle in Settings.
 4. [x] **Icon font** — replace emoji glyph buttons (`⚙ ✕ 📎 🔍 🖼 🔗`) with the bundled Phosphor font (`src/ui/icons.rs`; `egui-phosphor` lags egui releases). Also enabled egui `monochrome_emoji_fonts` + eframe `system_fonts`, which 0.37 no longer enables by default.
-5. [x] **Quick switcher** (`Cmd+K` on macOS, `Ctrl+P` elsewhere) — fuzzy-find overlay across all buffers; Enter to jump, Esc to close; bindable via `keybinds.rs`.
+5. [x] **Quick switcher** (`Cmd/Ctrl+P`; `Cmd/Ctrl+K` is next-unread) — fuzzy-find overlay across all buffers; Enter to jump, Esc to close; bindable via `keybinds.rs`.
 
 Later: bundled Inter / JetBrains Mono fonts, modern chat layout (message grouping, day dividers, hover timestamps, initial avatars), panel animations, split `app.rs` into per-panel modules, fix hardcoded `0.1.0` in `build-macos.sh` Info.plist.
 

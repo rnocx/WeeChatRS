@@ -1,4 +1,4 @@
-//! `Cmd+K` / `Ctrl+P` quick switcher: fuzzy-find across all buffers.
+//! `Cmd/Ctrl+P` quick switcher: fuzzy-find across all buffers.
 
 use crate::relay::models::BufferActivity;
 use crate::ui::app::WeeChatApp;
