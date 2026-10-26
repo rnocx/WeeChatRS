@@ -2393,7 +2393,11 @@ impl eframe::App for WeeChatApp {
                                         let msg_col_width = ui.available_width();
                                         ui.vertical(|ui| {
                                             ui.set_min_width(msg_col_width);
-                                            ui.horizontal_wrapped(|ui| {
+                                            // Like `horizontal_wrapped`, but top-aligned and starting one text line
+                                            // tall: `horizontal_wrapped` centers items in an interact_size.y-tall
+                                            // row, which drops the text below the timestamp and prefix columns.
+                                            let row_size = egui::vec2(ui.available_width(), ui.text_style_height(&TextStyle::Body));
+                                            ui.allocate_ui_with_layout(row_size, egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true), |ui| {
                                                 ui.spacing_mut().item_spacing.x = 6.0;
                                                 for s in msg_sections {
                                                     if let Some(url) = &s.url {
