@@ -49,7 +49,10 @@ unzip WeeChatRS-*-linux-x86_64.zip && cd WeeChatRS-*-linux-x86_64
 ```
 
 The desktop entry gives the app its launcher, dock and notification icon on
-GNOME/KDE (the window's Wayland app_id is `weechatrs`).
+GNOME/KDE (the window's Wayland app_id is `weechatrs`). If you run the binary
+directly instead, it installs the same per-user entry and icons on first launch
+(pointing at the binary you ran) unless a system-wide `weechatrs.desktop` exists;
+set `WEECHATRS_NO_DESKTOP_INTEGRATION=1` to turn that off.
 
 ## Windows — native build
 

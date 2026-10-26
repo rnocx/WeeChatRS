@@ -2,11 +2,18 @@
 
 mod relay;
 mod ui;
+#[cfg(any(target_os = "linux", test))]
+mod desktop_integration;
 
 use ui::app::WeeChatApp;
 
 fn load_icon() -> egui::IconData {
+    // macOS: padded Dock-style icon. Elsewhere: the full-bleed 256px icon; X11 taskbars may
+    // ignore a 1024px (4 MB) _NET_WM_ICON.
+    #[cfg(target_os = "macos")]
     let bytes = include_bytes!("../assets/icon.png");
+    #[cfg(not(target_os = "macos"))]
+    let bytes = include_bytes!("../assets/notification-icon.png");
     let img = image::load_from_memory(bytes)
         .expect("invalid icon")
         .into_rgba8();
@@ -17,6 +24,10 @@ fn load_icon() -> egui::IconData {
 #[tokio::main]
 async fn main() -> eframe::Result<()> {
     env_logger::init();
+
+    // Before the window exists, so the compositor can match app_id to the desktop entry.
+    #[cfg(target_os = "linux")]
+    desktop_integration::ensure_installed();
 
     let icon = load_icon();
 
