@@ -1535,7 +1535,7 @@ impl eframe::App for WeeChatApp {
                             if !is_root && self.collapsed_servers.contains(&buffer.server) {
                                 continue;
                             }
-                            let is_child = buffer.kind == "channel" || buffer.kind == "private";
+                            let is_child = !is_root;
                             let in_dragged_group = dragged_group_ids.contains(&buffer.id);
 
                             // Connection header — shown when ≥2 connections are active, but

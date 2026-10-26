@@ -509,6 +509,14 @@ impl WeeChatApp {
         Utc::now()
     }
 
+    /// The buffer's plugin name. API v2 puts it in `local_variables.plugin`; a top-level
+    /// `plugin` field is used if present.
+    fn buffer_plugin(obj: &serde_json::Map<String, Value>) -> &str {
+        obj.get("plugin").and_then(|v| v.as_str())
+            .or_else(|| obj.get("local_variables").and_then(|v| v.get("plugin")).and_then(|v| v.as_str()))
+            .unwrap_or("")
+    }
+
     fn extract_metadata(
         obj: &serde_json::Map<String, Value>,
         topic: &mut String,
@@ -518,12 +526,13 @@ impl WeeChatApp {
         full_name: &str,
         plugin: &str,
     ) {
+        let plugin = if plugin.is_empty() { Self::buffer_plugin(obj) } else { plugin };
         *kind = "unknown".to_string();
         *server = "orphans".to_string();
 
-        if full_name == "weechat" || plugin == "core" || full_name == "core.weechat"
-            || full_name.ends_with(".core.weechat")
-        {
+        // Only the main WeeChat buffer is the core header. Other buffers can also report
+        // plugin "core" (e.g. highmon, `/buffer add` buffers); they're children of it.
+        if full_name == "weechat" || full_name == "core.weechat" || full_name.ends_with(".core.weechat") {
             *kind = "core".to_string();
             *server = "!00_core".to_string();
             return;
@@ -559,9 +568,16 @@ impl WeeChatApp {
                 if parts.len() <= 2 || (parts.len() == 3 && parts[1] == "server") { *kind = "server".to_string(); }
                 else { *kind = "channel".to_string(); }
             }
-        } else if !plugin.is_empty() {
-             if *server == "orphans" { *server = plugin.to_lowercase(); }
-             if *kind == "unknown" { *kind = "server".to_string(); }
+        } else {
+            // Non-IRC buffers only form their own network group when they say so
+            // (server var + type server/channel/private, e.g. a Matrix plugin). Everything
+            // else (fset, highmon, xfer, scripts…) is a child of the core buffer.
+            let own_network = *server != "orphans"
+                && matches!(kind.as_str(), "server" | "channel" | "private");
+            if !own_network {
+                *server = "!00_core".to_string();
+                if *kind != "channel" && *kind != "private" { *kind = "plugin".to_string(); }
+            }
         }
     }
 
@@ -594,7 +610,7 @@ impl WeeChatApp {
                     .or_else(|| obj.get("name").and_then(|v| v.as_str()))
                     .unwrap_or("unknown").to_string();
                 let raw_full_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
-                let plugin = obj.get("plugin").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let plugin = Self::buffer_plugin(obj).to_string();
                 let hidden = obj.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
                 let has_nicklist = obj.get("nicklist").and_then(|v| v.as_bool()).unwrap_or(true);
                 let relay_last_read_id = obj.get("last_read_line_id").and_then(|v| Self::parse_id(v))
@@ -683,27 +699,7 @@ impl WeeChatApp {
 
             // Re-apply user's custom ordering
             if !self.buffer_order.is_empty() {
-                let order = &self.buffer_order;
-                let max_order = order.len();
-
-                let server_header_pos: std::collections::HashMap<String, usize> = self.buffers.iter()
-                    .filter(|b| b.kind == "server" || b.kind == "core")
-                    .filter_map(|b| {
-                        order.iter().position(|id| id == &b.id)
-                            .map(|pos| (b.server.clone(), pos))
-                    })
-                    .collect();
-
-                self.buffers.sort_by_key(|b| {
-                    if let Some(pos) = order.iter().position(|id| id == &b.id) {
-                        pos * 10_000
-                    } else {
-                        let base = server_header_pos.get(&b.server)
-                            .map(|&p| p * 10_000 + 1)
-                            .unwrap_or(max_order * 10_000 + 1);
-                        base + b.number as usize
-                    }
-                });
+                apply_buffer_order(&mut self.buffers, &self.buffer_order);
             }
 
             // When multiple connections are present, group all buffers by connection prefix
@@ -1065,5 +1061,131 @@ impl WeeChatApp {
                 }
             }
         }
+    }
+}
+
+/// Re-apply the user's saved buffer order. Groups follow the saved position of their
+/// header (server/core row); children always stay directly under their own group's
+/// header, and a saved position only orders them within that group. That way a buffer
+/// whose group changed (e.g. a plugin buffer moved under core) can't end up stranded
+/// between other networks.
+fn apply_buffer_order(buffers: &mut [Buffer], order: &[String]) {
+    let max_order = order.len();
+    let is_root = |b: &Buffer| b.kind == "server" || b.kind == "core";
+
+    // Earliest saved position of each group's header.
+    let mut header_pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for b in buffers.iter().filter(|b| is_root(b)) {
+        if let Some(pos) = order.iter().position(|id| id == &b.id) {
+            header_pos.entry(b.server.clone()).and_modify(|p| *p = (*p).min(pos)).or_insert(pos);
+        }
+    }
+
+    buffers.sort_by_key(|b| {
+        // The core group (WeeChat buffer + plugin buffers) is always first, like buffer 1.
+        let group = if b.server == "!00_core" {
+            0
+        } else {
+            1 + header_pos.get(&b.server).copied().unwrap_or(max_order)
+        };
+        let within = if is_root(b) {
+            0
+        } else {
+            1 + order.iter().position(|id| id == &b.id)
+                .unwrap_or(max_order + b.number.max(0) as usize)
+        };
+        (group, b.server.clone(), within)
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(full_name: &str, plugin: &str, local_vars: Value) -> (String, String) {
+        let obj = serde_json::json!({ "local_variables": local_vars });
+        let (mut topic, mut modes, mut kind, mut server) = Default::default();
+        WeeChatApp::extract_metadata(obj.as_object().unwrap(), &mut topic, &mut modes, &mut kind, &mut server, full_name, plugin);
+        (kind, server)
+    }
+
+    #[test]
+    fn plugin_buffers_without_server_join_core_group() {
+        assert_eq!(meta("fset.fset", "fset", serde_json::json!({})), ("plugin".into(), "!00_core".into()));
+        assert_eq!(meta("perl.highmon", "perl", serde_json::json!({ "type": "free" })), ("plugin".into(), "!00_core".into()));
+    }
+
+    #[test]
+    fn plugin_name_is_read_from_local_variables() {
+        // API v2 shape: no top-level "plugin", it lives in local_variables.
+        assert_eq!(meta("fset.fset", "", serde_json::json!({ "plugin": "fset", "name": "fset" })), ("plugin".into(), "!00_core".into()));
+        assert_eq!(meta("perl.highmon", "", serde_json::json!({ "plugin": "perl", "type": "free" })), ("plugin".into(), "!00_core".into()));
+        assert_eq!(meta("irc.libera.#rust", "", serde_json::json!({ "plugin": "irc", "type": "channel", "server": "libera" })), ("channel".into(), "libera".into()));
+    }
+
+    #[test]
+    fn buffers_with_no_plugin_or_network_join_core_group() {
+        assert_eq!(meta("highmon", "", serde_json::json!({})), ("plugin".into(), "!00_core".into()));
+    }
+
+    #[test]
+    fn core_and_irc_buffers_keep_their_groups() {
+        assert_eq!(meta("core.weechat", "core", serde_json::json!({})), ("core".into(), "!00_core".into()));
+        assert_eq!(meta("irc.server.libera", "irc", serde_json::json!({ "type": "server", "server": "libera" })), ("server".into(), "libera".into()));
+        assert_eq!(meta("irc.libera.#rust", "irc", serde_json::json!({ "type": "channel", "server": "libera" })), ("channel".into(), "libera".into()));
+    }
+
+    #[test]
+    fn plugin_networks_keep_their_own_group() {
+        assert_eq!(meta("matrix.server.home", "matrix", serde_json::json!({ "type": "server", "server": "home" })), ("server".into(), "home".into()));
+        assert_eq!(meta("matrix.home.room", "matrix", serde_json::json!({ "type": "channel", "server": "home" })), ("channel".into(), "home".into()));
+    }
+
+    #[test]
+    fn non_core_buffers_reporting_plugin_core_are_children() {
+        // highmon can report plugin "core" and a server var without a type.
+        assert_eq!(meta("core.highmon", "", serde_json::json!({ "plugin": "core", "name": "highmon" })), ("plugin".into(), "!00_core".into()));
+        assert_eq!(meta("perl.highmon", "perl", serde_json::json!({ "server": "highmon" })), ("plugin".into(), "!00_core".into()));
+        assert_eq!(meta("core.weechat", "", serde_json::json!({ "plugin": "core", "name": "weechat" })), ("core".into(), "!00_core".into()));
+    }
+
+    #[test]
+    fn core_group_is_always_first() {
+        let order: Vec<String> = ["nixsec", "#a", "supernets", "core", "highmon"].iter().map(|s| s.to_string()).collect();
+        let mut buffers = vec![
+            buf("nixsec", "server", "nixsec", 2), buf("#a", "channel", "nixsec", 3),
+            buf("supernets", "server", "supernets", 4), buf("core", "core", "!00_core", 1),
+            buf("highmon", "plugin", "!00_core", 5),
+        ];
+        apply_buffer_order(&mut buffers, &order);
+        let ids: Vec<&str> = buffers.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["core", "highmon", "nixsec", "#a", "supernets"]);
+    }
+
+    fn buf(id: &str, kind: &str, server: &str, number: i32) -> Buffer {
+        Buffer {
+            id: id.into(), number, name: id.into(), full_name: id.into(), plugin: String::new(),
+            kind: kind.into(), server: server.into(), messages: Default::default(), nicks: Default::default(),
+            activity: BufferActivity::None, unread_count: 0, last_read_id: None, last_markread_ts: None,
+            topic: String::new(), modes: String::new(), hidden: false, muted: false, has_nicklist: false,
+            visit_start_marker_id: None,
+        }
+    }
+
+    #[test]
+    fn saved_order_keeps_children_under_their_header() {
+        // Saved order from before the fix: fset/highmon were stranded between networks.
+        let order: Vec<String> = ["core", "nixsec", "#a", "myam", "#b", "highmon", "fset", "supernets"]
+            .iter().map(|s| s.to_string()).collect();
+        let mut buffers = vec![
+            buf("supernets", "server", "supernets", 9), buf("#b", "channel", "myam", 6),
+            buf("fset", "plugin", "!00_core", 8), buf("nixsec", "server", "nixsec", 2),
+            buf("highmon", "plugin", "!00_core", 7), buf("core", "core", "!00_core", 1),
+            buf("myam", "server", "myam", 5), buf("#a", "channel", "nixsec", 3),
+            buf("newnet", "server", "newnet", 10), buf("#new", "channel", "nixsec", 4),
+        ];
+        apply_buffer_order(&mut buffers, &order);
+        let ids: Vec<&str> = buffers.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["core", "highmon", "fset", "nixsec", "#a", "#new", "myam", "#b", "supernets", "newnet"]);
     }
 }
