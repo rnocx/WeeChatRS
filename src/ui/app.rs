@@ -96,13 +96,26 @@ fn decode_entities(s: &str) -> String {
      .replace("&nbsp;", " ")
 }
 
+/// Largest inline image we download.
+const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+
 async fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        // Many hosts (e.g. Wikimedia) answer 403 to requests without a User-Agent.
+        .user_agent(concat!("Mozilla/5.0 (compatible; WeeChatRS/", env!("CARGO_PKG_VERSION"), ")"))
         .build()
         .map_err(|e| e.to_string())?;
-    let bytes = client.get(url).send().await.map_err(|e| e.to_string())?
-        .bytes().await.map_err(|e| e.to_string())?;
+    // Fail on 4xx/5xx instead of trying to decode the error page as an image.
+    let resp = client.get(url).send().await.map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?;
+    if resp.content_length().is_some_and(|n| n as usize > MAX_IMAGE_BYTES) {
+        return Err("image too large".to_string());
+    }
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("image too large".to_string());
+    }
     Ok(bytes.to_vec())
 }
 
@@ -116,12 +129,19 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?;
     let ct = resp.headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_lowercase();
+    let host = || url::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from));
+    // A link with no filename hint that turns out to be an image (e.g. a file-share
+    // URL): preview it as the image itself instead of failing.
+    if ct.starts_with("image/") {
+        return Ok(LinkPreview { title: None, description: None, image_url: Some(url.clone()), site_name: host() });
+    }
     if !ct.contains("text/html") {
         return Err("not html".to_string());
     }
@@ -133,8 +153,7 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
     let description = extract_og_tag(&html, "og:description")
         .or_else(|| extract_meta_description(&html));
     let image_url = extract_og_tag(&html, "og:image");
-    let site_name = extract_og_tag(&html, "og:site_name")
-        .or_else(|| url::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)));
+    let site_name = extract_og_tag(&html, "og:site_name").or_else(host);
 
     if title.is_none() && description.is_none() {
         return Err("no preview data".to_string());
@@ -852,12 +871,17 @@ impl WeeChatApp {
         url.contains("cdnjs.cloudflare.com/ajax/libs/twemoji")
     }
 
+    /// Whether a URL points at an image, judged by the file extension of its path or,
+    /// failing that, of a filename in its `#fragment`. File hosts such as Jirafeau link as
+    /// `f.php?h=…&p=1#Screenshot.png`, with the real filename only in the fragment.
     pub(crate) fn is_image_url(url: &str) -> bool {
-        let path = url.split('?').next().unwrap_or(url).to_lowercase();
-        matches!(
-            std::path::Path::new(&path).extension().and_then(|e| e.to_str()),
+        let has_image_ext = |s: &str| matches!(
+            std::path::Path::new(&s.to_lowercase()).extension().and_then(|e| e.to_str()),
             Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
-        )
+        );
+        let (before_fragment, fragment) = url.split_once('#').unwrap_or((url, ""));
+        let path = before_fragment.split('?').next().unwrap_or(before_fragment);
+        has_image_ext(path) || (!fragment.is_empty() && has_image_ext(fragment.rsplit('/').next().unwrap_or(fragment)))
     }
 
     pub(crate) fn is_any_connected(&self) -> bool {
@@ -1166,17 +1190,29 @@ impl eframe::App for WeeChatApp {
             match result {
                 Ok(bytes) => {
                     match image::load_from_memory(&bytes) {
-                        Ok(img) => {
+                        Ok(mut img) => {
+                            // Inline previews render ≤500px wide; cap the texture well
+                            // below GPU texture-size limits.
+                            const MAX_SIDE: u32 = 2048;
+                            if img.width() > MAX_SIDE || img.height() > MAX_SIDE {
+                                img = img.thumbnail(MAX_SIDE, MAX_SIDE);
+                            }
                             let rgba = img.to_rgba8();
                             let size = [rgba.width() as usize, rgba.height() as usize];
                             let color_img = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
                             let handle = ctx.load_texture(&url, color_img, egui::TextureOptions::default());
                             self.image_cache.insert(url, ImageState::Loaded(handle));
                         }
-                        Err(_) => { self.image_cache.insert(url, ImageState::Failed); }
+                        Err(e) => {
+                            log::warn!("image decode failed for {url}: {e}");
+                            self.image_cache.insert(url, ImageState::Failed);
+                        }
                     }
                 }
-                Err(_) => { self.image_cache.insert(url, ImageState::Failed); }
+                Err(e) => {
+                    log::warn!("image fetch failed for {url}: {e}");
+                    self.image_cache.insert(url, ImageState::Failed);
+                }
             }
             cap_map(&mut self.image_cache, IMAGE_CACHE_MAX);
             got_image = true;
@@ -2349,7 +2385,6 @@ impl eframe::App for WeeChatApp {
                                     };
                                     ui.push_id(&line.id, |ui| {
                                     let mut row_hovered_url: Option<String> = None;
-                                    let mut bg_resp: Option<egui::Response> = None;
                                     let row_resp = Frame::NONE
                                         .fill(row_bg)
                                         .corner_radius(CornerRadius::same(3))
@@ -2591,9 +2626,6 @@ impl eframe::App for WeeChatApp {
                                             }
                                         }); // end vertical (message column)
                                     }); // end horizontal (full message row)
-                                    // Register the row background BEFORE children (pre-reserved slot)
-                                    // so the hit test picks buttons (registered later = "topmost") over the bg.
-                                    bg_resp = Some(ui.response().interact(egui::Sense::click()));
                                     }); // end highlight frame
                                     let plain_message = line.plain_message.clone();
                                     let plain_prefix = line.plain_prefix.clone();
@@ -2698,5 +2730,39 @@ impl eframe::App for WeeChatApp {
         if any_connected {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WeeChatApp;
+
+    #[test]
+    fn image_urls_by_path_or_fragment_filename() {
+        assert!(WeeChatApp::is_image_url("https://example.com/a/pic.PNG?size=2"));
+        assert!(WeeChatApp::is_image_url("https://files.nixsec.se/f.php?h=18TGUOq5&p=1#Screenshot_2026-10-26_at_09.38.06.png"));
+        assert!(WeeChatApp::is_image_url("https://host/f.php?h=x#dir/photo.jpeg"));
+        assert!(!WeeChatApp::is_image_url("https://files.nixsec.se/f.php?h=18TGUOq5&p=1"));
+        assert!(!WeeChatApp::is_image_url("https://example.com/page.html#section.png-notes"));
+        assert!(!WeeChatApp::is_image_url("https://example.com/docs#install"));
+    }
+
+    // Network tests: run with `cargo test -- --ignored`.
+
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn fetches_and_decodes_image_from_host_requiring_user_agent() {
+        // Wikimedia answers 403 to requests without a User-Agent.
+        let url = "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png";
+        let bytes = super::fetch_image_bytes(url).await.expect("fetch");
+        let img = image::load_from_memory(&bytes).expect("decode");
+        assert!(img.width() > 0 && img.height() > 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn http_errors_are_reported_not_decoded() {
+        let url = "https://upload.wikimedia.org/wikipedia/commons/does-not-exist-weechatrs.png";
+        assert!(super::fetch_image_bytes(url).await.is_err());
     }
 }
