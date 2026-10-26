@@ -222,6 +222,7 @@ pub enum KeybindAction {
     JumpNextUnread,
     /// The AppKey stored here is a placeholder; matching checks for any digit 1–9.
     JumpBufferByNumber,
+    QuickSwitcher,
 }
 
 impl KeybindAction {
@@ -235,6 +236,7 @@ impl KeybindAction {
             Self::ToggleToolbar      => "Toggle toolbar",
             Self::JumpNextUnread     => "Jump to next unread",
             Self::JumpBufferByNumber => "Jump to buffer N (+ 1–9)",
+            Self::QuickSwitcher      => "Quick switcher",
         }
     }
 
@@ -247,6 +249,7 @@ impl KeybindAction {
         Self::ToggleToolbar,
         Self::JumpNextUnread,
         Self::JumpBufferByNumber,
+        Self::QuickSwitcher,
     ];
 }
 
@@ -266,6 +269,7 @@ fn default_keybinds() -> HashMap<KeybindAction, Shortcut> {
         (ToggleToolbar,      (cmd,  T)),
         (JumpNextUnread,     (cmd,  K)),
         (JumpBufferByNumber, (alt,  Num1)),
+        (QuickSwitcher,      (cmd,  P)),
     ].into()
 }
 
@@ -279,6 +283,14 @@ impl Default for KeybindsMap {
 }
 
 impl KeybindsMap {
+    /// Fill in defaults for actions added after the user's settings were saved.
+    pub fn with_missing_defaults(mut self) -> Self {
+        for (action, shortcut) in default_keybinds() {
+            self.0.entry(action).or_insert(shortcut);
+        }
+        self
+    }
+
     /// Returns true and consumes the event if the given action's shortcut was triggered.
     pub fn consume(&self, i: &mut egui::InputState, action: KeybindAction) -> bool {
         let Some((mods, key)) = self.0.get(&action) else { return false };

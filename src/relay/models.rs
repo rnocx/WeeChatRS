@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use crate::ui::ansi::{ANSIParser, ANSISection};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -32,8 +33,10 @@ pub struct Buffer {
     pub plugin: String,
     pub kind: String,
     pub server: String,
-    pub messages: VecDeque<Line>,
-    pub nicks: Vec<Nick>,
+    /// Behind `Arc` so the render pass can take a cheap handle each frame;
+    /// mutate via `Arc::make_mut` (no copy once that handle is dropped).
+    pub messages: Arc<VecDeque<Line>>,
+    pub nicks: Arc<Vec<Nick>>,
     pub activity: BufferActivity,
     pub unread_count: u32,
     pub last_read_id: Option<String>,

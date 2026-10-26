@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use egui::{Color32, FontFamily, FontId, Frame, Margin, RichText, ScrollArea, TextEdit};
 use regex::Regex;
 use crate::relay::models::Line;
+use crate::ui::icons;
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -154,7 +155,7 @@ pub fn show_fset_panel(
     state: &mut FsetState,
     font_size: f32,
     use_monospace: bool,
-    surface_color: Color32,
+    _surface_color: Color32,
     text_color: Color32,
     text_muted: Color32,
     accent_color: Color32,
@@ -218,8 +219,8 @@ pub fn show_fset_panel(
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            Frame::none()
-                .inner_margin(Margin::symmetric(16.0, 4.0))
+            Frame::NONE
+                .inner_margin(Margin::symmetric(16, 4))
                 .show(ui, |ui| {
                     if filtered.is_empty() && !options.is_empty() {
                         ui.centered_and_justified(|ui| {
@@ -320,7 +321,7 @@ pub fn show_fset_panel(
                             // --- Reset button ---
                             if opt.is_changed {
                                 let (cell_rect, _) = ui.allocate_exact_size(egui::vec2(col_actions, row_height), egui::Sense::hover());
-                                let btn = egui::Button::new(RichText::new("↩").color(text_muted)).frame(false);
+                                let btn = egui::Button::new(RichText::new(icons::ARROW_U_UP_LEFT).color(text_muted)).frame(false);
                                 if ui.put(cell_rect, btn).on_hover_text("Reset to default").clicked() {
                                     actions.push(FsetAction::ResetToDefault { name: opt.name.clone() });
                                 }

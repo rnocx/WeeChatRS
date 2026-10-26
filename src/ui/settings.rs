@@ -1,7 +1,8 @@
 use crate::ui::theme::{AppTheme, ThemeColor};
 use crate::ui::app::{WeeChatApp, ConnectionProfile, BackendType};
 use crate::ui::fonts;
-use egui::{Color32, Vec2, RichText, ScrollArea, Frame, Rounding, Margin, Stroke};
+use crate::ui::icons;
+use egui::{Color32, Vec2, RichText, ScrollArea, Frame, CornerRadius, Margin, Stroke};
 use egui::color_picker::{color_edit_button_srgba, Alpha};
 
 impl WeeChatApp {
@@ -21,6 +22,7 @@ impl WeeChatApp {
         let mut show_hidden_buffers = self.show_hidden_buffers;
         let mut emoji_rendering = self.emoji_rendering;
         let mut opacity = self.opacity;
+        let mut blur_background = self.blur_background;
         let mut prefix_align_max = self.prefix_align_max;
         let mut prefix_suffix = self.prefix_suffix.clone();
         let mut close = false;
@@ -47,11 +49,11 @@ impl WeeChatApp {
 
         ui.vertical_centered(|ui| {
             ui.add_space(24.0);
-            Frame::none()
+            Frame::NONE
                 .fill(opaque_fill)
-                .rounding(Rounding::same(12.0))
+                .corner_radius(CornerRadius::same(12))
                 .stroke(Stroke::new(1.0, border_color))
-                .inner_margin(Margin::same(24.0))
+                .inner_margin(Margin::same(24))
                 .show(ui, |ui| {
                     ui.set_max_width(540.0);
 
@@ -62,7 +64,7 @@ impl WeeChatApp {
                             ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(11.0).color(accent_color.linear_multiply(0.7)));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(RichText::new("✕").size(16.0)).clicked() {
+                            if ui.button(RichText::new(icons::X).size(16.0)).clicked() {
                                 close = true;
                             }
                         });
@@ -79,7 +81,7 @@ impl WeeChatApp {
                             ui.checkbox(&mut show_timestamps, "Show timestamps");
                             ui.horizontal(|ui| {
                                 ui.label("Nick column max width (chars):");
-                                ui.add(egui::DragValue::new(&mut prefix_align_max).clamp_range(0usize..=64usize).speed(1));
+                                ui.add(egui::DragValue::new(&mut prefix_align_max).range(0usize..=64usize).speed(1));
                                 ui.label(RichText::new("0 = auto").small().color(ui.visuals().weak_text_color()));
                             });
                             ui.horizontal(|ui| {
@@ -90,8 +92,8 @@ impl WeeChatApp {
                             ui.checkbox(&mut auto_reconnect, "Auto-reconnect on drop");
                             ui.checkbox(&mut show_titlebar, "Show Topic/Modes Titlebar");
                             ui.checkbox(&mut show_server_headers, "Show server group headers in buffer list");
-                            ui.checkbox(&mut show_inline_images, "Show inline image previews (🖼 preview button on image URLs)");
-                            ui.checkbox(&mut show_link_previews, "Show link previews (🔗 preview button on URLs)");
+                            ui.checkbox(&mut show_inline_images, "Show inline image previews (preview button on image URLs)");
+                            ui.checkbox(&mut show_link_previews, "Show link previews (preview button on URLs)");
                             ui.checkbox(&mut show_hidden_buffers, "Show hidden buffers in buffer list");
                             ui.checkbox(&mut emoji_rendering, "Color emoji rendering (requires emojinize script on WeeChat server)");
                         });
@@ -103,7 +105,7 @@ impl WeeChatApp {
                         ui.horizontal(|ui| {
                             use crate::ui::fileshare::FileShareService;
                             ui.label("Service:");
-                            egui::ComboBox::from_id_source("file_share_service_combo")
+                            egui::ComboBox::from_id_salt("file_share_service_combo")
                                 .selected_text(match self.file_share_service {
                                     FileShareService::Jirafeau => "Jirafeau (files.interdo.me)",
                                     FileShareService::Litterbox => "Litterbox (litterbox.catbox.moe)",
@@ -134,7 +136,7 @@ impl WeeChatApp {
                                         .find(|(v, _)| *v == self.file_share_duration)
                                         .map(|(_, l)| *l)
                                         .unwrap_or("1 day");
-                                    egui::ComboBox::from_id_source("file_share_duration_combo")
+                                    egui::ComboBox::from_id_salt("file_share_duration_combo")
                                         .selected_text(selected_label)
                                         .width(120.0)
                                         .show_ui(ui, |ui| {
@@ -148,7 +150,7 @@ impl WeeChatApp {
                                         .find(|(v, _)| *v == self.file_share_duration)
                                         .map(|(_, l)| *l)
                                         .unwrap_or("24 hours");
-                                    egui::ComboBox::from_id_source("file_share_duration_combo")
+                                    egui::ComboBox::from_id_salt("file_share_duration_combo")
                                         .selected_text(selected_label)
                                         .width(120.0)
                                         .show_ui(ui, |ui| {
@@ -167,7 +169,7 @@ impl WeeChatApp {
                         ui.horizontal(|ui| {
                             ui.label("Font size:");
                             let sizes: &[f32] = &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 20.0, 22.0, 24.0];
-                            egui::ComboBox::from_id_source("font_size_combo")
+                            egui::ComboBox::from_id_salt("font_size_combo")
                                 .selected_text(format!("{}px", font_size as u32))
                                 .width(80.0)
                                 .show_ui(ui, |ui| {
@@ -184,7 +186,7 @@ impl WeeChatApp {
                             } else {
                                 self.font_name.clone()
                             };
-                            let combo_resp = egui::ComboBox::from_id_source("font_family_combo")
+                            let combo_resp = egui::ComboBox::from_id_salt("font_family_combo")
                                 .selected_text(&selected_label)
                                 .width(220.0)
                                 .show_ui(ui, |ui| {
@@ -195,7 +197,7 @@ impl WeeChatApp {
                                             .desired_width(f32::INFINITY),
                                     );
                                     // Auto-focus the search field when the popup first opens.
-                                    if search_edit.gained_focus() || (!search_edit.has_focus() && ui.memory(|m| m.any_popup_open()) ) {
+                                    if search_edit.gained_focus() || (!search_edit.has_focus() && egui::Popup::is_any_open(ui.ctx()) ) {
                                         search_edit.request_focus();
                                     }
                                     ui.separator();
@@ -243,6 +245,8 @@ impl WeeChatApp {
                             ui.label("Opacity:");
                             ui.add(egui::Slider::new(&mut opacity, 0.1..=1.0));
                         });
+                        #[cfg(target_os = "macos")]
+                        ui.checkbox(&mut blur_background, "Blur background (lower opacity to see it)");
 
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -406,7 +410,7 @@ impl WeeChatApp {
                                     if ui.add(btn).clicked() {
                                         self.editing_keybind = if is_capturing { None } else { Some(action) };
                                     }
-                                    if ui.small_button("↺").on_hover_text("Reset to default").clicked() {
+                                    if ui.small_button(icons::ARROW_COUNTER_CLOCKWISE).on_hover_text("Reset to default").clicked() {
                                         let defaults = crate::ui::keybinds::KeybindsMap::default();
                                         if let Some(default) = defaults.0.get(&action) {
                                             self.keybinds.0.insert(action, *default);
@@ -456,6 +460,7 @@ impl WeeChatApp {
         self.show_hidden_buffers = show_hidden_buffers;
         self.emoji_rendering = emoji_rendering;
         self.opacity = opacity;
+        self.blur_background = blur_background;
         self.prefix_align_max = prefix_align_max;
         if self.prefix_suffix != prefix_suffix {
             self.prefix_suffix = prefix_suffix;
@@ -499,18 +504,18 @@ impl WeeChatApp {
 
         ui.vertical_centered(|ui| {
             ui.add_space(24.0);
-            Frame::none()
+            Frame::NONE
                 .fill(opaque_fill)
-                .rounding(Rounding::same(12.0))
+                .corner_radius(CornerRadius::same(12))
                 .stroke(Stroke::new(1.0, border_color))
-                .inner_margin(Margin::same(24.0))
+                .inner_margin(Margin::same(24))
                 .show(ui, |ui| {
                     ui.set_max_width(540.0);
 
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Connections").strong().size(18.0));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(RichText::new("✕").size(16.0)).clicked() {
+                            if ui.button(RichText::new(icons::X).size(16.0)).clicked() {
                                 close = true;
                             }
                         });
@@ -521,11 +526,11 @@ impl WeeChatApp {
 
                     ScrollArea::vertical().show(ui, |ui| {
                         if self.conn_show_add {
-                            Frame::none()
+                            Frame::NONE
                                 .fill(if is_light { Color32::from_gray(225) } else { Color32::from_rgb(32, 32, 42) })
-                                .rounding(Rounding::same(8.0))
+                                .corner_radius(CornerRadius::same(8))
                                 .stroke(Stroke::new(1.0, accent_color.linear_multiply(0.4)))
-                                .inner_margin(Margin::same(14.0))
+                                .inner_margin(Margin::same(14))
                                 .show(ui, |ui| {
                                     let title = if self.editing_profile_idx.is_some() { "Edit Connection" } else { "New Connection" };
                                     ui.label(RichText::new(title).strong());
@@ -697,10 +702,10 @@ impl WeeChatApp {
                                     Color32::from_gray(120)
                                 };
 
-                                Frame::none()
+                                Frame::NONE
                                     .fill(if is_light { Color32::from_gray(225) } else { Color32::from_rgb(32, 32, 42) })
-                                    .rounding(Rounding::same(6.0))
-                                    .inner_margin(Margin::symmetric(10.0, 6.0))
+                                    .corner_radius(CornerRadius::same(6))
+                                    .inner_margin(Margin::symmetric(10, 6))
                                     .show(ui, |ui| {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
@@ -711,8 +716,8 @@ impl WeeChatApp {
                                             ui.label(RichText::new(format!("{}:{}", profile.host, profile.port)).small().color(ui.visuals().weak_text_color()));
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if ui.small_button("✕").on_hover_text("Delete").clicked() { do_delete = Some(idx); }
-                                                if ui.small_button("✎").on_hover_text("Edit").clicked() { do_edit = Some(idx); }
+                                                if ui.small_button(icons::X).on_hover_text("Delete").clicked() { do_delete = Some(idx); }
+                                                if ui.small_button(icons::PENCIL_SIMPLE).on_hover_text("Edit").clicked() { do_edit = Some(idx); }
                                                 if is_connected || is_pending {
                                                     if ui.button("Disconnect").clicked() { do_disconnect = Some(prefix.clone()); }
                                                 } else if self.conn_connect_idx == Some(idx) {
@@ -728,7 +733,7 @@ impl WeeChatApp {
                                                         }
                                                         do_connect_idx = Some(idx);
                                                     }
-                                                    if ui.button("✕").clicked() {
+                                                    if ui.button(icons::X).clicked() {
                                                         self.conn_connect_idx = None;
                                                         self.editing_password.clear();
                                                         self.editing_ssh_password.clear();
@@ -754,7 +759,7 @@ impl WeeChatApp {
                                             });
                                         });
                                         if let Some(err) = conn_opt.and_then(|c| c.auth_error.as_ref()) {
-                                            ui.label(RichText::new(format!("⚠ {}", err)).small().color(Color32::from_rgb(220, 80, 80)));
+                                            ui.label(RichText::new(format!("{} {}", icons::WARNING, err)).small().color(Color32::from_rgb(220, 80, 80)));
                                         }
                                     });
                                 ui.add_space(4.0);

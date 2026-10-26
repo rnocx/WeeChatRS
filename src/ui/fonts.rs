@@ -32,7 +32,7 @@ pub fn apply(ctx: &egui::Context, font_path: &str) {
         if let Ok(data) = std::fs::read(font_path) {
             fonts.font_data.insert(
                 "user_font".to_owned(),
-                egui::FontData::from_owned(data),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
             );
             fonts.families
                 .entry(egui::FontFamily::Proportional)
@@ -44,5 +44,6 @@ pub fn apply(ctx: &egui::Context, font_path: &str) {
                 .insert(0, "user_font".to_owned());
         }
     }
+    crate::ui::icons::install(&mut fonts);
     ctx.set_fonts(fonts);
 }

@@ -3,7 +3,7 @@ use crate::relay::models::*;
 use crate::ui::app::{WeeChatApp, MAX_STORED_LINES};
 use chrono::{Utc, DateTime, Local};
 use serde_json::Value;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 static ANSI_RE: OnceLock<regex::Regex> = OnceLock::new();
 
@@ -216,9 +216,9 @@ impl WeeChatApp {
                         }
                         buf.unread_count = buf.unread_count.saturating_add(1);
                     }
-                    buf.messages.push_back(line);
+                    Arc::make_mut(&mut buf.messages).push_back(line);
                     if buf.messages.len() > MAX_STORED_LINES {
-                        buf.messages.pop_front();
+                        Arc::make_mut(&mut buf.messages).pop_front();
                     }
                 }
                 if should_notify {
@@ -240,27 +240,27 @@ impl WeeChatApp {
                         .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
                 });
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                    buf.nicks = nicks;
+                    buf.nicks = Arc::new(nicks);
                 }
             }
             BackendEvent::NickAdded { buffer_id, nick } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     if !buf.nicks.iter().any(|n| n.name == nick.name) {
-                        buf.nicks.push(nick);
+                        Arc::make_mut(&mut buf.nicks).push(nick);
                     }
                 }
             }
             BackendEvent::NickRemoved { buffer_id, nick_name } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                    buf.nicks.retain(|n| !n.name.eq_ignore_ascii_case(&nick_name));
+                    Arc::make_mut(&mut buf.nicks).retain(|n| !n.name.eq_ignore_ascii_case(&nick_name));
                 }
             }
             BackendEvent::NickAwayChanged { buffer_id, nick_name, away } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                    if let Some(nick) = buf.nicks.iter_mut().find(|n| n.name.eq_ignore_ascii_case(&nick_name)) {
+                    if let Some(nick) = Arc::make_mut(&mut buf.nicks).iter_mut().find(|n| n.name.eq_ignore_ascii_case(&nick_name)) {
                         nick.away = away;
                     }
                 }
@@ -307,17 +307,17 @@ impl WeeChatApp {
                     }
                     if is_prepend {
                         for line in lines.into_iter().rev() {
-                            buf.messages.push_front(line);
+                            Arc::make_mut(&mut buf.messages).push_front(line);
                         }
                         while buf.messages.len() > MAX_STORED_LINES {
-                            buf.messages.pop_back();
+                            Arc::make_mut(&mut buf.messages).pop_back();
                         }
                     } else {
                         for line in lines {
-                            buf.messages.push_back(line);
+                            Arc::make_mut(&mut buf.messages).push_back(line);
                         }
                         while buf.messages.len() > MAX_STORED_LINES {
-                            buf.messages.pop_front();
+                            Arc::make_mut(&mut buf.messages).pop_front();
                         }
                     }
                 }
@@ -390,8 +390,8 @@ impl WeeChatApp {
                         if let Some(nick) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
                             if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                                 if !buf.nicks.iter().any(|n| n.name == nick.name) {
-                                    buf.nicks.push(nick);
-                                    buf.nicks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    Arc::make_mut(&mut buf.nicks).push(nick);
+                                    Arc::make_mut(&mut buf.nicks).sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                                 }
                             }
                         }
@@ -402,7 +402,7 @@ impl WeeChatApp {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(name) = resp.body.as_ref().and_then(|b| b.get("name")).and_then(|v| v.as_str()) {
                             if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                                buf.nicks.retain(|n| n.name != name);
+                                Arc::make_mut(&mut buf.nicks).retain(|n| n.name != name);
                             }
                         }
                     }
@@ -412,11 +412,11 @@ impl WeeChatApp {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(updated) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
                             if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                                if let Some(existing) = buf.nicks.iter_mut().find(|n| n.name == updated.name) {
+                                if let Some(existing) = Arc::make_mut(&mut buf.nicks).iter_mut().find(|n| n.name == updated.name) {
                                     *existing = updated;
                                 } else {
-                                    buf.nicks.push(updated);
-                                    buf.nicks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    Arc::make_mut(&mut buf.nicks).push(updated);
+                                    Arc::make_mut(&mut buf.nicks).sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                                 }
                             }
                         }
@@ -426,7 +426,7 @@ impl WeeChatApp {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                            buf.messages.clear();
+                            Arc::make_mut(&mut buf.messages).clear();
                             buf.last_read_id = None;
                             buf.visit_start_marker_id = None;
                         }
@@ -609,12 +609,12 @@ impl WeeChatApp {
                     let mut kind = String::new();
                     let mut server = String::new();
 
-                    let mut messages = std::collections::VecDeque::new();
-                    let mut nicks = Vec::new();
+                    let mut messages = Arc::default();
+                    let mut nicks = Arc::default();
                     let mut activity = BufferActivity::None;
                     let mut unread_count = 0u32;
                     let mut last_read_id = None;
-                    let mut visit_start_marker_id = None;
+                    let visit_start_marker_id = None;
 
                     if let Some(existing) = self.buffer_by_id(&full_id) {
                         messages = existing.messages.clone();
@@ -822,7 +822,7 @@ impl WeeChatApp {
                 if is_load_more { " (load more)" } else { "" },
                 buffer.name
             ));
-            buffer.messages = deque;
+            buffer.messages = Arc::new(deque);
             if is_selected {
                 // Anchor the unread divider before advancing last_read_id.
                 // Handles the case where the buffer was already active at reconnect
@@ -869,7 +869,7 @@ impl WeeChatApp {
             let mut nicks = Vec::new();
             self.extract_nicks(body, &mut nicks);
             if let Some(buffer) = self.buffer_by_id_mut(&full_buffer_id) {
-                buffer.nicks = nicks;
+                buffer.nicks = Arc::new(nicks);
             }
         }
     }
@@ -993,9 +993,9 @@ impl WeeChatApp {
                     if let Some(idx) = self.buffer_idx_of(&buffer_id) {
                         let buffer = &mut self.buffers[idx];
                         if !buffer.messages.iter().any(|m| m.id == line.id) {
-                            buffer.messages.push_back(line.clone());
+                            Arc::make_mut(&mut buffer.messages).push_back(line.clone());
                             if buffer.messages.len() > MAX_STORED_LINES {
-                                buffer.messages.pop_front();
+                                Arc::make_mut(&mut buffer.messages).pop_front();
                             }
 
                             if is_selected {
@@ -1050,15 +1050,15 @@ impl WeeChatApp {
                 if let (Some(raw_buffer_id), Some(line_id)) = (raw_buffer_id, line_id) {
                     let buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
                     if let Some(buffer) = self.buffer_by_id_mut(&buffer_id) {
-                        if let Some(line) = buffer.messages.iter_mut().find(|m| m.id == line_id) {
+                        if let Some(line) = Arc::make_mut(&mut buffer.messages).iter_mut().find(|m| m.id == line_id) {
                             line.displayed = displayed;
                         } else if displayed {
                             let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
                             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
                             let timestamp = Self::parse_date(obj.get("date"));
-                            buffer.messages.push_back(Line::new(line_id, timestamp, prefix.to_string(), message.to_string(), displayed, false));
+                            Arc::make_mut(&mut buffer.messages).push_back(Line::new(line_id, timestamp, prefix.to_string(), message.to_string(), displayed, false));
                             if buffer.messages.len() > MAX_STORED_LINES {
-                                buffer.messages.pop_front();
+                                Arc::make_mut(&mut buffer.messages).pop_front();
                             }
                         }
                     }

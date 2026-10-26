@@ -63,13 +63,25 @@
 
 - [x] **VecDeque for message buffer** — `Buffer::messages` is now a `VecDeque`; uses `push_back`/`pop_front` for O(1) front removal.
 
-- [ ] **Cloning entire message/nick vecs per frame** — `app.rs` clones `b.messages` (up to 1000 items, 10k cap) and `b.nicks` every frame for the render pass. Restructure render code to borrow these directly instead of cloning.
+- [x] **Cloning entire message/nick vecs per frame** — `app.rs` clones `b.messages` (up to 1000 items, 10k cap) and `b.nicks` every frame for the render pass. Restructure render code to borrow these directly instead of cloning.
 
 - [x] **Per-frame lowercase allocation in search** — search query is now lowercased once per frame outside the message loop.
 
 - [x] **Dead code: `debug_log` field** — removed.
 
 - [ ] **Tests** — `ANSIParser::parse`, `extract_metadata`, `sort_buffers`, and `parse_id` are pure/near-pure functions; good first targets for unit tests.
+
+---
+
+## ✨ Modernization (in order)
+
+1. [x] **Stop per-frame clones** — borrow `messages` / `nicks` in the render pass instead of cloning them every frame (see Code Quality item above).
+2. [x] **Upgrade egui/eframe** from 0.27 to the latest release; fix API breakage (`Rounding` → `CornerRadius`, `Frame::none()`, `Margin`, panel/viewport builder changes, `App::update` signature, etc.).
+3. [x] **macOS vibrancy** — native blur (`NSVisualEffectView`) placed behind the content view (`src/ui/vibrancy.rs`, direct `objc2-app-kit`; `window-vibrancy` covers the GL surface); "Blur background" toggle in Settings.
+4. [x] **Icon font** — replace emoji glyph buttons (`⚙ ✕ 📎 🔍 🖼 🔗`) with the bundled Phosphor font (`src/ui/icons.rs`; `egui-phosphor` lags egui releases). Also enabled egui `monochrome_emoji_fonts` + eframe `system_fonts`, which 0.37 no longer enables by default.
+5. [x] **Quick switcher** (`Cmd+K` on macOS, `Ctrl+P` elsewhere) — fuzzy-find overlay across all buffers; Enter to jump, Esc to close; bindable via `keybinds.rs`.
+
+Later: bundled Inter / JetBrains Mono fonts, modern chat layout (message grouping, day dividers, hover timestamps, initial avatars), panel animations, split `app.rs` into per-panel modules, fix hardcoded `0.1.0` in `build-macos.sh` Info.plist.
 
 ---
 

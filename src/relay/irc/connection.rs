@@ -4,7 +4,7 @@ use crate::relay::backend::BackendEvent;
 use crate::relay::models::{Buffer, BufferActivity, Line, Nick};
 use chrono::{DateTime, Utc};
 use egui::Context as EguiContext;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -143,8 +143,8 @@ impl Session {
             plugin: "irc".to_string(),
             kind: kind.to_string(),
             server: self.server_name.clone(),
-            messages: VecDeque::new(),
-            nicks: Vec::new(),
+            messages: Default::default(),
+            nicks: Default::default(),
             activity: BufferActivity::None,
             unread_count: 0,
             last_read_id: None,
