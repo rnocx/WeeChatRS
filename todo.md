@@ -45,8 +45,8 @@
 ## 📷 Media & Attachments
 - [x] Inline images — `🖼 preview` button on image URLs (.png/.jpg/.gif/.webp); click to load and display inline, toggleable in Settings
 - [x] Link previews — `🔗 preview` button on non-image URLs; fetches OG tags (title, description, og:image), renders card with left accent bar, toggleable in Settings
-- [x] File & image sharing — `/share` uploads a file from disk to a paste service and posts the URL; configurable upload duration; progress indicator in the toolbar
-- [ ] File drag & drop — drag a file onto the chat window to upload and share, without using `/share`
+- [x] File & image sharing — `/share [path]`, the paperclip button or drag & drop uploads to Jirafeau (self-hostable, upload/download passwords, chunked) or Litterbox and posts the link; configurable expiry; progress bar with Cancel above the input
+- [x] File drag & drop — drag a file onto the chat window to upload and share
 - [ ] Code syntax highlighting — `syntect` for fenced code blocks in chat ( debatable if this should exist)
 
 ---

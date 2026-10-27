@@ -10,7 +10,7 @@ pub enum AppKey {
     A, B, C, D, E, F, G, H, I, J, K, L, M,
     N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
     Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
-    Space, Enter, Tab, Escape,
+    Space, Enter, Tab, Escape, Comma,
     PageUp, PageDown, Home, End,
     Insert, Delete, Backspace,
     F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
@@ -45,6 +45,7 @@ impl AppKey {
             Self::Enter     => egui::Key::Enter,
             Self::Tab       => egui::Key::Tab,
             Self::Escape    => egui::Key::Escape,
+            Self::Comma     => egui::Key::Comma,
             Self::PageUp    => egui::Key::PageUp,
             Self::PageDown  => egui::Key::PageDown,
             Self::Home      => egui::Key::Home,
@@ -89,6 +90,7 @@ impl AppKey {
             egui::Key::Enter     => Some(Self::Enter),
             egui::Key::Tab       => Some(Self::Tab),
             egui::Key::Escape    => Some(Self::Escape),
+            egui::Key::Comma     => Some(Self::Comma),
             egui::Key::PageUp    => Some(Self::PageUp),
             egui::Key::PageDown  => Some(Self::PageDown),
             egui::Key::Home      => Some(Self::Home),
@@ -127,6 +129,7 @@ impl AppKey {
             Self::Enter     => "Enter",
             Self::Tab       => "Tab",
             Self::Escape    => "Esc",
+            Self::Comma     => ",",
             Self::PageUp    => "PgUp",
             Self::PageDown  => "PgDn",
             Self::Home      => "Home",
@@ -155,9 +158,14 @@ pub struct SerdeModifiers {
 
 impl SerdeModifiers {
     pub fn to_egui(self) -> egui::Modifiers {
+        self.to_egui_for(cfg!(target_os = "macos"))
+    }
+
+    /// [`Self::to_egui`] for a given platform, so both can be tested on either.
+    fn to_egui_for(self, macos: bool) -> egui::Modifiers {
         // On Windows/Linux, egui reports ctrl=true whenever Ctrl is pressed (same key as
         // "command"). We must set ctrl=true here so consume_key's exact-match works.
-        let ctrl = self.ctrl || (self.command && !cfg!(target_os = "macos"));
+        let ctrl = self.ctrl || (self.command && !macos);
         egui::Modifiers {
             alt: self.alt,
             ctrl,
@@ -223,6 +231,8 @@ pub enum KeybindAction {
     /// The AppKey stored here is a placeholder; matching checks for any digit 1–9.
     JumpBufferByNumber,
     QuickSwitcher,
+    OpenSettings,
+    OpenConnections,
 }
 
 impl KeybindAction {
@@ -237,6 +247,8 @@ impl KeybindAction {
             Self::JumpNextUnread     => "Jump to next unread",
             Self::JumpBufferByNumber => "Jump to buffer N (+ 1–9)",
             Self::QuickSwitcher      => "Quick switcher",
+            Self::OpenSettings       => "Open settings",
+            Self::OpenConnections    => "Open connections",
         }
     }
 
@@ -250,6 +262,8 @@ impl KeybindAction {
         Self::JumpNextUnread,
         Self::JumpBufferByNumber,
         Self::QuickSwitcher,
+        Self::OpenSettings,
+        Self::OpenConnections,
     ];
 }
 
@@ -259,6 +273,7 @@ fn default_keybinds() -> HashMap<KeybindAction, Shortcut> {
     use KeybindAction::*;
     use AppKey::*;
     let cmd = SerdeModifiers { command: true, ..Default::default() };
+    let cmd_shift = SerdeModifiers { command: true, shift: true, ..Default::default() };
     let alt = SerdeModifiers { alt: true, ..Default::default() };
     [
         (CycleBufferUp,      (cmd,  ArrowUp)),
@@ -270,6 +285,9 @@ fn default_keybinds() -> HashMap<KeybindAction, Shortcut> {
         (JumpNextUnread,     (cmd,  K)),
         (JumpBufferByNumber, (alt,  Num1)),
         (QuickSwitcher,      (cmd,  P)),
+        // Reachable even with the toolbar hidden.
+        (OpenSettings,       (cmd,  Comma)),
+        (OpenConnections,    (cmd_shift, C)),
     ].into()
 }
 
@@ -330,5 +348,75 @@ impl KeybindsMap {
             }
             None => "—".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_shortcuts_are_unique() {
+        let defaults = default_keybinds();
+        let mut seen = std::collections::HashSet::new();
+        for (action, shortcut) in &defaults {
+            assert!(seen.insert(*shortcut), "{action:?} reuses another action's shortcut");
+        }
+        assert!(defaults.contains_key(&KeybindAction::OpenSettings));
+        assert!(defaults.contains_key(&KeybindAction::OpenConnections));
+    }
+
+    /// Modifiers as egui-winit reports them for a key combo on each platform: on macOS the
+    /// ⌘ key sets `mac_cmd` and `command`; on Windows/Linux Ctrl sets `ctrl` and `command`.
+    fn pressed(macos: bool, primary: bool, shift: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            alt: false,
+            ctrl: primary && !macos,
+            shift,
+            mac_cmd: primary && macos,
+            command: primary,
+        }
+    }
+
+    /// Whether pressing `key` with `mods` triggers `action`'s default shortcut, using egui's
+    /// real matching (`InputState::consume_key`) in a headless frame.
+    fn fires(action: KeybindAction, macos: bool, mods: egui::Modifiers, key: egui::Key) -> bool {
+        let (shortcut_mods, shortcut_key) = default_keybinds()[&action];
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: mods });
+        let mut hit = false;
+        let mut output = egui::Context::default().run_ui(raw, |ui| {
+            hit = ui.ctx().input_mut(|i| i.consume_key(shortcut_mods.to_egui_for(macos), shortcut_key.to_egui()));
+        });
+        output.textures_delta.clear(); // headless: no renderer to hand the font atlas to
+        hit
+    }
+
+    #[test]
+    fn open_window_shortcuts_fire_on_every_platform() {
+        use egui::Key;
+        use KeybindAction::{OpenConnections, OpenSettings};
+        for macos in [true, false] {
+            let p = if macos { "macOS" } else { "Windows/Linux" };
+            // ⌘, / Ctrl+,  and  ⌘⇧C / Ctrl+Shift+C
+            assert!(fires(OpenSettings, macos, pressed(macos, true, false), Key::Comma), "{p}: settings");
+            assert!(fires(OpenConnections, macos, pressed(macos, true, true), Key::C), "{p}: connections");
+            // Must not fire: a bare comma while typing, or plain copy (⌘C / Ctrl+C).
+            assert!(!fires(OpenSettings, macos, pressed(macos, false, false), Key::Comma), "{p}: bare comma");
+            assert!(!fires(OpenConnections, macos, pressed(macos, true, false), Key::C), "{p}: copy");
+        }
+        // Ctrl+, on a Mac is not ⌘, and must not open Settings.
+        let mac_ctrl = egui::Modifiers { ctrl: true, ..Default::default() };
+        assert!(!fires(OpenSettings, true, mac_ctrl, Key::Comma), "macOS: Ctrl+,");
+    }
+
+    #[test]
+    fn saved_keybinds_gain_new_actions() {
+        // Settings saved before OpenSettings existed.
+        let mut old = KeybindsMap::default();
+        old.0.remove(&KeybindAction::OpenSettings);
+        old.0.remove(&KeybindAction::OpenConnections);
+        let upgraded = old.with_missing_defaults();
+        assert_eq!(upgraded.0.len(), KeybindAction::ALL.len());
     }
 }

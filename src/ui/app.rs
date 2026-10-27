@@ -1428,6 +1428,8 @@ impl eframe::App for WeeChatApp {
         let mut jump_next_unread = false;
         let mut jump_buffer_n: Option<usize> = None;
         let mut quick_switcher_shortcut = false;
+        let mut open_settings_shortcut = false;
+        let mut open_connections_shortcut = false;
         let quick_switcher_open = self.quick_switcher.open;
 
         ctx.input_mut(|i| {
@@ -1460,6 +1462,12 @@ impl eframe::App for WeeChatApp {
             if kb.consume(i, crate::ui::keybinds::KeybindAction::QuickSwitcher) {
                 quick_switcher_shortcut = true;
             }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::OpenSettings) {
+                open_settings_shortcut = true;
+            }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::OpenConnections) {
+                open_connections_shortcut = true;
+            }
             if let Some(n) = kb.consume_jump_number(i) {
                 jump_buffer_n = Some(n);
             }
@@ -1477,6 +1485,8 @@ impl eframe::App for WeeChatApp {
         if search_shortcut { self.show_search = !self.show_search; }
         if jump_next_unread { self.jump_next_unread(); }
         if quick_switcher_shortcut { self.quick_switcher.toggle(); }
+        if open_settings_shortcut { self.open_settings(ctx); }
+        if open_connections_shortcut { self.open_connections(ctx); }
         if let Some(n) = jump_buffer_n { self.jump_buffer_by_number(n); }
 
         if self.font_path != self.applied_font_path {

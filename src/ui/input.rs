@@ -185,6 +185,21 @@ impl WeeChatApp {
                 self.completion = None;
                 self.history_index = None;
                 return;
+            } else if msg.trim() == "/share" || msg.starts_with("/share ") {
+                // `/share` picks a file; `/share <path>` uploads that file. The link is
+                // posted to the current buffer when the upload finishes.
+                if let Some(buffer_id) = self.selected_buffer_id.clone() {
+                    let arg = msg.trim().strip_prefix("/share").unwrap_or("").trim();
+                    match share_path(arg) {
+                        None => self.start_upload(buffer_id, None),
+                        Some(path) if path.is_file() => self.start_upload(buffer_id, Some(path)),
+                        Some(path) => self.file_share_error = Some(format!("No such file: {}", path.display())),
+                    }
+                }
+                self.input_text.clear();
+                self.completion = None;
+                self.history_index = None;
+                return;
             } else if msg.trim() == "/np" || msg.starts_with("/np ") {
                 if let Some(buffer_id) = self.selected_buffer_id.clone() {
                     let custom = msg.trim().strip_prefix("/np").map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string());
@@ -256,5 +271,69 @@ impl WeeChatApp {
             client.send_message(&raw_id, command);
             client.fetch_buffer_list();
         }
+    }
+}
+
+/// Parse the argument of `/share`: empty means "pick a file". Accepts a quoted path and a
+/// leading `~/` for the home directory; on macOS/Linux also shell-escaped spaces
+/// (`My\\ File.png`, as pasted from a terminal), and on Windows `~\\` and backslash
+/// separators (which must not be treated as escapes).
+fn share_path(arg: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    share_path_for(arg, cfg!(windows), home.as_deref().map(std::path::Path::new))
+}
+
+fn share_path_for(arg: &str, windows: bool, home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return None;
+    }
+    let unquoted = arg
+        .strip_prefix('"').and_then(|a| a.strip_suffix('"'))
+        .or_else(|| arg.strip_prefix('\'').and_then(|a| a.strip_suffix('\'')));
+    let path = match unquoted {
+        Some(p) => p.to_string(),
+        None if !windows => arg.replace("\\ ", " "),
+        None => arg.to_string(),
+    };
+    let home_rest = path.strip_prefix("~/").or_else(|| if windows { path.strip_prefix("~\\") } else { None });
+    if let (Some(rest), Some(home)) = (home_rest, home) {
+        return Some(home.join(rest));
+    }
+    Some(std::path::PathBuf::from(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{share_path, share_path_for};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn share_path_unix() {
+        let home = Some(Path::new("/home/me"));
+        let p = |a| share_path_for(a, false, home);
+        assert_eq!(p(""), None);
+        assert_eq!(p("   "), None);
+        assert_eq!(p("/tmp/a.png"), Some(PathBuf::from("/tmp/a.png")));
+        assert_eq!(p("\"/tmp/my file.png\""), Some(PathBuf::from("/tmp/my file.png")));
+        assert_eq!(p("'/tmp/my file.png'"), Some(PathBuf::from("/tmp/my file.png")));
+        assert_eq!(p("/tmp/My\\ File.png"), Some(PathBuf::from("/tmp/My File.png")));
+        assert_eq!(p("~/x.txt"), Some(PathBuf::from("/home/me").join("x.txt")));
+    }
+
+    #[test]
+    fn share_path_windows() {
+        let home = Some(Path::new("C:\\Users\\me"));
+        let p = |a| share_path_for(a, true, home);
+        // Backslashes are separators on Windows, never escapes.
+        assert_eq!(p("C:\\Users\\me\\pic.png"), Some(PathBuf::from("C:\\Users\\me\\pic.png")));
+        assert_eq!(p("\"C:\\My Files\\a b.png\""), Some(PathBuf::from("C:\\My Files\\a b.png")));
+        assert_eq!(p("~\\Desktop\\a.png"), Some(Path::new("C:\\Users\\me").join("Desktop\\a.png")));
+        assert_eq!(p("~/Desktop/a.png"), Some(Path::new("C:\\Users\\me").join("Desktop/a.png")));
+    }
+
+    #[test]
+    fn share_path_uses_real_home() {
+        assert!(share_path("~/x").is_some());
     }
 }

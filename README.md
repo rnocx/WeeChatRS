@@ -33,7 +33,7 @@
 ### Commands
 - **`/np`** — posts now-playing track to the current channel; detects Apple Music, Spotify, Vox, and YouTube Music on macOS; playerctl on Linux; System Media Transport Controls (WinRT) on Windows
 - **`/sysinfo`** — posts system information (OS, CPU, memory) to the current channel
-- **`/share`** — uploads a file or image from disk and posts the URL; supports duration control
+- **`/share [path]`** — uploads a file and posts the link to the current buffer (no path opens a file picker); dragging a file onto the window or the paperclip button does the same. Uses Jirafeau (your own server or the default) or Litterbox with the expiry and passwords from Settings → File sharing, with a progress bar and Cancel
 
 ### Settings & Customization
 - **Keybind editor** — configure all keyboard shortcuts from the Settings window; shortcuts are saved per-profile and take effect immediately
@@ -57,6 +57,8 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 | `⌘/Ctrl + F` | Toggle message search |
 | `⌘/Ctrl + K` | Jump to next unread buffer |
 | `⌘/Ctrl + P` | Quick switcher — fuzzy-find a buffer |
+| `⌘/Ctrl + ,` | Open Settings |
+| `⌘/Ctrl + Shift + C` | Open Connections |
 | `Alt + 1–9` | Jump to buffer by number |
 | `Tab` | Complete nick or emoji (cycles matches) |
 | `Arrow ↑ / ↓` | Cycle command history (input bar) |
@@ -95,6 +97,10 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 | macOS (Apple Silicon + Intel) | Fully supported |
 | Linux x86_64 | Supported |
 | Windows x86_64 | Supported |
+
+**Linux notes:**
+- Dropping files onto the window works on X11 but not yet under Wayland (the windowing library has no Wayland file-drop support). Use `/share <path>`, `/share` or the paperclip button instead.
+- The file picker (`/share` without a path, paperclip) uses the desktop's file-chooser portal (`xdg-desktop-portal`), standard on GNOME and KDE. `/share <path>` works without it.
 
 ## WeeChat Requirements
 
