@@ -441,66 +441,134 @@ impl WeeChatApp {
 
     fn file_sharing_section(&mut self, ui: &mut egui::Ui) {
         use crate::ui::fileshare::FileShareService;
-        section_heading(ui, "Uploads");
-        hint(ui, "Files dropped on the chat or attached with the paperclip are uploaded here.");
-        egui::Grid::new("file_sharing_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("Service:");
-            egui::ComboBox::from_id_salt("file_share_service_combo")
-                .selected_text(match self.file_share_service {
-                    FileShareService::Jirafeau => "Jirafeau (files.interdo.me)",
-                    FileShareService::Litterbox => "Litterbox (litterbox.catbox.moe)",
-                })
-                .width(260.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.file_share_service, FileShareService::Jirafeau, "Jirafeau (files.interdo.me)");
-                    ui.selectable_value(&mut self.file_share_service, FileShareService::Litterbox, "Litterbox (litterbox.catbox.moe)");
-                });
-            ui.end_row();
+        section_heading(ui, "Service");
+        hint(ui, "Files dropped on the chat or attached with the paperclip are uploaded here, and the link is posted to the buffer.");
+        egui::ComboBox::from_id_salt("file_share_service_combo")
+            .selected_text(match self.file_share_service {
+                FileShareService::Jirafeau => "Jirafeau",
+                FileShareService::Litterbox => "Litterbox (litterbox.catbox.moe)",
+            })
+            .width(260.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.file_share_service, FileShareService::Jirafeau, "Jirafeau");
+                ui.selectable_value(&mut self.file_share_service, FileShareService::Litterbox, "Litterbox (litterbox.catbox.moe)");
+            });
 
-            ui.label("Expiry:");
-            match self.file_share_service {
-                FileShareService::Jirafeau => {
-                    const DURATIONS: &[(&str, &str)] = &[
-                        ("minute",    "1 minute"),
-                        ("hour",      "1 hour"),
-                        ("day",       "1 day"),
-                        ("week",      "1 week"),
-                        ("fortnight", "2 weeks"),
-                        ("month",     "1 month"),
-                        ("quarter",   "3 months"),
-                        ("year",      "1 year"),
-                        ("none",      "Never expires"),
-                    ];
-                    let selected_label = DURATIONS.iter()
-                        .find(|(v, _)| *v == self.file_share_duration)
-                        .map(|(_, l)| *l)
-                        .unwrap_or("1 day");
-                    egui::ComboBox::from_id_salt("file_share_duration_combo")
-                        .selected_text(selected_label)
-                        .width(140.0)
-                        .show_ui(ui, |ui| {
-                            for &(value, label) in DURATIONS {
-                                ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
-                            }
-                        });
+        if self.file_share_service == FileShareService::Jirafeau {
+            section_heading(ui, "Jirafeau server");
+            let mut url_focused = false;
+            egui::Grid::new("jirafeau_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("Server URL:");
+                ui.vertical(|ui| {
+                    let resp = ui.add(egui::TextEdit::singleline(&mut self.jirafeau_url)
+                        .hint_text(crate::ui::fileshare::DEFAULT_JIRAFEAU_URL)
+                        .desired_width(320.0));
+                    url_focused = resp.has_focus();
+                    if resp.lost_focus() {
+                        if self.jirafeau_url.trim().is_empty() {
+                            self.jirafeau_url = crate::ui::fileshare::DEFAULT_JIRAFEAU_URL.to_string();
+                        } else if let Ok(url) = crate::ui::fileshare::normalize_base_url(&self.jirafeau_url) {
+                            self.jirafeau_url = url;
+                        }
+                        if let Ok(mut t) = self.jirafeau_test.lock() { *t = None; }
+                    }
+                    hint(ui, "Your own instance, or the default public one.");
+                });
+                ui.end_row();
+
+                // Passwords are per server; don't reload them on every keystroke in the URL.
+                if !url_focused {
+                    self.ensure_jirafeau_passwords_loaded();
                 }
-                FileShareService::Litterbox => {
-                    let selected_label = crate::ui::fileshare::LITTERBOX_TIMES.iter()
-                        .find(|(v, _)| *v == self.file_share_duration)
-                        .map(|(_, l)| *l)
-                        .unwrap_or("24 hours");
-                    egui::ComboBox::from_id_salt("file_share_duration_combo")
-                        .selected_text(selected_label)
-                        .width(140.0)
-                        .show_ui(ui, |ui| {
-                            for &(value, label) in crate::ui::fileshare::LITTERBOX_TIMES {
-                                ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
-                            }
-                        });
+                for (kind, label, help) in [
+                    ("upload", "Upload password:", "Only if the server restricts who may upload."),
+                    ("download", "Download password:", "Protects every upload: anyone opening the link must enter it. It's never posted — share it separately."),
+                ] {
+                    ui.label(label);
+                    ui.vertical(|ui| {
+                        let value = if kind == "upload" { &mut self.jirafeau_upload_pw } else { &mut self.jirafeau_download_pw };
+                        let resp = ui.add(egui::TextEdit::singleline(value).password(true).hint_text("none").desired_width(220.0));
+                        // Save to the Keychain when the field is left after editing.
+                        let dirty_id = resp.id.with("dirty");
+                        if resp.changed() { ui.data_mut(|d| d.insert_temp(dirty_id, true)); }
+                        if resp.lost_focus() && ui.data(|d| d.get_temp::<bool>(dirty_id).unwrap_or(false)) {
+                            ui.data_mut(|d| d.remove::<bool>(dirty_id));
+                            self.save_jirafeau_password(kind);
+                        }
+                        hint(ui, help);
+                    });
+                    ui.end_row();
                 }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Test server").clicked() {
+                    let url = self.jirafeau_url.clone();
+                    let result = self.jirafeau_test.clone();
+                    let ctx = ui.ctx().clone();
+                    if let Ok(mut t) = result.lock() { *t = Some(Ok("Checking…".to_string())); }
+                    tokio::spawn(async move {
+                        let text = crate::ui::fileshare::jirafeau_server_info(&url).await.map(|info| {
+                            let max = if info.max_file_mb == 0 { "no file size limit".to_string() } else { format!("files up to {} MB", info.max_file_mb) };
+                            format!("Jirafeau {} · {max} · {} per request", info.version, crate::ui::fileshare::human_size(info.request_limit))
+                        });
+                        if let Ok(mut t) = result.lock() { *t = Some(text); }
+                        ctx.request_repaint();
+                    });
+                }
+                let test = self.jirafeau_test.lock().ok().and_then(|t| t.clone());
+                match test {
+                    Some(Ok(text)) => { ui.label(RichText::new(text).small().color(Color32::from_rgb(80, 190, 110))); }
+                    Some(Err(err)) => { ui.label(RichText::new(err).small().color(Color32::from_rgb(220, 80, 80))); }
+                    None => {}
+                }
+            });
+        }
+
+        section_heading(ui, "Expiry");
+        match self.file_share_service {
+            FileShareService::Jirafeau => {
+                const DURATIONS: &[(&str, &str)] = &[
+                    ("minute",    "1 minute"),
+                    ("hour",      "1 hour"),
+                    ("day",       "1 day"),
+                    ("week",      "1 week"),
+                    ("fortnight", "2 weeks"),
+                    ("month",     "1 month"),
+                    ("quarter",   "3 months"),
+                    ("year",      "1 year"),
+                    ("none",      "Never expires"),
+                ];
+                let selected_label = DURATIONS.iter()
+                    .find(|(v, _)| *v == self.file_share_duration)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("1 day");
+                egui::ComboBox::from_id_salt("file_share_duration_combo")
+                    .selected_text(selected_label)
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for &(value, label) in DURATIONS {
+                            ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
+                        }
+                    });
+                hint(ui, "Servers can disable some of these; the upload then reports it.");
             }
-            ui.end_row();
-        });
+            FileShareService::Litterbox => {
+                let selected_label = crate::ui::fileshare::LITTERBOX_TIMES.iter()
+                    .find(|(v, _)| *v == self.file_share_duration)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("24 hours");
+                egui::ComboBox::from_id_salt("file_share_duration_combo")
+                    .selected_text(selected_label)
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for &(value, label) in crate::ui::fileshare::LITTERBOX_TIMES {
+                            ui.selectable_value(&mut self.file_share_duration, value.to_string(), label);
+                        }
+                    });
+            }
+        }
     }
 
     fn keybinds_section(&mut self, ui: &mut egui::Ui, p: &Palette) {

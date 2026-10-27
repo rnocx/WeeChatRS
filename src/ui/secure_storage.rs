@@ -86,6 +86,19 @@ pub fn save_by_key(key: &str, password: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Remove a stored secret; removing one that doesn't exist is not an error.
+pub fn delete_by_key(key: &str) -> Result<(), String> {
+    let key = key.to_string();
+    let delete = move || match Entry::new(SERVICE, &key).and_then(|e| e.delete_credential()) {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    };
+    #[cfg(target_os = "linux")]
+    return run_keyring(delete).and_then(|r| r);
+    #[cfg(not(target_os = "linux"))]
+    delete()
+}
+
 pub fn load_by_key(key: &str) -> Option<String> {
     let key = key.to_string();
     #[cfg(target_os = "linux")]

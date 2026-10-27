@@ -458,6 +458,9 @@ pub struct AppSettings {
     /// Duration passed to Jirafeau upload API (default "day"). Ignored for 0x0.st.
     #[serde(default = "default_file_share_duration")]
     pub file_share_duration: String,
+    /// Jirafeau server ("selfhost"). Upload/download passwords live in the Keychain.
+    #[serde(default = "default_jirafeau_url")]
+    pub jirafeau_url: String,
     #[serde(default)]
     pub keybinds: KeybindsMap,
     /// Server group keys (buffer.server) whose child buffers are collapsed in the list.
@@ -472,6 +475,7 @@ fn default_true() -> bool { true }
 fn default_nicklist_width() -> f32 { 180.0 }
 fn default_prefix_suffix() -> String { "│".to_string() }
 fn default_file_share_duration() -> String { "day".to_string() }
+fn default_jirafeau_url() -> String { crate::ui::fileshare::DEFAULT_JIRAFEAU_URL.to_string() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -514,6 +518,7 @@ impl Default for AppSettings {
             prefix_suffix: "│".to_string(),
             file_share_service: crate::ui::fileshare::FileShareService::default(),
             file_share_duration: "day".to_string(),
+            jirafeau_url: default_jirafeau_url(),
             keybinds: KeybindsMap::default(),
             collapsed_servers: HashSet::new(),
             adaptive_theme: false,
@@ -687,6 +692,15 @@ pub struct WeeChatApp {
     pub(crate) file_share_error: Option<String>,
     pub(crate) file_share_service: crate::ui::fileshare::FileShareService,
     pub(crate) file_share_duration: String,
+    pub(crate) jirafeau_url: String,
+    /// Progress of the running upload (None when idle).
+    pub(crate) file_share_progress: Option<std::sync::Arc<crate::ui::fileshare::UploadProgress>>,
+    /// Jirafeau passwords as edited in Settings, loaded from the Keychain for `jirafeau_pw_loaded_for`.
+    pub(crate) jirafeau_upload_pw: String,
+    pub(crate) jirafeau_download_pw: String,
+    pub(crate) jirafeau_pw_loaded_for: Option<String>,
+    /// Result of Settings → File sharing → Test server (written by the async check).
+    pub(crate) jirafeau_test: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
 
     // fset buffer panel state (search filter + inline edit)
     pub(crate) fset_state: crate::ui::fset::FsetState,
@@ -846,6 +860,12 @@ impl WeeChatApp {
             file_share_error: None,
             file_share_service: settings.file_share_service,
             file_share_duration: settings.file_share_duration,
+            jirafeau_url: settings.jirafeau_url,
+            file_share_progress: None,
+            jirafeau_upload_pw: String::new(),
+            jirafeau_download_pw: String::new(),
+            jirafeau_pw_loaded_for: None,
+            jirafeau_test: Default::default(),
             keybinds: settings.keybinds.with_missing_defaults(),
             editing_keybind: None,
             quick_switcher: Default::default(),
@@ -895,6 +915,75 @@ impl WeeChatApp {
             .unwrap_or_else(|| "WeeChatRS".to_string());
 
         macos_titlebar(root_ui, &title, fill, border_color, text_color);
+    }
+
+    /// Keychain entry for a Jirafeau password (`kind` = "upload" or "download"), per server.
+    fn jirafeau_keychain_key(kind: &str, base_url: &str) -> String {
+        let url = crate::ui::fileshare::normalize_base_url(base_url).unwrap_or_else(|_| base_url.trim().to_string());
+        format!("fileshare:jirafeau:{kind}:{url}")
+    }
+
+    /// Load the Jirafeau passwords for the current server into the Settings fields, once
+    /// per server (switching servers loads that server's passwords).
+    pub(crate) fn ensure_jirafeau_passwords_loaded(&mut self) {
+        if self.jirafeau_pw_loaded_for.as_deref() == Some(self.jirafeau_url.as_str()) {
+            return;
+        }
+        let load = |kind| crate::ui::secure_storage::load_by_key(&Self::jirafeau_keychain_key(kind, &self.jirafeau_url)).unwrap_or_default();
+        self.jirafeau_upload_pw = load("upload");
+        self.jirafeau_download_pw = load("download");
+        self.jirafeau_pw_loaded_for = Some(self.jirafeau_url.clone());
+    }
+
+    /// Store (or, when empty, remove) a Jirafeau password for the current server.
+    pub(crate) fn save_jirafeau_password(&mut self, kind: &str) {
+        let key = Self::jirafeau_keychain_key(kind, &self.jirafeau_url);
+        let value = if kind == "upload" { &self.jirafeau_upload_pw } else { &self.jirafeau_download_pw };
+        let result = if value.is_empty() {
+            crate::ui::secure_storage::delete_by_key(&key)
+        } else {
+            crate::ui::secure_storage::save_by_key(&key, value)
+        };
+        if let Err(e) = result {
+            log::warn!("saving Jirafeau {kind} password: {e}");
+        }
+    }
+
+    /// Upload `path` (or, when None, a file picked from a dialog) and post the link to
+    /// `buf_id` when done. Progress is shown above the input bar.
+    pub(crate) fn start_upload(&mut self, buf_id: String, path: Option<std::path::PathBuf>) {
+        if self.file_share_progress.is_some() {
+            return;
+        }
+        let jirafeau = if self.file_share_service == crate::ui::fileshare::FileShareService::Jirafeau {
+            self.ensure_jirafeau_passwords_loaded();
+            crate::ui::fileshare::JirafeauOptions {
+                base_url: self.jirafeau_url.clone(),
+                upload_password: self.jirafeau_upload_pw.clone(),
+                download_password: self.jirafeau_download_pw.clone(),
+            }
+        } else {
+            Default::default()
+        };
+        let progress = crate::ui::fileshare::UploadProgress::new();
+        self.file_share_progress = Some(progress.clone());
+        self.file_share_uploading = true;
+        self.file_share_error = None;
+        let duration = self.file_share_duration.clone();
+        let service = self.file_share_service.clone();
+        let tx = self.file_share_tx.clone();
+        tokio::spawn(async move {
+            let path = match path {
+                Some(p) => p,
+                None => match rfd::AsyncFileDialog::new().pick_file().await {
+                    Some(h) => h.path().to_path_buf(),
+                    // User cancelled — signal "done" with no error.
+                    None => { let _ = tx.send(Err(String::new())); return; }
+                },
+            };
+            let result = crate::ui::fileshare::upload(path, &service, &duration, &jirafeau, progress).await;
+            let _ = tx.send(result.map(|url| (buf_id, url)));
+        });
     }
 
     pub(crate) fn draw_sidebar_icon(painter: &Painter, rect: Rect, color: Color32, is_right: bool) {
@@ -1172,6 +1261,7 @@ impl eframe::App for WeeChatApp {
             prefix_suffix: self.prefix_suffix.clone(),
             file_share_service: self.file_share_service.clone(),
             file_share_duration: self.file_share_duration.clone(),
+            jirafeau_url: self.jirafeau_url.clone(),
             keybinds: self.keybinds.clone(),
             collapsed_servers: self.collapsed_servers.clone(),
             adaptive_theme: self.adaptive_theme,
@@ -1305,13 +1395,14 @@ impl eframe::App for WeeChatApp {
         // File share drain: on success send URL; on error show toast (empty = silent cancel).
         while let Ok(result) = self.file_share_rx.try_recv() {
             self.file_share_uploading = false;
+            self.file_share_progress = None;
             match result {
                 Ok((buf_id, url)) => {
                     if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
                         client.send_message(&raw_id, &url);
                     }
                 }
-                Err(e) if !e.is_empty() => {
+                Err(e) if !e.is_empty() && e != crate::ui::fileshare::CANCELLED => {
                     self.file_share_error = Some(e);
                 }
                 Err(_) => {}
@@ -1323,15 +1414,7 @@ impl eframe::App for WeeChatApp {
         if !dropped_files.is_empty() && !self.file_share_uploading {
             if let Some(path) = dropped_files.into_iter().find_map(|f| Some(f.path().to_path_buf())) {
                 if let Some(buf_id) = self.selected_buffer_id.clone() {
-                    self.file_share_uploading = true;
-                    self.file_share_error = None;
-                    let duration = self.file_share_duration.clone();
-                    let service = self.file_share_service.clone();
-                    let tx = self.file_share_tx.clone();
-                    tokio::spawn(async move {
-                        let result = crate::ui::fileshare::upload(path, &service, &duration).await;
-                        let _ = tx.send(result.map(|url| (buf_id, url)));
-                    });
+                    self.start_upload(buf_id, Some(path));
                 }
             }
         }
@@ -2018,6 +2101,29 @@ impl eframe::App for WeeChatApp {
             egui::Panel::bottom("input_panel")
                 .frame(Frame::NONE.fill(surface_color).inner_margin(Margin::symmetric(16, 10)))
                 .show(root_ui, |ui| {
+                    // Upload progress: name, bar with percentage/size, and Cancel.
+                    if let Some(progress) = self.file_share_progress.clone() {
+                        let total = progress.total();
+                        let name = progress.file_name();
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("{} {}", icons::UPLOAD_SIMPLE,
+                                if name.is_empty() { "Choosing file…".to_string() } else { format!("Uploading {name}") }))
+                                .color(text_secondary).small());
+                            if total > 0 {
+                                let text = format!("{:.0}%  ·  {} / {}", progress.fraction() * 100.0,
+                                    crate::ui::fileshare::human_size(progress.sent()),
+                                    crate::ui::fileshare::human_size(total));
+                                ui.add(egui::ProgressBar::new(progress.fraction())
+                                    .desired_width((ui.available_width() - 90.0).max(80.0))
+                                    .fill(accent_color)
+                                    .text(egui::RichText::new(text).small()));
+                            }
+                            if ui.small_button("Cancel").clicked() {
+                                progress.cancel();
+                            }
+                        });
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    }
                     // File share error toast (clears on next click anywhere)
                     if let Some(err) = self.file_share_error.clone() {
                         ui.horizontal(|ui| {
@@ -2049,24 +2155,7 @@ impl eframe::App for WeeChatApp {
                             egui::Button::new(attach_label).frame(false),
                         ).on_hover_text("Upload a file (or drag & drop onto window)").clicked() {
                             if let Some(buf_id) = self.selected_buffer_id.clone() {
-                                self.file_share_uploading = true;
-                                self.file_share_error = None;
-                                let duration = self.file_share_duration.clone();
-                                let service = self.file_share_service.clone();
-                                let tx = self.file_share_tx.clone();
-                                tokio::spawn(async move {
-                                    let handle = rfd::AsyncFileDialog::new().pick_file().await;
-                                    let h = match handle {
-                                        None => {
-                                            // User cancelled — signal uploading=false with no error
-                                            let _ = tx.send(Err(String::new()));
-                                            return;
-                                        }
-                                        Some(h) => h,
-                                    };
-                                    let result = crate::ui::fileshare::upload(h.path().to_path_buf(), &service, &duration).await;
-                                    let _ = tx.send(result.map(|url| (buf_id, url)));
-                                });
+                                self.start_upload(buf_id, None);
                             }
                         }
 
