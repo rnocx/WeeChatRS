@@ -12,8 +12,32 @@ pub struct WeeChatResponse {
     pub code: Option<i64>,
     pub message: Option<String>,
     pub body_type: Option<String>,
+    #[serde(default, deserialize_with = "lenient_id")]
     pub buffer_id: Option<i64>,
     pub body: Option<Value>,
+}
+
+/// WeeChat writes ids ending in 0 in float notation (`1.79309023254937e+15` for
+/// 1793090232549370); accept both so those events aren't dropped.
+fn lenient_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    Ok(match Option::<Value>::deserialize(d)? {
+        Some(v) => v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)),
+        None => None,
+    })
+}
+
+/// Reply to a completion request (WeeChat `POST /api/completion`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CompletionReply {
+    /// False when the relay rejected the request (e.g. a WeeChat without the endpoint).
+    pub ok: bool,
+    /// "null", "command", "command_arg" or "auto".
+    pub context: String,
+    pub base_word: String,
+    /// Character index in the input where the completed word starts.
+    pub position_replace: usize,
+    pub add_space: bool,
+    pub list: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -108,4 +132,21 @@ pub struct Nick {
     pub prefix: String,
     pub color_ansi: String,
     pub away: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WeeChatResponse;
+
+    #[test]
+    fn buffer_id_in_float_notation_is_accepted() {
+        let resp: WeeChatResponse = serde_json::from_str(
+            r#"{"code":0,"event_name":"buffer_cleared","buffer_id":1.79309023254937e+15,"body":null}"#,
+        ).unwrap();
+        assert_eq!(resp.buffer_id, Some(1_793_090_232_549_370));
+        let resp: WeeChatResponse = serde_json::from_str(r#"{"code":0,"buffer_id":1793090232226898}"#).unwrap();
+        assert_eq!(resp.buffer_id, Some(1_793_090_232_226_898));
+        let resp: WeeChatResponse = serde_json::from_str(r#"{"code":204}"#).unwrap();
+        assert_eq!(resp.buffer_id, None);
+    }
 }

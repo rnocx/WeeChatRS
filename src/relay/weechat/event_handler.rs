@@ -335,7 +335,23 @@ impl WeeChatApp {
     }
 
     pub(crate) fn process_response(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
+        // The fset panel re-parses its buffer only when something touched it.
+        let touched_raw_id = resp.buffer_id.map(|i| i.to_string()).or_else(|| {
+            resp.request_id.as_deref().and_then(|id| id.strip_prefix("_buffer_lines:")).map(str::to_string)
+        });
+        if let Some(raw_id) = touched_raw_id {
+            let full_id = format!("{}/{}", conn_prefix, raw_id);
+            if self.buffer_by_id(&full_id).is_some_and(|b| crate::ui::fset::is_fset_buffer(&b.full_name)) {
+                self.fset_state.revision = self.fset_state.revision.wrapping_add(1);
+            }
+        }
+
         if let Some(id) = &resp.request_id {
+            if let Some(tag) = id.strip_prefix("_completion:") {
+                let reply = Self::parse_completion(&resp);
+                self.completion_replies.insert(format!("{}|{}", conn_prefix, tag), reply);
+                return;
+            }
             if id == "_list_buffers" {
                 self.handle_buffer_list(conn_prefix, resp);
                 return;
@@ -479,6 +495,23 @@ impl WeeChatApp {
         v.as_i64().map(|i| i.to_string())
             .or_else(|| v.as_f64().map(|f| (f as i64).to_string()))
             .or_else(|| v.as_str().map(|s| s.to_string()))
+    }
+
+    fn parse_completion(resp: &WeeChatResponse) -> crate::relay::models::CompletionReply {
+        let mut reply = crate::relay::models::CompletionReply::default();
+        let Some(obj) = resp.body.as_ref().and_then(|b| b.as_object()) else { return reply };
+        if resp.code.is_some_and(|c| c >= 400) {
+            return reply;
+        }
+        reply.ok = true;
+        reply.context = obj.get("context").and_then(|v| v.as_str()).unwrap_or("null").to_string();
+        reply.base_word = obj.get("base_word").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        reply.position_replace = obj.get("position_replace").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        reply.add_space = obj.get("add_space").and_then(|v| v.as_bool()).unwrap_or(false);
+        reply.list = obj.get("list").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|w| w.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        reply
     }
 
     fn body_as_vec(resp: &WeeChatResponse) -> Vec<&Value> {
@@ -630,16 +663,20 @@ impl WeeChatApp {
                     let mut activity = BufferActivity::None;
                     let mut unread_count = 0u32;
                     let mut last_read_id = None;
-                    let visit_start_marker_id = None;
+                    let mut visit_start_marker_id = None;
+                    let mut last_markread_ts = None;
 
+                    // A reconnect drops the connection's buffers before this list arrives, so
+                    // `existing` is only found on a refresh (after any command, or a localvar
+                    // change). Keep the unread divider then: dropping it shifts the chat.
                     if let Some(existing) = self.buffer_by_id(&full_id) {
                         messages = existing.messages.clone();
                         nicks = existing.nicks.clone();
                         activity = existing.activity;
                         unread_count = existing.unread_count;
                         last_read_id = existing.last_read_id.clone();
-                        // visit_start_marker_id intentionally NOT copied — reset on every
-                        // reconnect so the divider re-anchors to the new last_read_id.
+                        visit_start_marker_id = existing.visit_start_marker_id.clone();
+                        last_markread_ts = existing.last_markread_ts;
                     }
                     let muted = self.muted_buffer_names.contains(&full_full_name);
                     if relay_last_read_id.is_some() {
@@ -674,7 +711,7 @@ impl WeeChatApp {
                         muted,
                         has_nicklist: effective_nicklist,
                         visit_start_marker_id,
-                        last_markread_ts: None,
+                        last_markread_ts,
                     });
                 }
             }
@@ -988,7 +1025,13 @@ impl WeeChatApp {
                     let mut notify_data: Option<(String, String, String)> = None;
                     if let Some(idx) = self.buffer_idx_of(&buffer_id) {
                         let buffer = &mut self.buffers[idx];
-                        if !buffer.messages.iter().any(|m| m.id == line.id) {
+                        if let Some(pos) = buffer.messages.iter().rposition(|m| m.id == line.id) {
+                            // Buffers with free content (fset, highmon…) reprint a line at the
+                            // same y, which reuses its id: replace the old text.
+                            if buffer.messages[pos].message != line.message || buffer.messages[pos].prefix != line.prefix {
+                                Arc::make_mut(&mut buffer.messages)[pos] = line.clone();
+                            }
+                        } else {
                             Arc::make_mut(&mut buffer.messages).push_back(line.clone());
                             if buffer.messages.len() > MAX_STORED_LINES {
                                 Arc::make_mut(&mut buffer.messages).pop_front();
@@ -1046,8 +1089,17 @@ impl WeeChatApp {
                 if let (Some(raw_buffer_id), Some(line_id)) = (raw_buffer_id, line_id) {
                     let buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
                     if let Some(buffer) = self.buffer_by_id_mut(&buffer_id) {
+                        let new_text = obj.get("message").and_then(|v| v.as_str()).map(|message| {
+                            (obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("").to_string(), message.to_string())
+                        });
                         if let Some(line) = Arc::make_mut(&mut buffer.messages).iter_mut().find(|m| m.id == line_id) {
                             line.displayed = displayed;
+                            // Free-content buffers (fset) rewrite a line in place.
+                            if let Some((prefix, message)) = new_text {
+                                if line.message != message || line.prefix != prefix {
+                                    *line = Line::new(line.id.clone(), line.timestamp, prefix, message, displayed, line.highlight);
+                                }
+                            }
                         } else if displayed {
                             let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
                             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");

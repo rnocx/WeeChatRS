@@ -126,4 +126,11 @@ pub trait BackendClient: Send {
     /// Used by IRC backends for CHATHISTORY BEFORE; WeeChat uses fetch_lines.
     /// Default is a no-op.
     fn fetch_lines_before(&self, _buffer_id: &str, _before_ts: &str) {}
+
+    /// True if `complete` asks the server to complete input.
+    fn supports_completion(&self) -> bool { false }
+
+    /// Ask the server to complete `text` at character `position`; the reply comes back
+    /// tagged with `tag`. Only WeeChat implements this; default is a no-op.
+    fn complete(&self, _buffer_id: &str, _text: &str, _position: usize, _tag: &str) {}
 }

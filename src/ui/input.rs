@@ -1,6 +1,6 @@
 use egui::text_edit::TextEditState;
 use egui::text::{CCursorRange, CCursor};
-use crate::ui::app::{WeeChatApp, CompletionState};
+use crate::ui::app::{WeeChatApp, CompletionState, RemoteCompletion};
 use crate::ui::emoji;
 
 impl WeeChatApp {
@@ -11,18 +11,13 @@ impl WeeChatApp {
             // Cycle to next match
             if state.matches.is_empty() { return; }
             state.index = (state.index + 1) % state.matches.len();
-            let matched = state.matches[state.index].clone();
-
             let mut new_text = self.input_text[..state.word_start_idx].to_string();
-            new_text.push_str(&matched);
-            // Nick at line start gets ": ", emoji and mid-line nicks get " "
-            if !state.original_word.starts_with(':') && state.word_start_idx == 0 {
-                new_text.push_str(": ");
-            } else {
-                new_text.push(' ');
-            }
+            new_text.push_str(&state.matches[state.index]);
+            new_text.push_str(&state.suffix);
             new_cursor_char = new_text.chars().count();
             self.input_text = new_text;
+        } else if self.request_remote_completion(id) {
+            // The reply is applied by `apply_remote_completion`.
         } else {
             // Start new completion
             let word_start = self.input_text.rfind(' ').map(|i| i + 1).unwrap_or(0);
@@ -44,31 +39,87 @@ impl WeeChatApp {
             };
 
             if !matches.is_empty() {
-                let matched = matches[0].clone();
+                // Nick at line start gets ": ", emoji and mid-line nicks get " "
+                let suffix = if !word.starts_with(':') && word_start == 0 { ": " } else { " " };
                 let mut new_text = self.input_text[..word_start].to_string();
-                new_text.push_str(&matched);
-                if !word.starts_with(':') && word_start == 0 {
-                    new_text.push_str(": ");
-                } else {
-                    new_text.push(' ');
-                }
+                new_text.push_str(&matches[0]);
+                new_text.push_str(suffix);
                 new_cursor_char = new_text.chars().count();
                 self.input_text = new_text;
                 self.completion = Some(CompletionState {
-                    original_word: word,
                     matches,
                     index: 0,
                     word_start_idx: word_start,
+                    suffix: suffix.to_string(),
                 });
             }
         }
 
         if new_cursor_char > 0 {
-            if let Some(mut state) = TextEditState::load(ctx, id) {
-                state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(new_cursor_char))));
-                state.store(ctx, id);
-            }
+            set_cursor(ctx, id, new_cursor_char);
         }
+    }
+
+    /// Commands (`/…`) on a WeeChat connection are completed by WeeChat itself, which
+    /// knows every command, option, server and channel. Returns false when the input is
+    /// not a command or the backend can't complete.
+    fn request_remote_completion(&mut self, input_id: egui::Id) -> bool {
+        if !self.input_text.starts_with('/') || self.input_text.starts_with("//") {
+            return false;
+        }
+        let Some(buf_id) = self.selected_buffer_id.clone() else { return false };
+        let Some(conn) = self.connections.iter().find(|c| buf_id.starts_with(&format!("{}/", c.prefix))) else { return false };
+        if !conn.client.supports_completion() || !conn.client.is_connected() {
+            return false;
+        }
+        let raw_id = &buf_id[conn.prefix.len() + 1..];
+        self.remote_completion_seq += 1;
+        let tag = format!("input:{}", self.remote_completion_seq);
+        conn.client.complete(raw_id, &self.input_text, self.input_text.chars().count(), &tag);
+        self.remote_completion = Some(RemoteCompletion {
+            key: format!("{}|{}", conn.prefix, tag),
+            text: self.input_text.clone(),
+            input_id,
+        });
+        true
+    }
+
+    /// Apply a completion reply from the server once it arrives.
+    pub(crate) fn apply_remote_completion(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.remote_completion else { return };
+        let Some(reply) = self.completion_replies.remove(&pending.key) else { return };
+        let pending = self.remote_completion.take().unwrap();
+        if pending.text != self.input_text || !reply.ok {
+            return;
+        }
+        let mut matches = reply.list.clone();
+        if reply.context == "command" {
+            // Commands handled by this client, which WeeChat doesn't know.
+            for cmd in LOCAL_COMMANDS {
+                if cmd.starts_with(reply.base_word.as_str()) && !matches.iter().any(|m| m == cmd) {
+                    matches.push(cmd.to_string());
+                }
+            }
+            matches.sort();
+        }
+        let Some(first) = matches.first().cloned() else { return };
+        let word_start = self.input_text.char_indices().nth(reply.position_replace)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input_text.len());
+        let suffix = if reply.add_space { " " } else { "" };
+        let mut new_text = self.input_text[..word_start].to_string();
+        new_text.push_str(&first);
+        new_text.push_str(suffix);
+        let cursor = new_text.chars().count();
+        self.input_text = new_text;
+        self.completion = Some(CompletionState {
+            matches,
+            index: 0,
+            word_start_idx: word_start,
+            suffix: suffix.to_string(),
+        });
+        set_cursor(ctx, pending.input_id, cursor);
+        ctx.request_repaint();
     }
 
     pub(crate) fn cycle_history(&mut self, delta: i32, ctx: &egui::Context, id: egui::Id) {
@@ -237,6 +288,17 @@ impl WeeChatApp {
                     client.fetch_buffer_list();
                 }
             }
+            if opens_fset(&msg) {
+                // Show fset like /join shows the channel: now if it's open, else once it is.
+                let prefix = buffer_id.split('/').next().unwrap_or("").to_string();
+                let fset = self.buffers.iter()
+                    .find(|b| b.id.starts_with(&format!("{prefix}/")) && crate::ui::fset::is_fset_buffer(&b.full_name))
+                    .map(|b| b.id.clone());
+                match fset {
+                    Some(id) => self.select_buffer(id),
+                    None => self.pending_buffer_switch = Some("fset.fset".to_string()),
+                }
+            }
         }
 
         if self.command_history.back().map(|s| s.as_str()) != Some(&msg) {
@@ -274,6 +336,26 @@ impl WeeChatApp {
     }
 }
 
+/// `/fset …`, and `/set` without a value (fset takes over listing options).
+fn opens_fset(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    match words.next() {
+        Some("/fset") => true,
+        Some("/set") => words.count() <= 1,
+        _ => false,
+    }
+}
+
+/// Commands this client handles itself (see `send_current_message`).
+const LOCAL_COMMANDS: &[&str] = &["np", "share", "sysinfo"];
+
+fn set_cursor(ctx: &egui::Context, id: egui::Id, char_index: usize) {
+    if let Some(mut state) = TextEditState::load(ctx, id) {
+        state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(char_index))));
+        state.store(ctx, id);
+    }
+}
+
 /// Parse the argument of `/share`: empty means "pick a file". Accepts a quoted path and a
 /// leading `~/` for the home directory; on macOS/Linux also shell-escaped spaces
 /// (`My\\ File.png`, as pasted from a terminal), and on Windows `~\\` and backslash
@@ -305,6 +387,18 @@ fn share_path_for(arg: &str, windows: bool, home: Option<&std::path::Path>) -> O
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fset_opening_commands() {
+        use super::opens_fset;
+        assert!(opens_fset("/fset"));
+        assert!(opens_fset("/fset f:irc"));
+        assert!(opens_fset("/set"));
+        assert!(opens_fset("/set irc.look.*"));
+        assert!(!opens_fset("/set irc.look.color_nicks off"));
+        assert!(!opens_fset("/settings"));
+        assert!(!opens_fset("hello /fset"));
+    }
+
     use super::{share_path, share_path_for};
     use std::path::{Path, PathBuf};
 

@@ -165,6 +165,12 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
 /// Longest gap between two messages from the same nick that still groups them.
 const GROUP_MAX_GAP_SECS: i64 = 5 * 60;
 
+/// The highmon script's buffer (`{connection}/perl.highmon`, `…/python.highmon`).
+fn is_highmon_buffer(full_name: &str) -> bool {
+    let name = full_name.rsplit_once('/').map_or(full_name, |(_, name)| name);
+    matches!(name.split_once('.'), Some((_, "highmon")))
+}
+
 /// Whether a line's prefix is a nick (a chat message) rather than a WeeChat system
 /// prefix such as `-->`, `<--`, `--`, `=!=`, or the ` *` of a `/me` action.
 fn is_chat_prefix(plain_prefix: &str) -> bool {
@@ -602,6 +608,11 @@ pub struct WeeChatApp {
 
     // Completion state
     pub(crate) completion: Option<CompletionState>,
+    /// Tab completion waiting on the server (WeeChat `/api/completion`).
+    pub(crate) remote_completion: Option<RemoteCompletion>,
+    pub(crate) remote_completion_seq: u64,
+    /// Completion replies by "{connection prefix}|{tag}", taken by whoever asked.
+    pub(crate) completion_replies: HashMap<String, crate::relay::models::CompletionReply>,
 
     // Command History
     pub(crate) command_history: VecDeque<String>,
@@ -655,6 +666,10 @@ pub struct WeeChatApp {
     pub(crate) prefix_suffix: String,
     // Per-buffer max prefix pixel width tracked across frames for stable column alignment.
     pub(crate) prefix_col_widths: HashMap<String, f32>,
+    /// Id of the first line the chat view draws for the selected buffer (None: all).
+    /// The view draws every line it shows each frame, and a buffer left alone for a
+    /// long time collects up to MAX_STORED_LINES, so it starts at the newest ones.
+    pub(crate) chat_view_start: Option<String>,
 
     // Context menu opened by secondary click on a message row.
     // Tuple: (click_pos, plain_message, plain_prefix, hovered_url)
@@ -710,10 +725,19 @@ pub struct WeeChatApp {
 }
 
 pub(crate) struct CompletionState {
-    pub(crate) original_word: String,
     pub(crate) matches: Vec<String>,
     pub(crate) index: usize,
     pub(crate) word_start_idx: usize,
+    /// Appended after each match (": " for a nick at line start).
+    pub(crate) suffix: String,
+}
+
+pub(crate) struct RemoteCompletion {
+    /// Key into `completion_replies`.
+    pub(crate) key: String,
+    /// Input at the time of the request; the reply is dropped if the user kept typing.
+    pub(crate) text: String,
+    pub(crate) input_id: egui::Id,
 }
 
 impl WeeChatApp {
@@ -824,6 +848,9 @@ impl WeeChatApp {
             preview_tx,
             preview_rx,
             completion: None,
+            remote_completion: None,
+            remote_completion_seq: 0,
+            completion_replies: HashMap::new(),
             command_history: VecDeque::new(),
             history_index: None,
             focus_input: false,
@@ -848,6 +875,7 @@ impl WeeChatApp {
             prefix_align_max: settings.prefix_align_max,
             prefix_suffix: settings.prefix_suffix,
             prefix_col_widths: HashMap::new(),
+            chat_view_start: None,
             ctx_menu_state: None,
             ctx_menu_just_opened: false,
             np_tx,
@@ -1066,6 +1094,9 @@ impl WeeChatApp {
         self.focus_input = true;
         self.selected_view_since = Some(std::time::Instant::now());
         self.cleared_buffer_ids.insert(id.clone());
+        self.chat_view_start = self.buffer_by_id(&id).and_then(|b| {
+            b.messages.len().checked_sub(INITIAL_LINES).map(|i| b.messages[i].id.clone())
+        });
         if let Some(buffer) = self.buffer_by_id_mut(&id) {
             buffer.activity = BufferActivity::None;
             buffer.unread_count = 0;
@@ -1073,9 +1104,15 @@ impl WeeChatApp {
                 buffer.visit_start_marker_id = buffer.last_read_id.clone();
             }
             let fetch_nicks = buffer.has_nicklist;
+            // fset has a line per option, often thousands. On WeeChat the fset session
+            // fetches them once the panel's format is in place.
+            let is_fset = crate::ui::fset::is_fset_buffer(&buffer.full_name);
+            let lines = if is_fset { MAX_STORED_LINES } else { INITIAL_LINES };
             if let Some((client, raw_id)) = self.client_for_buffer(&id) {
                 client.refresh_buffer(&raw_id);
-                client.fetch_lines(&raw_id, INITIAL_LINES);
+                if !(is_fset && client.supports_completion()) {
+                    client.fetch_lines(&raw_id, lines);
+                }
                 if fetch_nicks {
                     client.fetch_nicks(&raw_id);
                 }
@@ -2017,11 +2054,13 @@ impl eframe::App for WeeChatApp {
             self.send_command_to_buffer(&id, &cmd);
         }
 
+        self.update_fset_session(ctx);
+
         let current_buffer_id = self.selected_buffer_id.clone();
         let current_buf = current_buffer_id.as_ref().and_then(|id| self.buffer_by_id(id));
         let current_buffer_nicks = current_buf.map(|b| std::sync::Arc::clone(&b.nicks));
         let current_buffer_full_name = current_buf.map(|b| b.full_name.clone());
-        let is_fset_buffer = current_buffer_full_name.as_deref().map_or(false, |n| n.contains("fset"));
+        let is_fset_buffer = current_buffer_full_name.as_deref().is_some_and(crate::ui::fset::is_fset_buffer);
         let current_buffer_messages = current_buf.map(|b| std::sync::Arc::clone(&b.messages));
         let _current_buffer_last_read_id = current_buf.and_then(|b| b.last_read_id.clone());
         let current_buffer_visit_marker_id = current_buf.and_then(|b| b.visit_start_marker_id.clone());
@@ -2099,7 +2138,10 @@ impl eframe::App for WeeChatApp {
             self.nicklist_width = nicks_resp.response.rect.width();
         }
 
-        if current_buffer_id.is_some() {
+        // fset has its own controls and highmon is read-only: no input bar there.
+        let shows_input = !is_fset_buffer
+            && !current_buffer_full_name.as_deref().is_some_and(is_highmon_buffer);
+        if current_buffer_id.is_some() && shows_input {
             // Is the SELECTED buffer's connection up? Different from any_connected when
             // multiple connections are configured and only some are alive.
             let selected_buffer_connected = current_buffer_id.as_ref()
@@ -2178,6 +2220,7 @@ impl eframe::App for WeeChatApp {
                                 .desired_width(ui.available_width() - 80.0);
 
                             let res = ui.add(text_edit);
+                            self.apply_remote_completion(ctx);
 
                             if self.focus_input {
                                 res.request_focus();
@@ -2198,6 +2241,7 @@ impl eframe::App for WeeChatApp {
                                     let any_other_key = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. })));
                                     if any_other_key && !tab_pressed && !history_up && !history_down {
                                         self.completion = None;
+                                        self.remote_completion = None;
                                     }
                                 }
                             }
@@ -2345,7 +2389,8 @@ impl eframe::App for WeeChatApp {
                         ui.separator();
                     }
 
-                    if self.show_titlebar && (!current_buffer_topic.is_empty() || !current_buffer_modes.is_empty()) {
+                    // fset's title is its terminal key help; the panel has its own toolbar.
+                    if self.show_titlebar && !is_fset_buffer && (!current_buffer_topic.is_empty() || !current_buffer_modes.is_empty()) {
                         Frame::NONE
                             .fill(surface_color.linear_multiply(0.3))
                             .inner_margin(Margin::symmetric(16, 6))
@@ -2373,47 +2418,36 @@ impl eframe::App for WeeChatApp {
                     // fset buffer — custom table renderer
                     // -------------------------------------------------------
                     if is_fset_buffer {
-                        if let Some(messages) = &current_buffer_messages {
+                        if let (Some(messages), Some(buf_id)) = (&current_buffer_messages, &current_buffer_id) {
+                            let colors = crate::ui::fset::FsetColors {
+                                text: text_primary,
+                                muted: text_muted,
+                                accent: accent_color,
+                                border: border_color,
+                            };
                             let actions = crate::ui::fset::show_fset_panel(
                                 ui,
+                                buf_id,
                                 messages,
+                                &current_buffer_topic,
                                 &mut self.fset_state,
                                 self.font_size,
-                                surface_color,
-                                text_primary,
-                                text_muted,
-                                accent_color,
-                                border_color,
+                                &colors,
                             );
-                            for action in actions {
-                                use crate::ui::fset::FsetAction;
-                                match action {
-                                    FsetAction::SetValue { name, value } => {
-                                        let cmd = format!("/set {} {}", name, value);
-                                        if let Some(buf_id) = &current_buffer_id {
-                                            self.send_command_to_buffer(buf_id, &cmd);
-                                        }
-                                    }
-                                    FsetAction::ResetToDefault { name } => {
-                                        let cmd = format!("/unset {}", name);
-                                        if let Some(buf_id) = &current_buffer_id {
-                                            self.send_command_to_buffer(buf_id, &cmd);
-                                        }
-                                    }
-                                    FsetAction::BeginEdit { name, current } => {
-                                        self.fset_state.editing_option = Some(name);
-                                        self.fset_state.edit_value = current;
-                                    }
-                                    FsetAction::CancelEdit => {
-                                        self.fset_state.editing_option = None;
-                                        self.fset_state.edit_value.clear();
-                                    }
-                                }
-                            }
+                            self.apply_fset_actions(buf_id, actions);
                         }
                     } else {
 
-                    ScrollArea::vertical()
+                    // Where the drawn lines start; a search looks through all of them.
+                    let chat_start = match (&self.chat_view_start, &current_buffer_messages) {
+                        (Some(anchor), Some(messages)) if self.search_text.is_empty() => messages.iter()
+                            .position(|l| &l.id == anchor)
+                            .unwrap_or_else(|| messages.len().saturating_sub(INITIAL_LINES)),
+                        _ => 0,
+                    };
+                    let mut show_older_in_memory = false;
+
+                    let chat_scroll = ScrollArea::vertical()
                         .stick_to_bottom(true)
                         .auto_shrink([false, false])
                         .horizontal_scroll_offset(0.0)
@@ -2427,7 +2461,7 @@ impl eframe::App for WeeChatApp {
                         ui.spacing_mut().item_spacing.y = 1.0;
                         Frame::NONE.inner_margin(Margin::same(16)).show(ui, |ui| {
                             if let (Some(buf_id), Some(messages)) = (current_buffer_id.as_ref(), current_buffer_messages.as_ref()) {
-                                if messages.len() >= INITIAL_LINES {
+                                if chat_start > 0 || messages.len() >= INITIAL_LINES {
                                     ui.add_space(4.0);
                                     ui.horizontal(|ui| {
                                         ui.add_space((ui.available_width() - 180.0).max(0.0) / 2.0);
@@ -2435,7 +2469,11 @@ impl eframe::App for WeeChatApp {
                                             ui.spinner();
                                             ui.label(egui::RichText::new("Loading…").color(text_muted).small());
                                         } else if ui.button(format!("{} Load older messages", icons::ARROW_UP)).clicked() {
-                                            pending_load_more = Some((buf_id.clone(), messages.len() + LOAD_MORE_LINES));
+                                            if chat_start > 0 {
+                                                show_older_in_memory = true;
+                                            } else {
+                                                pending_load_more = Some((buf_id.clone(), messages.len() + LOAD_MORE_LINES));
+                                            }
                                         }
                                     });
                                     ui.add_space(8.0);
@@ -2456,7 +2494,7 @@ impl eframe::App for WeeChatApp {
                                 } else {
                                     Some(self.search_text.to_lowercase())
                                 };
-                                for line in messages.iter() {
+                                for line in messages.iter().skip(chat_start) {
                                     if !self.show_filtered_lines && !line.displayed { continue; }
 
                                     if let Some(q) = &search_query {
@@ -2474,19 +2512,28 @@ impl eframe::App for WeeChatApp {
                                             .unwrap_or(std::time::Duration::from_secs(99));
                                         let divider_color = Color32::from_rgb(200, 50, 50);
                                         ui.add_space(8.0);
+                                        // Both forms take the same height, so the label fading to a
+                                        // plain line doesn't shift the lines below.
+                                        let divider_height = ui.spacing().interact_size.y
+                                            .max(ui.fonts_mut(|f| f.row_height(&FontId::proportional(10.0))));
                                         if elapsed < std::time::Duration::from_secs(2) {
                                             let remaining = std::time::Duration::from_secs(2) - elapsed;
                                             ctx.request_repaint_after(remaining);
-                                            ui.horizontal(|ui| {
-                                                ui.add_space(20.0);
-                                                ui.separator();
-                                                ui.label(egui::RichText::new(" NEW MESSAGES ").color(divider_color).size(10.0).strong());
-                                                ui.separator();
-                                            });
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(ui.available_width(), divider_height),
+                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                |ui| {
+                                                    ui.set_min_height(divider_height);
+                                                    ui.add_space(20.0);
+                                                    ui.separator();
+                                                    ui.label(egui::RichText::new(" NEW MESSAGES ").color(divider_color).size(10.0).strong());
+                                                    ui.separator();
+                                                },
+                                            );
                                         } else {
                                             ui.scope(|ui| {
                                                 ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, divider_color);
-                                                ui.separator();
+                                                ui.add_sized([ui.available_width(), divider_height], egui::Separator::default());
                                             });
                                         }
                                         ui.add_space(8.0);
@@ -2806,6 +2853,21 @@ impl eframe::App for WeeChatApp {
                             }
                         });
                     }); // ScrollArea
+
+                    if let Some(messages) = &current_buffer_messages {
+                        if show_older_in_memory {
+                            self.chat_view_start = chat_start.checked_sub(LOAD_MORE_LINES)
+                                .map(|i| messages[i].id.clone());
+                        } else if self.search_text.is_empty() && messages.len() - chat_start > 2 * INITIAL_LINES {
+                            // Lines keep arriving while the view is open. At the bottom the
+                            // older ones can go without moving anything on screen.
+                            let at_bottom = chat_scroll.state.clamped_offset().y + chat_scroll.inner_rect.height()
+                                >= chat_scroll.content_size.y - 2.0;
+                            if at_bottom {
+                                self.chat_view_start = Some(messages[messages.len() - INITIAL_LINES].id.clone());
+                            }
+                        }
+                    }
                     } // else (non-fset)
                 });
             } else {
@@ -2877,6 +2939,8 @@ impl eframe::App for WeeChatApp {
         self.show_connections_window(ctx, accent_color, is_light);
 
         if let Some((buf_id, count)) = pending_load_more {
+            // Show all of what arrives.
+            self.chat_view_start = None;
             self.loading_more_buffer_id = Some(buf_id.clone());
             if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
                 let oldest_ts = self.buffers.iter()
@@ -2903,6 +2967,15 @@ mod tests {
     fn line(prefix: &str, secs: i64) -> crate::relay::models::Line {
         let ts = chrono::DateTime::from_timestamp(1_790_000_000 + secs, 0).unwrap();
         crate::relay::models::Line::new(secs.to_string(), ts, prefix.to_string(), "hi".to_string(), true, false)
+    }
+
+    #[test]
+    fn detects_highmon_buffer() {
+        use super::is_highmon_buffer;
+        assert!(is_highmon_buffer("relay/perl.highmon"));
+        assert!(is_highmon_buffer("relay/python.highmon"));
+        assert!(!is_highmon_buffer("libera/irc.libera.#highmon"));
+        assert!(!is_highmon_buffer("relay/fset.fset"));
     }
 
     #[test]

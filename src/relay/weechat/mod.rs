@@ -317,6 +317,20 @@ impl BackendClient for WeeChatClient {
         );
     }
 
+    fn supports_completion(&self) -> bool { true }
+
+    fn complete(&self, buffer_id: &str, text: &str, position: usize, tag: &str) {
+        self.send_api(
+            "POST /api/completion",
+            Some(&format!("_completion:{}", tag)),
+            Some(json!({
+                "buffer_id": buffer_id.parse::<i64>().unwrap_or(0),
+                "command": text,
+                "position": position,
+            })),
+        );
+    }
+
     fn fetch_nicks(&self, buffer_id: &str) {
         self.send_api(
             &format!("GET /api/buffers/{}/nicks", buffer_id),

@@ -23,12 +23,12 @@
 - **Inline images** — `🖼 preview` button on image URLs (`.png` `.jpg` `.gif` `.webp`); click to load and display inline
 - **Link previews** — `🔗 preview` button on non-image URLs; fetches OpenGraph tags and renders a preview card
 - **Server group headers** — buffer list groups channels by network with labeled dividers (toggleable)
-- **Tab completion** — nicknames and emoji (`:fire` + Tab → 🔥), cycling through all matches
+- **Tab completion** — nicknames and emoji (`:fire` + Tab → 🔥), cycling through all matches; on WeeChat, commands and their arguments (`/set irc.look.` + Tab, servers, channels, option values) are completed by WeeChat itself
 - **Command history** — Arrow Up/Down in the input bar
 - **Inline search** — `Ctrl+F` filters current buffer scrollback
 - **Context menus** — right-click messages to copy; right-click nicks for `/query` and `/whois`; right-click buffers to leave, hide, or close
 - **Buffer reordering** — drag and drop buffers and server groups in the buffer list; order persists across restarts
-- **fset integration** *(beta)* — `/fset` opens a browsable settings panel directly in the chat area; edit WeeChat options by clicking values, with reset-to-default support
+- **fset integration** — `/fset` opens a settings table in the chat area: current value, default, inherited values, ranges, allowed values and descriptions; switches for booleans, menus for enums, click-to-edit for the rest; filter box and quick filters (modified, type, file) using fset's filter syntax. While it is open the app switches fset to its second format (`fset.format.option2`) to read the options, and puts your own settings back two minutes after you leave it (or when it closes or the app quits)
 
 ### Commands
 - **`/np`** — posts now-playing track to the current channel; detects Apple Music, Spotify, Vox, and YouTube Music on macOS; playerctl on Linux; System Media Transport Controls (WinRT) on Windows
@@ -60,7 +60,7 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 | `⌘/Ctrl + ,` | Open Settings |
 | `⌘/Ctrl + Shift + C` | Open Connections |
 | `Alt + 1–9` | Jump to buffer by number |
-| `Tab` | Complete nick or emoji (cycles matches) |
+| `Tab` | Complete nick, emoji or WeeChat command (cycles matches) |
 | `Arrow ↑ / ↓` | Cycle command history (input bar) |
 | `Enter` | Send message |
 | Right-click message | Copy message / Copy URL |
@@ -79,7 +79,7 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 *Direct IRC/soju connection — server, port, nick, SASL auth, and TLS options*
 
 ![fset settings panel](screenshots/fset_integration.png)
-*fset integration (beta) — browse and edit WeeChat options directly in the client*
+*fset integration — browse and edit WeeChat options directly in the client*
 
 ![Settings window](screenshots/scrnshot_settings.png)
 *Settings panel — display options, keybind editor, font size, opacity, and theme import*
