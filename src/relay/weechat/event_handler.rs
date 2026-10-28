@@ -155,7 +155,22 @@ impl WeeChatApp {
                 buf.id = full_id.clone();
                 buf.full_name = full_full_name;
                 if !self.buffer_idx_of(&full_id).is_some() {
-                    self.buffers.push(buf);
+                    // Keep a network's buffers together: after the last buffer of its group,
+                    // or for a new group after the connection's last buffer. A soju login's
+                    // networks join channels in any order.
+                    let pfx = format!("{}/", conn_prefix);
+                    let same_conn = |b: &Buffer| b.id.starts_with(&pfx);
+                    let in_group = self.buffers.iter()
+                        .rposition(|b| same_conn(b) && !buf.server.is_empty() && b.server == buf.server);
+                    // A new group goes before the connection's first group numbered after it.
+                    let before_later_group = || self.buffers.iter().position(|b| {
+                        same_conn(b) && b.kind == "server" && b.server != buf.server && b.number > buf.number
+                    });
+                    let pos = in_group.map(|i| i + 1)
+                        .or_else(|| if buf.kind == "server" { before_later_group() } else { None })
+                        .or_else(|| self.buffers.iter().rposition(|b| same_conn(b)).map(|i| i + 1))
+                        .unwrap_or(self.buffers.len());
+                    self.buffers.insert(pos, buf);
                     self.rebuild_buffer_idx();
                 }
                 // Auto-select when nothing is currently selected (e.g. first buffer on connect).

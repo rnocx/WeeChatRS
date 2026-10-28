@@ -1,5 +1,5 @@
 use base64::Engine as _;
-use super::{parser::IrcMessage, IrcConfig};
+use super::{parser::{parse_attributes, IrcMessage}, IrcConfig};
 use crate::relay::backend::BackendEvent;
 use crate::relay::models::{Buffer, BufferActivity, Line, Nick};
 use chrono::{DateTime, Utc};
@@ -22,6 +22,15 @@ pub enum IrcCommand {
     MarkRead { buffer_id: String },
     FetchBefore { buffer_id: String, before_ts: String },
     Disconnect,
+}
+
+/// A change to the bouncer's network list (soju.im/bouncer-networks), sent from
+/// the unbound control connection to the router in `super`.
+pub enum NetworkUpdate {
+    /// A network was listed, added or changed; `attrs` holds only the attributes
+    /// that were sent (all of them in a listing, the changed ones in a notification).
+    Changed { netid: String, attrs: HashMap<String, String> },
+    Removed { netid: String },
 }
 
 // ── Per-connection mutable state ──────────────────────────────────────────────
@@ -48,6 +57,10 @@ struct Session {
     pong_received: bool,
     targets_batch_ref: Option<String>,
     pending_pm_targets: Vec<String>,
+    /// Unbound soju connection that only lists networks; each network gets a
+    /// connection of its own, bound with BOUNCER BIND.
+    bouncer_control: bool,
+    network_updates: Vec<NetworkUpdate>,
 }
 
 impl Session {
@@ -74,6 +87,8 @@ impl Session {
             pong_received: true,
             targets_batch_ref: None,
             pending_pm_targets: Vec::new(),
+            bouncer_control: false,
+            network_updates: Vec::new(),
         }
     }
 
@@ -98,6 +113,7 @@ impl Session {
             "labeled-response",
             "msgid",
             "soju.im/bouncer-networks",
+            "soju.im/bouncer-networks-notify",
             "draft/read-marker",
             "soju.im/read",
         ]
@@ -447,6 +463,10 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
         // 903 — SASL success
         "903" => {
             session.sasl_done = true;
+            // BIND has to come after authentication and before registration ends.
+            if let Some(netid) = &config.bind_netid {
+                session.whois_lines.push(format!("BOUNCER BIND {}", netid));
+            }
             session.whois_lines.push("CAP END".to_string());
         }
 
@@ -464,6 +484,16 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 session.server_name = srv.split('!').next().unwrap_or(srv).to_string();
             }
             session.registered = true;
+            // A soju login without a network in the username: list the networks and let
+            // the router open a bound connection for each.
+            session.bouncer_control = config.list_networks
+                && config.bind_netid.is_none()
+                && session.negotiated_caps.contains("soju.im/bouncer-networks")
+                && !config.username.contains('/')
+                && !config.sasl_username.contains('/');
+            if session.bouncer_control {
+                session.whois_lines.push("BOUNCER LISTNETWORKS".to_string());
+            }
             // Connected must fire FIRST so the event handler clears stale buffers from
             // any previous session before we open the fresh status buffer below.
             events.push(BackendEvent::Connected);
@@ -493,12 +523,16 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                         line: make_line(&line_counter.to_string(), "--", welcome, timestamp_from_msg(msg), false),
                     });
                 }
-                if session.is_soju && session.has_chathistory() {
+                if session.is_soju && session.has_chathistory() && !session.bouncer_control {
                     // Ask soju for all recent conversations so we can discover PMs that
                     // arrived while we were disconnected (channels come via JOIN already).
-                    session.whois_lines.push("CHATHISTORY TARGETS * * 50".to_string());
+                    // TARGETS takes two timestamps; `*` is rejected ("Invalid first bound").
+                    session.whois_lines.push(format!(
+                        "CHATHISTORY TARGETS timestamp={} timestamp=1970-01-01T00:00:00.000Z 50",
+                        Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                    ));
                 }
-                if !config.channel.is_empty() {
+                if !config.channel.is_empty() && !session.bouncer_control {
                     let chan = config.channel.trim().to_string();
                     let join_cmd = if chan.starts_with('#') || chan.starts_with('&') {
                         format!("JOIN {}", chan)
@@ -522,7 +556,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 if kind == "chathistory" {
                     let target = msg.param(2).unwrap_or("").to_lowercase();
                     session.batch_buf.insert(batch_ref.to_string(), (target, Vec::new()));
-                } else if kind == "chathistory/targets" {
+                } else if kind == "draft/chathistory-targets" || kind == "chathistory-targets" {
                     session.targets_batch_ref = Some(batch_ref.to_string());
                     session.pending_pm_targets.clear();
                 }
@@ -833,23 +867,19 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             }
         }
 
+        // soju.im/bouncer-networks: `BOUNCER NETWORK <netid> <attributes>`, in reply
+        // to LISTNETWORKS or as a notification; attributes `*` means it was deleted.
         "BOUNCER" => {
-            let sub = msg.param(0).unwrap_or("").to_uppercase();
-            if sub == "NETWORK" && msg.param(1).unwrap_or("").to_uppercase() == "LIST" {
-                let attrs_str = msg.param(2).unwrap_or("");
-                if attrs_str == "*" { return events; }
-                let mut id = String::new();
-                let mut name = String::new();
-                let mut state = String::new();
-                for pair in attrs_str.split(';') {
-                    if let Some((k, v)) = pair.split_once('=') {
-                        match k { "id" => id = v.to_string(), "name" => name = v.to_string(), "state" => state = v.to_string(), _ => {} }
-                    }
+            if msg.param(0).unwrap_or("").eq_ignore_ascii_case("NETWORK") && session.bouncer_control {
+                let netid = msg.param(1).unwrap_or("").to_string();
+                let attrs = msg.param(2).unwrap_or("");
+                if !netid.is_empty() {
+                    session.network_updates.push(if attrs == "*" {
+                        NetworkUpdate::Removed { netid }
+                    } else {
+                        NetworkUpdate::Changed { netid, attrs: parse_attributes(attrs) }
+                    });
                 }
-                if name.is_empty() { name = id.clone(); }
-                let buf_id = format!("net/{}", id);
-                let display = if state == "connected" { format!("[{}]", name) } else { format!("[{}] ({})", name, state) };
-                events.push(BackendEvent::BufferOpened(session.alloc_buffer(&buf_id, &display, "server")));
             }
         }
 
@@ -1060,6 +1090,7 @@ pub fn spawn(
     ctx: EguiContext,
     mut cmd_rx: mpsc::UnboundedReceiver<IrcCommand>,
     connected: Arc<AtomicBool>,
+    network_tx: Option<mpsc::UnboundedSender<NetworkUpdate>>,
 ) {
     tokio::spawn(async move {
         macro_rules! send {
@@ -1155,6 +1186,9 @@ pub fn spawn(
                                         if let Some(msg) = IrcMessage::parse(&raw) {
                                             let evs = translate(&msg, &mut session, &mut line_counter, &config);
                                             for ev in evs { send!(ev); }
+                                            for update in session.network_updates.drain(..) {
+                                                if let Some(tx) = &network_tx { let _ = tx.send(update); }
+                                            }
                                             for line in take_write_queue(&mut session) {
                                                 if write_half.write_all(format!("{}\r\n", line).as_bytes()).await.is_err() {
                                                     break 'conn;
@@ -1341,4 +1375,104 @@ pub fn spawn(
             backoff = (backoff * 2).min(max_backoff);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(bind_netid: Option<&str>) -> IrcConfig {
+        IrcConfig {
+            label: "bouncer".into(), host: "soju.test".into(), port: 6697,
+            nick: "sam".into(), username: String::new(), sasl_username: String::new(),
+            password: "secret".into(), use_ssl: true, accept_invalid_certs: false,
+            channel: "#weechat".into(), tunnel_port: None, auto_reconnect: true,
+            bind_netid: bind_netid.map(String::from), list_networks: bind_netid.is_none(),
+        }
+    }
+
+    /// Feed raw lines through translate(), returning the commands it queued.
+    fn feed(session: &mut Session, config: &IrcConfig, lines: &[&str]) -> Vec<String> {
+        let mut counter = 0;
+        for line in lines {
+            translate(&IrcMessage::parse(line).unwrap(), session, &mut counter, config);
+        }
+        take_write_queue(session)
+    }
+
+    #[test]
+    fn soju_login_without_network_lists_networks() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        session.negotiated_caps.insert("soju.im/bouncer-networks".into());
+        session.negotiated_caps.insert("draft/chathistory".into());
+        session.is_soju = true;
+        let sent = feed(&mut session, &config, &[
+            ":soju.test 001 sam :Welcome",
+            "@batch=1 :soju.test BOUNCER NETWORK 7 name=Libera\\sChat;state=connected",
+            ":soju.test BOUNCER NETWORK 8 *",
+        ]);
+        assert!(session.bouncer_control);
+        assert!(sent.contains(&"BOUNCER LISTNETWORKS".to_string()));
+        // An unbound connection has no conversations or channels of its own.
+        assert!(!sent.iter().any(|l| l.starts_with("CHATHISTORY TARGETS") || l.starts_with("JOIN")));
+        match &session.network_updates[..] {
+            [NetworkUpdate::Changed { netid, attrs }, NetworkUpdate::Removed { netid: removed }] => {
+                assert_eq!(netid, "7");
+                assert_eq!(attrs["name"], "Libera Chat");
+                assert_eq!(attrs["state"], "connected");
+                assert_eq!(removed, "8");
+            }
+            _ => panic!("unexpected updates"),
+        }
+    }
+
+    #[test]
+    fn network_in_the_username_keeps_one_connection() {
+        let mut config = config(None);
+        config.username = "sam/libera".into();
+        let mut session = Session::new("sam");
+        session.negotiated_caps.insert("soju.im/bouncer-networks".into());
+        let sent = feed(&mut session, &config, &[":soju.test 001 sam :Welcome"]);
+        assert!(!session.bouncer_control);
+        assert!(!sent.contains(&"BOUNCER LISTNETWORKS".to_string()));
+        assert!(sent.contains(&"JOIN #weechat".to_string()));
+    }
+
+    #[test]
+    fn private_conversations_come_from_chathistory_targets() {
+        let config = config(Some("1"));
+        let mut session = Session::new("sam");
+        session.is_soju = true;
+        session.negotiated_caps.insert("draft/chathistory".into());
+        session.negotiated_caps.insert("draft/read-marker".into());
+        let sent = feed(&mut session, &config, &[":soju.test 001 sam :Welcome"]);
+        let targets = sent.iter().find(|l| l.starts_with("CHATHISTORY TARGETS")).unwrap();
+        assert!(targets.starts_with("CHATHISTORY TARGETS timestamp=20"), "{targets}");
+        assert!(targets.ends_with(" timestamp=1970-01-01T00:00:00.000Z 50"), "{targets}");
+        // soju's reply, as captured from soju 0.9.
+        let mut counter = 0;
+        let mut opened = Vec::new();
+        for line in [
+            ":soju.test BATCH +1 draft/chathistory-targets",
+            "@batch=1 :soju.test CHATHISTORY TARGETS #alpha 2026-10-28T15:58:06.840Z",
+            "@batch=1 :soju.test CHATHISTORY TARGETS orbit 2026-10-28T15:58:07.341Z",
+            ":soju.test BATCH -1",
+        ] {
+            for event in translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config) {
+                if let BackendEvent::BufferOpened(b) = event { opened.push(b.id); }
+            }
+        }
+        assert_eq!(opened, vec!["orbit".to_string()]);
+        let sent = take_write_queue(&mut session);
+        assert_eq!(sent, vec!["MARKREAD orbit".to_string(), "CHATHISTORY LATEST orbit * 300".to_string()]);
+    }
+
+    #[test]
+    fn network_connection_binds_after_sasl() {
+        let config = config(Some("7"));
+        let mut session = Session::new("sam");
+        let sent = feed(&mut session, &config, &[":soju.test 903 sam :SASL authentication successful"]);
+        assert_eq!(sent, vec!["BOUNCER BIND 7".to_string(), "CAP END".to_string()]);
+    }
 }

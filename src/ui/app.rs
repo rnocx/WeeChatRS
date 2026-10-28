@@ -1244,6 +1244,8 @@ impl WeeChatApp {
                     channel: profile.channel.clone(),
                     tunnel_port,
                     auto_reconnect: effective_auto_reconnect,
+                    bind_netid: None,
+                    list_networks: true,
                 };
                 Box::new(crate::relay::irc::IrcClient::new(config, per_conn_tx.clone(), ctx.clone()))
             }

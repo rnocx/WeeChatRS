@@ -76,6 +76,18 @@ impl IrcMessage {
     }
 }
 
+/// Attributes in the message-tag format (`key=value;key2=value2`), as used by
+/// soju.im/bouncer-networks. A key without a value maps to an empty string.
+pub fn parse_attributes(s: &str) -> HashMap<String, String> {
+    s.split(';')
+        .filter(|a| !a.is_empty())
+        .map(|a| match a.split_once('=') {
+            Some((k, v)) => (k.to_string(), unescape_tag_value(v)),
+            None => (a.to_string(), String::new()),
+        })
+        .collect()
+}
+
 fn unescape_tag_value(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     let mut chars = v.chars();
@@ -95,4 +107,18 @@ fn unescape_tag_value(v: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attributes_are_unescaped() {
+        let attrs = parse_attributes("name=Libera\\sChat;host=irc.libera.chat;tls");
+        assert_eq!(attrs["name"], "Libera Chat");
+        assert_eq!(attrs["host"], "irc.libera.chat");
+        assert_eq!(attrs["tls"], "");
+        assert!(parse_attributes("").is_empty());
+    }
 }

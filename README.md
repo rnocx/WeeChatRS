@@ -12,7 +12,7 @@
 - **Dual backend** — connects to a WeeChat Relay (WebSocket) *or* directly to any IRC server / soju bouncer (TCP/TLS)
 - **Full WeeChat Relay API v2** over WebSocket with SSL/TLS
 - **IRCv3** — extensive capability negotiation; see [IRCv3 support](#ircv3-support) below
-- **soju bouncer support** — network list, per-network buffers, read-marker sync; see [Soju support](#soju-support) below
+- **soju bouncer support** — every network from one login, each in its own group, plus read-marker sync and history; see [Soju support](#soju-support) below
 - **SSH tunnel** — built-in SSH port-forwarding; connect to relays on private networks without VPN; uses your SSH agent, `~/.ssh` keys, or a saved password
 - **Auto-reconnect** — exponential backoff on dropped connections, with dead-connection detection (IRC PING/PONG keepalive; WebSocket idle timeout)
 - **Multiple connection profiles** — save and switch between named relay/IRC/bouncer profiles
@@ -167,14 +167,16 @@ CTCP auto-responses: `PING` (echo token back) and `VERSION` (replies with app na
 
 ## Soju support
 
-WeeChatRS can connect directly to a [soju](https://soju.im/) bouncer as an IRC backend.
+WeeChatRS can connect directly to a [soju](https://soju.im/) bouncer as an IRC backend. Add it as an **IRC** connection with your soju username and password.
 
 | Feature | Behaviour |
 | :--- | :--- |
-| `soju.im/bouncer-networks` | Detected on `CAP ACK`; switches to bouncer mode — each upstream network gets its own buffer group |
-| Bouncer network buffers | `BOUNCER NETWORK LIST` parsed on connect; each network opens as a server buffer showing its connected/disconnected state |
-| `soju.im/read-marker` | `MARKREAD {buffer} timestamp=…` sent on buffer selection to sync read position across all soju clients |
-| Direct IRC via soju | The same IRC backend works for plain servers too; soju-specific caps are only used when advertised |
+| All networks from one login | With `soju.im/bouncer-networks`, WeeChatRS lists your networks (`BOUNCER LISTNETWORKS`) and opens a connection bound to each one (`BOUNCER BIND`). Every network gets its own group in the buffer list, headed by its name. |
+| Live network changes | With `soju.im/bouncer-networks-notify`, networks added or removed in soju appear or disappear right away, and a network's connection state and errors show in its server buffer. |
+| One network only | Put the network in the username (`username/network`) to connect to just that network, as before. |
+| Read markers | `draft/read-marker` (or the older `soju.im/read`): opening a buffer sends `MARKREAD`, so the read position is shared with your other soju clients, and unread counts after a reconnect start from it. |
+| History | `chathistory` fills each channel and private conversation on connect, and *Load older messages* fetches more. |
+| Plain IRC servers | The same backend works for any IRC server; soju-specific features are only used when the server advertises them. |
 
 ## Building from Source
 
