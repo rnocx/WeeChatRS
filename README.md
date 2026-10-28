@@ -37,7 +37,7 @@
 
 ### Settings & Customization
 - **Keybind editor** — configure all keyboard shortcuts from the Settings window; shortcuts are saved per-profile and take effect immediately
-- **Theming** — import any `.itermcolors` file; background, foreground, and all 16 ANSI colors applied live
+- **Theming** — pick from Ghostty's collection of over 460 themes (bundled, with a searchable list and quick buttons for popular ones), your own themes from `~/.config/ghostty/themes`, or import a Ghostty theme file; background, foreground, and all 16 ANSI colors applied live, with 256-color and RGB colors (such as WeeChat's numbered nick colors) fitted to the theme
 - **Adaptive theme** — automatically derives accent color and surface tones from the imported palette
 - **Native notifications** — system alerts for highlights and private messages (macOS, Windows, Linux)
 - **Opacity control** — real-time transparency adjustment, with optional native background blur on macOS
@@ -69,26 +69,29 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 
 ## Screenshots
 
-![Main chat view](screenshots/scrnshot_default.png)
-*Main chat window — buffer list on the left, ANSI-colored IRC messages in the center, nick list on the right*
+![Main chat view](screenshots/main.png)
+*Main window — buffers grouped by network with unread and highlight counts, the unread divider, grouped messages, highlighted lines, and a nick list in the same colours as the chat*
+
+![Catppuccin Mocha and Catppuccin Latte](screenshots/themes.png)
+*Themes — the same channel in Catppuccin Mocha and Catppuccin Latte, two of the bundled Ghostty themes*
+
+![Theme settings](screenshots/settings_theme.png)
+*Theme page — searchable theme list, quick buttons drawn in each theme's colours, Ghostty theme import, and the 16-colour editor*
+
+![fset settings panel](screenshots/fset.png)
+*fset — browse and edit WeeChat options: dropdowns for enums, checkboxes for booleans, modified options marked with a reset button*
+
+![Settings window](screenshots/settings_chat.png)
+*Settings — chat options, nick column alignment, and inline image and link previews*
+
+![Connections](screenshots/connections.png)
+*Connections — WeeChat relays and IRC/soju servers side by side, each with its own status*
 
 ![WeeChat Relay connection dialog](screenshots/connection_weechat.png)
 *WeeChat Relay connection — host, port, password, SSL toggle, and optional SSH tunnel*
 
 ![IRC connection dialog](screenshots/connection_irc.png)
 *Direct IRC/soju connection — server, port, nick, SASL auth, and TLS options*
-
-![fset settings panel](screenshots/fset_integration.png)
-*fset integration — browse and edit WeeChat options directly in the client*
-
-![Settings window](screenshots/scrnshot_settings.png)
-*Settings panel — display options, keybind editor, font size, opacity, and theme import*
-
-![Highlight notification in chat](screenshots/scrnshot_with_hilight.png)
-*Highlight — nick mention shown with accent color and native system notification*
-
-![Light theme](screenshots/scrnshot_with_light_theme.png)
-*Light color theme — full UI with imported `.itermcolors` palette*
 
 ## Platform Support
 
@@ -202,7 +205,7 @@ src/
                                buffer keyboard navigation
     ansi.rs                  — ANSI SGR parser (8-color, 256-color, TrueColor,
                                bold, italic, underline, URL detection)
-    theme.rs                 — AppTheme, .itermcolors plist parser, accent color derivation
+    theme.rs                 — AppTheme, Ghostty theme parser and theme catalogue
     settings.rs              — Settings and Connections window UI, SSH tunnel config
     keybinds.rs              — KeybindAction enum, SerdeModifiers, KeybindsMap,
                                rebindable shortcut storage and runtime dispatch
@@ -220,6 +223,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. See `TODO.md` for planned
 ## License
 
 MIT License — Copyright (c) 2026
+
+The bundled color themes in `assets/themes` come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) in Ghostty's format (MIT, see `assets/themes/LICENSE`); each theme belongs to its author.
 
 ---
 

@@ -177,6 +177,37 @@ fn is_chat_prefix(plain_prefix: &str) -> bool {
     plain_prefix.chars().any(char::is_alphanumeric)
 }
 
+/// The style each nick's name has in the chat, from the last line it sent, so the nick
+/// list can match it: WeeChat colours nicks in line prefixes with its own scheme.
+fn nick_styles_in_chat<'a>(lines: impl Iterator<Item = &'a Line>) -> HashMap<String, crate::ui::ansi::AnsiStyle> {
+    let mut styles = HashMap::new();
+    for line in lines {
+        if !is_chat_prefix(&line.plain_prefix) {
+            continue;
+        }
+        // The nick is the last part with a letter or digit; mode characters (@, +) and
+        // weechat.look.nick_prefix/suffix usually come in parts of their own colour.
+        let Some(part) = line.parsed_prefix.iter().rev().find(|s| s.text.chars().any(char::is_alphanumeric)) else {
+            continue;
+        };
+        let name = part.text.trim()
+            .trim_start_matches(|c: char| "~&@%+!<(".contains(c))
+            .trim_end_matches(|c: char| ">):".contains(c));
+        if !name.is_empty() {
+            styles.insert(name.to_string(), part.style);
+        }
+    }
+    styles
+}
+
+/// [`nick_styles_in_chat`] for the selected buffer, rebuilt when its lines change.
+pub(crate) struct NickStyleCache {
+    buffer_id: String,
+    len: usize,
+    last_id: Option<String>,
+    styles: std::sync::Arc<HashMap<String, crate::ui::ansi::AnsiStyle>>,
+}
+
 /// Whether `line` continues a group started by `prev`, the previous line shown: both are
 /// chat messages from the same nick, on the same local day, at most
 /// [`GROUP_MAX_GAP_SECS`] apart.
@@ -430,6 +461,10 @@ pub struct AppSettings {
     /// Show the nick only once for consecutive messages from the same nick.
     #[serde(default = "default_true")]
     pub group_messages: bool,
+    /// Draw 256-colour and RGB colours (WeeChat nick colours, mostly) in the nearest of
+    /// the theme's 16 colours. Not applied to the Default theme.
+    #[serde(default = "default_true")]
+    pub fit_colors_to_theme: bool,
     #[serde(default)]
     pub buffer_order: Vec<String>,
     #[serde(default)]
@@ -507,6 +542,7 @@ impl Default for AppSettings {
             blur_background: true,
             show_hidden_buffers: false,
             group_messages: true,
+            fit_colors_to_theme: true,
             buffer_order: Vec::new(),
             cleared_buffer_ids: HashSet::new(),
             save_password: false,
@@ -586,6 +622,7 @@ pub struct WeeChatApp {
     applied_blur: Option<bool>,
     pub(crate) show_hidden_buffers: bool,
     pub(crate) group_messages: bool,
+    pub(crate) fit_colors_to_theme: bool,
 
     // Image preview state
     pub(crate) image_cache: HashMap<String, ImageState>,
@@ -660,6 +697,9 @@ pub struct WeeChatApp {
 
     // Transient search text inside the font-family dropdown.
     pub(crate) font_search: String,
+    // Transient search text inside the theme dropdown, and the last import failure.
+    pub(crate) theme_search: String,
+    pub(crate) theme_import_error: Option<String>,
 
     // Prefix column alignment (mirrors weechat.look.prefix_align_max / prefix_suffix).
     pub(crate) prefix_align_max: usize,
@@ -670,6 +710,7 @@ pub struct WeeChatApp {
     /// The view draws every line it shows each frame, and a buffer left alone for a
     /// long time collects up to MAX_STORED_LINES, so it starts at the newest ones.
     pub(crate) chat_view_start: Option<String>,
+    pub(crate) nick_style_cache: Option<NickStyleCache>,
 
     // Context menu opened by secondary click on a message row.
     // Tuple: (click_pos, plain_message, plain_prefix, hovered_url)
@@ -839,6 +880,7 @@ impl WeeChatApp {
             applied_blur: None,
             show_hidden_buffers: settings.show_hidden_buffers,
             group_messages: settings.group_messages,
+            fit_colors_to_theme: settings.fit_colors_to_theme,
             image_cache: HashMap::new(),
             image_expanded: HashSet::new(),
             image_tx,
@@ -872,10 +914,13 @@ impl WeeChatApp {
             notify_initialized: false,
             loading_more_buffer_id: None,
             font_search: String::new(),
+            theme_search: String::new(),
+            theme_import_error: None,
             prefix_align_max: settings.prefix_align_max,
             prefix_suffix: settings.prefix_suffix,
             prefix_col_widths: HashMap::new(),
             chat_view_start: None,
+            nick_style_cache: None,
             ctx_menu_state: None,
             ctx_menu_just_opened: false,
             np_tx,
@@ -924,11 +969,7 @@ impl WeeChatApp {
     }
 
     pub(crate) fn hash_nick(name: &str) -> u8 {
-        let mut h: u32 = 0;
-        for b in name.as_bytes() {
-            h = h.wrapping_mul(31).wrapping_add(*b as u32);
-        }
-        ((h % 15) + 1) as u8
+        crate::relay::models::nick_color_slot(name)
     }
 
     /// Opaque titlebar strip drawn under the native traffic lights (the window
@@ -1285,6 +1326,7 @@ impl eframe::App for WeeChatApp {
             blur_background: self.blur_background,
             show_hidden_buffers: self.show_hidden_buffers,
             group_messages: self.group_messages,
+            fit_colors_to_theme: self.fit_colors_to_theme,
             buffer_order: self.buffer_order.clone(),
             cleared_buffer_ids: self.cleared_buffer_ids.clone(),
             save_password: false,
@@ -1551,9 +1593,10 @@ impl eframe::App for WeeChatApp {
         ctx.all_styles_mut(|s| *s = style.clone());
 
         // Effective theme: adaptive override when enabled and loaded, else user's theme.
-        let render_theme: crate::ui::theme::AppTheme = self.adaptive_theme_result
+        let mut render_theme: crate::ui::theme::AppTheme = self.adaptive_theme_result
             .clone()
             .unwrap_or_else(|| self.theme.clone());
+        render_theme.fit_extended = self.fit_colors_to_theme && render_theme.name != "Default";
 
         let accent_color = if render_theme.name == "Default" {
             Color32::from_rgb(100, 149, 237)
@@ -2074,6 +2117,23 @@ impl eframe::App for WeeChatApp {
         let any_connected = self.is_any_connected();
 
         let current_buf_has_nicklist = current_buf.map(|b| b.has_nicklist).unwrap_or(false);
+        let chat_nick_styles = match (&current_buffer_id, &current_buffer_messages) {
+            (Some(id), Some(messages)) if current_buffer_nicks.as_ref().is_some_and(|n| !n.is_empty()) => {
+                let last_id = messages.back().map(|l| l.id.clone());
+                let fresh = self.nick_style_cache.as_ref()
+                    .is_some_and(|c| &c.buffer_id == id && c.len == messages.len() && c.last_id == last_id);
+                if !fresh {
+                    self.nick_style_cache = Some(NickStyleCache {
+                        buffer_id: id.clone(),
+                        len: messages.len(),
+                        last_id,
+                        styles: std::sync::Arc::new(nick_styles_in_chat(messages.iter())),
+                    });
+                }
+                self.nick_style_cache.as_ref().map(|c| std::sync::Arc::clone(&c.styles))
+            }
+            _ => None,
+        };
         if self.show_nicklist && current_buf_has_nicklist && any_connected && current_buffer_id.is_some() {
             if self.nicklist_width < 80.0 {
                 self.nicklist_width = 180.0;
@@ -2109,7 +2169,19 @@ impl eframe::App for WeeChatApp {
                                             format!("{}{}", esc, text)
                                         }
                                     } else { text };
-                                    let sections = ANSIParser::parse(&input);
+                                    // Prefer the colour the nick has in the chat; WeeChat's nick list
+                                    // is uncoloured by default and the hash above is our own.
+                                    let chat_style = chat_nick_styles.as_ref()
+                                        .filter(|_| self.colored_nicks && !nick.away)
+                                        .and_then(|s| s.get(&nick.name));
+                                    let sections = match chat_style {
+                                        Some(style) => vec![crate::ui::ansi::ANSISection {
+                                            text: format!("{}{}", nick.prefix, nick.name),
+                                            style: *style,
+                                            url: None,
+                                        }],
+                                        None => ANSIParser::parse(&input),
+                                    };
                                     let mut job = LayoutJob::default();
                                     for s in sections {
                                         let mut fmt = s.style.to_format(font_id.clone(), &render_theme);
@@ -2967,6 +3039,26 @@ mod tests {
     fn line(prefix: &str, secs: i64) -> crate::relay::models::Line {
         let ts = chrono::DateTime::from_timestamp(1_790_000_000 + secs, 0).unwrap();
         crate::relay::models::Line::new(secs.to_string(), ts, prefix.to_string(), "hi".to_string(), true, false)
+    }
+
+    #[test]
+    fn nick_styles_come_from_the_last_chat_line() {
+        use super::nick_styles_in_chat;
+        use crate::ui::ansi::AnsiColor;
+        let ts = chrono::Utc::now();
+        let line = |prefix: &str| crate::relay::models::Line::new("1".into(), ts, prefix.into(), "hi".into(), true, false);
+        let lines = [
+            line("\x1b[32m@\x1b[36malice"),
+            line("\x1b[92m-->"),
+            line("\x1b[33mbob"),
+            line("\x1b[95malice"),
+            line("\x1b[37m<\x1b[34mcarol\x1b[37m>"),
+        ];
+        let styles = nick_styles_in_chat(lines.iter());
+        assert_eq!(styles.len(), 3);
+        assert_eq!(styles["alice"].fg, AnsiColor::Indexed(13));
+        assert_eq!(styles["bob"].fg, AnsiColor::Indexed(3));
+        assert_eq!(styles["carol"].fg, AnsiColor::Indexed(4));
     }
 
     #[test]

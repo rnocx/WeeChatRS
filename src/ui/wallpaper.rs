@@ -374,6 +374,7 @@ fn palette_to_theme(palette: &[(u8, u8, u8, usize)]) -> AppTheme {
         ansi,
         background: Some(tc(bgr, bgg, bgb)),
         foreground: Some(tc(fgr, fgg, fgb)),
+        fit_extended: false,
     }
 }
 

@@ -134,6 +134,17 @@ pub struct Nick {
     pub away: bool,
 }
 
+/// The ANSI colour slot (1–6, 9–14) for a nick the server didn't colour. Black, white
+/// and the greys are left out: they read as uncoloured, and are pale on light themes.
+pub fn nick_color_slot(name: &str) -> u8 {
+    const SLOTS: [u8; 12] = [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14];
+    let mut h: u32 = 0;
+    for b in name.as_bytes() {
+        h = h.wrapping_mul(31).wrapping_add(*b as u32);
+    }
+    SLOTS[(h % SLOTS.len() as u32) as usize]
+}
+
 #[cfg(test)]
 mod tests {
     use super::WeeChatResponse;

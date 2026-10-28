@@ -48,9 +48,33 @@ fn resolve_color(c: AnsiColor, theme: &AppTheme) -> Option<Color32> {
     match c {
         AnsiColor::Default => None,
         AnsiColor::Indexed(n) => Some(ansi_color(n, theme)),
+        AnsiColor::Index256(n) if n >= 16 && theme.fit_extended => Some(fit_to_theme(color_256(n, theme), theme)),
         AnsiColor::Index256(n) => Some(color_256(n, theme)),
+        AnsiColor::Rgb(r, g, b) if theme.fit_extended => Some(fit_to_theme(Color32::from_rgb(r, g, b), theme)),
         AnsiColor::Rgb(r, g, b) => Some(Color32::from_rgb(r, g, b)),
     }
+}
+
+/// The theme colour in the slot whose standard (xterm) colour is nearest to `c`, so
+/// an orange nick becomes the theme's yellow and a purple one its magenta.
+fn fit_to_theme(c: Color32, theme: &AppTheme) -> Color32 {
+    static STANDARD: OnceLock<Vec<Color32>> = OnceLock::new();
+    let standard = STANDARD.get_or_init(|| AppTheme::default().ansi.into_iter().map(Color32::from).collect());
+    // "Redmean" distance: cheap, and closer to perceived difference than plain RGB.
+    let distance = |a: Color32, b: Color32| {
+        let rmean = (a.r() as f32 + b.r() as f32) / 2.0;
+        let (dr, dg, db) = (a.r() as f32 - b.r() as f32, a.g() as f32 - b.g() as f32, a.b() as f32 - b.b() as f32);
+        (2.0 + rmean / 256.0) * dr * dr + 4.0 * dg * dg + (2.0 + (255.0 - rmean) / 256.0) * db * db
+    };
+    // A colour with a clear hue only goes to the coloured slots, greys only to the grey
+    // ones: a muted brown would otherwise land on dark grey, pale on light themes.
+    let chroma = c.r().max(c.g()).max(c.b()) - c.r().min(c.g()).min(c.b());
+    let slots: &[usize] = if chroma >= 40 { &[1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14] } else { &[0, 7, 8, 15] };
+    let nearest = slots.iter().copied()
+        .filter(|&i| i < standard.len().min(theme.ansi.len()))
+        .min_by(|&i, &j| distance(c, standard[i]).total_cmp(&distance(c, standard[j])))
+        .unwrap_or(7);
+    ansi_color(nearest as u8, theme)
 }
 
 fn ansi_color(n: u8, theme: &AppTheme) -> Color32 {
@@ -206,5 +230,33 @@ fn apply_sgr(params: &str, state: &mut AnsiStyle) {
             _ => {}
         }
         i += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extended_colours_fit_the_theme_only_when_asked() {
+        let mut theme = AppTheme::default();
+        for (i, c) in theme.ansi.iter_mut().enumerate() {
+            *c = Color32::from_rgb(i as u8, i as u8, i as u8).into();
+        }
+        let slot = |c: Option<Color32>| c.map(|c| c.r());
+        // 214 is orange, 135 purple, 39 blue.
+        assert_eq!(slot(resolve_color(AnsiColor::Index256(214), &theme)), Some(255));
+        theme.fit_extended = true;
+        assert!(matches!(slot(resolve_color(AnsiColor::Index256(214), &theme)), Some(3 | 11)));
+        assert!(matches!(slot(resolve_color(AnsiColor::Index256(135), &theme)), Some(5 | 13)));
+        assert!(matches!(slot(resolve_color(AnsiColor::Index256(39), &theme)), Some(4 | 6 | 12 | 14)));
+        assert!(matches!(slot(resolve_color(AnsiColor::Rgb(240, 40, 40), &theme)), Some(1 | 9)));
+        // Muted colours keep a hue (130 is brown, 186 pale yellow); greys stay grey.
+        assert!(matches!(slot(resolve_color(AnsiColor::Index256(130), &theme)), Some(1 | 3 | 9 | 11)));
+        assert!(matches!(slot(resolve_color(AnsiColor::Index256(186), &theme)), Some(3 | 11)));
+        assert!(matches!(slot(resolve_color(AnsiColor::Index256(248), &theme)), Some(7 | 8 | 15)));
+        // The 16 colours themselves are unchanged.
+        assert_eq!(slot(resolve_color(AnsiColor::Index256(2), &theme)), Some(2));
+        assert_eq!(slot(resolve_color(AnsiColor::Indexed(13), &theme)), Some(13));
     }
 }

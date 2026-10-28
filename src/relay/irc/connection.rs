@@ -162,11 +162,7 @@ impl Session {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn nick_color_ansi(name: &str) -> String {
-    let mut h: u32 = 0;
-    for b in name.as_bytes() {
-        h = h.wrapping_mul(31).wrapping_add(*b as u32);
-    }
-    let idx = ((h % 15) + 1) as u8;
+    let idx = crate::relay::models::nick_color_slot(name);
     if idx < 8 { format!("\x1B[{}m", 30 + idx) } else { format!("\x1B[{}m", 90 + idx - 8) }
 }
 

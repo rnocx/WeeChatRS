@@ -105,6 +105,44 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).small().color(ui.visuals().weak_text_color()));
 }
 
+/// The colours the chat area uses when a theme leaves them unset.
+fn theme_bg_fg(theme: &AppTheme) -> (Color32, Color32) {
+    (
+        theme.background.map(Color32::from).unwrap_or(Color32::from_rgb(18, 18, 18)),
+        theme.foreground.map(Color32::from).unwrap_or(Color32::from_rgb(204, 204, 204)),
+    )
+}
+
+/// A small preview of a theme: its background with six of its colours.
+fn theme_swatch(ui: &mut egui::Ui, theme: &AppTheme) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(52.0, 14.0), egui::Sense::hover());
+    let (bg, _) = theme_bg_fg(theme);
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(3), bg);
+    painter.rect_stroke(rect, CornerRadius::same(3), ui.visuals().widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+    for (k, i) in (1..=6).enumerate() {
+        let center = egui::pos2(rect.left() + 8.0 + k as f32 * 7.2, rect.center().y);
+        painter.circle_filled(center, 2.6, Color32::from(theme.ansi[i]));
+    }
+}
+
+/// A quick-pick button drawn in the theme's own colours.
+fn theme_chip(ui: &mut egui::Ui, theme: &AppTheme, selected: bool) -> egui::Response {
+    let (bg, fg) = theme_bg_fg(theme);
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    for i in [1, 2, 4] {
+        job.append("●", 0.0, egui::TextFormat::simple(font.clone(), Color32::from(theme.ansi[i])));
+    }
+    job.append(&theme.name, 6.0, egui::TextFormat::simple(font, fg));
+    let stroke = if selected {
+        Stroke::new(2.0, ui.visuals().selection.bg_fill)
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke
+    };
+    ui.add(egui::Button::new(job).fill(bg).stroke(stroke).corner_radius(CornerRadius::same(12)))
+}
+
 const DEFAULT_CHAT_FONT: &str = "Default (JetBrains Mono)";
 const SETTINGS_SIZE: [f32; 2] = [760.0, 560.0];
 const CONNECTIONS_SIZE: [f32; 2] = [620.0, 520.0];
@@ -355,35 +393,106 @@ impl WeeChatApp {
         }
     }
 
+    fn theme_picker(&mut self, ui: &mut egui::Ui) {
+        let mut picked: Option<AppTheme> = None;
+        let combo_resp = egui::ComboBox::from_id_salt("theme_combo")
+            .selected_text(&self.theme.name)
+            .width(240.0)
+            .height(380.0)
+            .show_ui(ui, |ui| {
+                let search_edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.theme_search)
+                        .hint_text("Search themes…")
+                        .desired_width(f32::INFINITY),
+                );
+                if search_edit.gained_focus() || (!search_edit.has_focus() && egui::Popup::is_any_open(ui.ctx())) {
+                    search_edit.request_focus();
+                }
+                let query = self.theme_search.to_lowercase();
+                let mut section: Option<bool> = None;
+                for entry in crate::ui::theme::catalog() {
+                    if !query.is_empty() && !entry.theme.name.to_lowercase().contains(&query) {
+                        continue;
+                    }
+                    if section != Some(entry.user) {
+                        section = Some(entry.user);
+                        ui.separator();
+                        hint(ui, if entry.user { "Your Ghostty themes" } else { "Ghostty themes" });
+                    }
+                    let clicked = ui.horizontal(|ui| {
+                        theme_swatch(ui, &entry.theme);
+                        ui.selectable_label(entry.theme.name == self.theme.name, entry.theme.name.as_str()).clicked()
+                    }).inner;
+                    if clicked {
+                        picked = Some(entry.theme.clone());
+                    }
+                }
+            });
+        if combo_resp.inner.is_none() {
+            self.theme_search.clear();
+        }
+        if let Some(theme) = picked {
+            self.theme = theme;
+            self.theme_search.clear();
+            self.theme_import_error = None;
+        }
+    }
+
     fn theme_section(&mut self, ui: &mut egui::Ui, p: &Palette) {
         section_heading(ui, "Colour scheme");
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&self.theme.name).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(
-                    egui::Button::new(RichText::new("Reset").color(Color32::WHITE))
-                        .fill(p.danger)
-                        .min_size(Vec2::new(70.0, 24.0))
-                ).clicked() {
-                    self.theme = AppTheme::default();
-                }
-                if ui.add(
-                    egui::Button::new(RichText::new("Import .itermcolors").color(p.accent))
-                        .fill(p.secondary_fill)
-                        .stroke(p.secondary_stroke)
-                        .min_size(Vec2::new(140.0, 24.0))
-                ).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("itermcolors", &["itermcolors"]).pick_file() {
-                        if let Ok(data) = std::fs::read(&path) {
-                            let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                            if let Ok(new_theme) = AppTheme::parse_itermcolors(&data, name) {
-                                self.theme = new_theme;
+        ui.add_enabled_ui(!self.adaptive_theme, |ui| {
+            ui.horizontal(|ui| {
+                self.theme_picker(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(
+                        egui::Button::new(RichText::new("Reset").color(Color32::WHITE))
+                            .fill(p.danger)
+                            .min_size(Vec2::new(70.0, 24.0))
+                    ).clicked() {
+                        self.theme = AppTheme::default();
+                    }
+                    if ui.add(
+                        egui::Button::new(RichText::new("Import Ghostty theme…").color(p.accent))
+                            .fill(p.secondary_fill)
+                            .stroke(p.secondary_stroke)
+                            .min_size(Vec2::new(140.0, 24.0))
+                    ).on_hover_text("A Ghostty theme file (palette = 0=#rrggbb, background = …)").clicked() {
+                        // Ghostty theme files have no extension, so no filter.
+                        if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                            let theme = std::fs::read_to_string(&path).ok()
+                                .and_then(|text| AppTheme::parse_ghostty(&text, name.clone()));
+                            match theme {
+                                Some(theme) => {
+                                    self.theme = theme;
+                                    self.theme_import_error = None;
+                                }
+                                None => self.theme_import_error = Some(format!("{name} is not a Ghostty theme.")),
                             }
                         }
+                    }
+                });
+            });
+            if let Some(err) = &self.theme_import_error {
+                ui.label(RichText::new(err).small().color(p.danger));
+            }
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                let default = AppTheme::default();
+                let quick = std::iter::once(&default)
+                    .chain(crate::ui::theme::QUICK_THEMES.iter().filter_map(|n| crate::ui::theme::find_theme(n)));
+                for theme in quick {
+                    if theme_chip(ui, theme, theme.name == self.theme.name).clicked() {
+                        self.theme = theme.clone();
+                        self.theme_import_error = None;
                     }
                 }
             });
         });
+
+        ui.checkbox(&mut self.fit_colors_to_theme, "Fit 256-colour and RGB colours to the theme");
+        hint(ui, "Draws colours outside the theme's 16 (such as WeeChat nick colours set by number) in the nearest theme colour. The Default theme keeps them as they are.");
 
         let mut adaptive_theme = self.adaptive_theme;
         ui.checkbox(&mut adaptive_theme, "Adaptive theme (from wallpaper)");
