@@ -134,6 +134,11 @@ You should see an `api` relay entry with status `listening`. Once it is running,
 
 > The relay listens for WebSocket connections at `ws(s)://host:port/api`. Make sure any firewall or router allows TCP on the relay port if connecting remotely.
 
+> WeeChatRS sends the WebSocket origin `weechatrs://app`. If you restrict origins with `relay.network.websocket_allowed_origins`, allow it, or the relay refuses the connection with `403 Forbidden`:
+> ```
+> /set relay.network.websocket_allowed_origins "^weechatrs://app$"
+> ```
+
 ## IRCv3 support
 
 All capabilities are negotiated via `CAP LS 302` on connect and requested only when the server advertises them. `cap-notify` allows new caps to be requested mid-session.

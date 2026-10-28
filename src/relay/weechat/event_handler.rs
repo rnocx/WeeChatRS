@@ -110,18 +110,23 @@ impl WeeChatApp {
                         let is_auth = e.contains("401") || e.contains("403")
                             || e.to_lowercase().contains("unauthorized")
                             || e.to_lowercase().contains("forbidden");
+                        // WeeChat answers a refused Origin with 403, before it checks the password.
+                        let hint = if e.contains("403") {
+                            "Relay refused the connection: allow the origin weechatrs://app in relay.network.websocket_allowed_origins"
+                        } else {
+                            "Wrong password or relay not configured to accept this connection"
+                        };
                         conn.connecting_pending = false;
                         if is_auth {
                             let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Auth error: {}", ts, e));
-                            let ts2 = chrono::Local::now().format("%H:%M").to_string();
-                            conn.connection_log.push_back(format!("[{}]  Wrong password or relay not configured to accept this connection", ts2));
+                            conn.connection_log.push_back(format!("[{}]  {}", ts, hint));
                         } else {
                             let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  Connection error: {}", ts, e));
                         }
                         conn.auth_error = Some(if is_auth {
-                            "Wrong password or relay not configured to accept this connection.".to_string()
+                            format!("{}.", hint)
                         } else {
                             format!("Connection failed: {}", e)
                         });

@@ -158,7 +158,9 @@ impl BackendClient for WeeChatClient {
                     }
                 };
 
-                let origin = format!("https://{}", host_clean);
+                // A fixed Origin, the same direct or through an SSH tunnel, so one
+                // relay.network.websocket_allowed_origins rule covers every connection.
+                let origin = "weechatrs://app";
                 let basic_auth = format!(
                     "Basic {}",
                     base64::engine::general_purpose::STANDARD.encode(auth_string.as_bytes())
