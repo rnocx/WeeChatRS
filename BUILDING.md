@@ -120,3 +120,19 @@ cargo run
 ```bash
 cargo run --release
 ```
+
+## Releases (GitHub Actions)
+
+Pushing a version tag to GitHub builds every platform and uploads the builds, with `SHA256SUMS`, to a **draft** release:
+
+```bash
+# Cargo.toml says version = "0.9.0"
+git tag -s v0.9.0 -m "v0.9.0"
+git push github v0.9.0
+```
+
+- The tag must match the `Cargo.toml` version (`v0.9.0-rc1` for `0.9.0-rc1`), or the run stops before building. Tags with a `-` suffix become pre-releases.
+- Builds: macOS universal DMG, Linux x86_64 and ARM64 zips, Windows x86_64 zip.
+- The macOS DMG is only ad-hoc signed. Sign and notarize it locally, replace it on the draft and update its line in `SHA256SUMS`, then add the release notes and publish.
+- Re-running the workflow for a tag replaces the files on the existing draft and keeps its notes.
+- *Actions → Release → Run workflow* builds everything without a release; download the builds from the run's artifacts.

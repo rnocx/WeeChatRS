@@ -47,24 +47,11 @@ build_arm64() {
 
 VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 
-# Zip with the binary, desktop entry, icons and a per-user install.sh, so the
-# app gets a proper launcher/dock icon (Wayland matches app_id "weechatrs").
 package() {
     local arch="$1"
     local bin="${OUT_DIR}/${BINARY_NAME}-${arch}-linux"
-    local name="WeeChatRS-${VERSION}-linux-${arch}"
-    local stage="${OUT_DIR}/${name}"
     if [ -f "${bin}" ]; then
-        rm -rf "${stage}" "${stage}.zip"
-        mkdir -p "${stage}/icons/256x256" "${stage}/icons/512x512"
-        install -m755 "${bin}" "${stage}/${BINARY_NAME}"
-        install -m644 packaging/linux/weechatrs.desktop "${stage}/"
-        install -m755 packaging/linux/install.sh "${stage}/"
-        install -m644 assets/icon.iconset/icon_256x256.png "${stage}/icons/256x256/weechatrs.png"
-        install -m644 assets/icon.iconset/icon_512x512.png "${stage}/icons/512x512/weechatrs.png"
-        (cd "${OUT_DIR}" && zip -qr "${name}.zip" "${name}")
-        rm -rf "${stage}"
-        echo "    Packaged: ${stage}.zip"
+        packaging/linux/package.sh "${bin}" "${arch}" "${VERSION}" "${OUT_DIR}"
     fi
 }
 
