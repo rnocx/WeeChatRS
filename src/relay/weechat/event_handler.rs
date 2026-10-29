@@ -345,6 +345,9 @@ impl WeeChatApp {
                     self.loading_more_buffer_id = None;
                 }
             }
+            BackendEvent::HistoryResults { request, lines, error } => {
+                self.on_history_results(conn_prefix, &request, lines, error);
+            }
             BackendEvent::BufferHidden { buffer_id, hidden } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {

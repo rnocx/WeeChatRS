@@ -20,3 +20,4 @@ pub(crate) mod notify;
 mod np;
 pub(crate) mod fileshare;
 pub(crate) mod ssh_tunnel;
+pub(crate) mod server_search;

@@ -659,6 +659,10 @@ pub struct WeeChatApp {
     // Search state
     pub(crate) show_search: bool,
     pub(crate) search_text: String,
+    /// Results of a search on the server, shown in place of the chat.
+    pub(crate) server_search: Option<crate::ui::server_search::ServerSearch>,
+    /// Tags `search` and `fetch_context` replies.
+    pub(crate) next_request_id: u64,
 
     // Navigation
     pub(crate) pending_buffer_switch: Option<String>,
@@ -898,6 +902,8 @@ impl WeeChatApp {
             focus_input: false,
             show_search: false,
             search_text: String::new(),
+            server_search: None,
+            next_request_id: 0,
             pending_buffer_switch: None,
             buffer_order: settings.buffer_order,
             dragging_buffer_id: None,
@@ -1132,6 +1138,7 @@ impl WeeChatApp {
         }
 
         self.selected_buffer_id = Some(id.clone());
+        self.server_search = None;
         self.focus_input = true;
         self.selected_view_since = Some(std::time::Instant::now());
         self.cleared_buffer_ids.insert(id.clone());
@@ -1563,7 +1570,10 @@ impl eframe::App for WeeChatApp {
 
         if arrow_up_shortcut { self.cycle_buffer(-1); }
         if arrow_down_shortcut { self.cycle_buffer(1); }
-        if search_shortcut { self.show_search = !self.show_search; }
+        if search_shortcut {
+            self.show_search = !self.show_search;
+            if !self.show_search { self.server_search = None; }
+        }
         if jump_next_unread { self.jump_next_unread(); }
         if quick_switcher_shortcut { self.quick_switcher.toggle(); }
         if open_settings_shortcut { self.open_settings(ctx); }
@@ -2448,16 +2458,34 @@ impl eframe::App for WeeChatApp {
                             .fill(surface_color.linear_multiply(0.8))
                             .inner_margin(Margin::symmetric(16, 8))
                             .show(ui, |ui| {
+                                let can_search_server = self.can_search_server();
                                 ui.horizontal(|ui| {
                                     ui.label(icons::MAGNIFYING_GLASS);
+                                    // Room for the server-search buttons when the server has search.
+                                    let buttons_w = if can_search_server { 250.0 } else { 40.0 };
                                     let res = ui.add(egui::TextEdit::singleline(&mut self.search_text)
-                                        .hint_text("Search scrollback...")
-                                        .desired_width(ui.available_width() - 40.0));
+                                        .hint_text(if can_search_server { "Search scrollback — Enter searches the server" } else { "Search scrollback..." })
+                                        .desired_width((ui.available_width() - buttons_w).max(80.0)));
+                                    let enter = res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    if can_search_server {
+                                        let has_text = !self.search_text.trim().is_empty();
+                                        if ui.add_enabled(has_text, egui::Button::new("Search history"))
+                                            .on_hover_text("Search this buffer's history on the server").clicked() || (enter && has_text)
+                                        {
+                                            self.start_server_search(false);
+                                        }
+                                        if ui.add_enabled(has_text, egui::Button::new("All buffers"))
+                                            .on_hover_text("Search every channel and conversation on this connection").clicked()
+                                        {
+                                            self.start_server_search(true);
+                                        }
+                                    }
                                     if ui.button(icons::X).clicked() {
                                         self.show_search = false;
                                         self.search_text.clear();
+                                        self.server_search = None;
                                     }
-                                    if self.show_search { res.request_focus(); }
+                                    if self.show_search && self.server_search.is_none() { res.request_focus(); }
                                 });
                             });
                         ui.separator();
@@ -2510,6 +2538,8 @@ impl eframe::App for WeeChatApp {
                             );
                             self.apply_fset_actions(buf_id, actions);
                         }
+                    } else if self.server_search.is_some() {
+                        self.draw_server_search(ui, &render_theme, accent_color, text_muted);
                     } else {
 
                     // Where the drawn lines start; a search looks through all of them.

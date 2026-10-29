@@ -41,6 +41,8 @@ pub struct IrcClient {
     cmd_tx: mpsc::UnboundedSender<IrcCommand>,
     connected: Arc<AtomicBool>,
     networks: NetworkSenders,
+    /// Set once any of the connections has negotiated soju.im/search.
+    search_supported: Arc<AtomicBool>,
 }
 
 impl IrcClient {
@@ -57,6 +59,7 @@ impl IrcClient {
             cmd_tx,
             connected: Arc::new(AtomicBool::new(false)),
             networks: Arc::default(),
+            search_supported: Arc::default(),
         }
     }
 
@@ -87,12 +90,14 @@ impl BackendClient for IrcClient {
             cmd_rx,
             Arc::clone(&self.connected),
             Some(network_tx),
+            Arc::clone(&self.search_supported),
         );
         tokio::spawn(run_router(Router {
             config: Arc::clone(&self.config),
             event_tx: self.event_tx.clone(),
             ctx: self.ctx.clone(),
             senders: Arc::clone(&self.networks),
+            search_supported: Arc::clone(&self.search_supported),
             networks: HashMap::new(),
             line_counter: 0,
         }, main_rx, network_rx));
@@ -129,6 +134,26 @@ impl BackendClient for IrcClient {
         // IRC buffers are discovered passively via JOIN
     }
 
+    fn supports_search(&self) -> bool {
+        self.search_supported.load(Ordering::Relaxed)
+    }
+
+    fn search(&self, buffer_id: &str, text: &str, request: &str) {
+        self.route(buffer_id, |id| IrcCommand::Search {
+            buffer_id: id.to_string(),
+            text: text.to_string(),
+            request: request.to_string(),
+        });
+    }
+
+    fn fetch_context(&self, buffer_id: &str, timestamp: &str, request: &str) {
+        self.route(buffer_id, |id| IrcCommand::Context {
+            buffer_id: id.to_string(),
+            timestamp: timestamp.to_string(),
+            request: request.to_string(),
+        });
+    }
+
     fn fetch_lines_before(&self, buffer_id: &str, before_ts: &str) {
         self.route(buffer_id, |id| IrcCommand::FetchBefore {
             buffer_id: id.to_string(),
@@ -156,6 +181,7 @@ struct Router {
     event_tx: mpsc::UnboundedSender<BackendEvent>,
     ctx: EguiContext,
     senders: NetworkSenders,
+    search_supported: Arc<AtomicBool>,
     networks: HashMap<String, Network>,
     line_counter: u64,
 }
@@ -246,7 +272,8 @@ impl Router {
         };
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        connection::spawn(Arc::new(config), event_tx, self.ctx.clone(), cmd_rx, Arc::default(), None);
+        connection::spawn(Arc::new(config), event_tx, self.ctx.clone(), cmd_rx, Arc::default(), None,
+            Arc::clone(&self.search_supported));
 
         let stopped = Arc::new(AtomicBool::new(false));
         let buffers: Arc<Mutex<HashSet<String>>> = Arc::default();
@@ -352,6 +379,11 @@ fn network_event(
         BackendEvent::TopicChanged { buffer_id, topic } => BackendEvent::TopicChanged { buffer_id: id(buffer_id), topic },
         BackendEvent::BufferHidden { buffer_id, hidden } => BackendEvent::BufferHidden { buffer_id: id(buffer_id), hidden },
         BackendEvent::LinesLoaded { buffer_id, lines, is_prepend } => BackendEvent::LinesLoaded { buffer_id: id(buffer_id), lines, is_prepend },
+        BackendEvent::HistoryResults { request, lines, error } => BackendEvent::HistoryResults {
+            request,
+            lines: lines.into_iter().map(|(b, l)| (id(b), l)).collect(),
+            error,
+        },
         BackendEvent::_WeeChat(r) => BackendEvent::_WeeChat(r),
     }]
 }

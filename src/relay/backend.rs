@@ -75,6 +75,14 @@ pub enum BackendEvent {
         is_prepend: bool,
     },
 
+    /// Reply to `search` or `fetch_context`: the matching lines, or the lines
+    /// around a message, as `(buffer_id, line)`. One per buffer searched.
+    HistoryResults {
+        request: String,
+        lines: Vec<(String, Line)>,
+        error: Option<String>,
+    },
+
     /// Temporary tunnel for WeeChat relay responses until the event handler
     /// is fully migrated to BackendEvent in Phase 3.
     #[doc(hidden)]
@@ -126,6 +134,17 @@ pub trait BackendClient: Send {
     /// Used by IRC backends for CHATHISTORY BEFORE; WeeChat uses fetch_lines.
     /// Default is a no-op.
     fn fetch_lines_before(&self, _buffer_id: &str, _before_ts: &str) {}
+
+    /// True if `search` runs on the server (soju.im/search).
+    fn supports_search(&self) -> bool { false }
+
+    /// Search the server's history of `buffer_id` for `text`; one `HistoryResults`
+    /// tagged `request` comes back. Default is a no-op.
+    fn search(&self, _buffer_id: &str, _text: &str, _request: &str) {}
+
+    /// Fetch the lines around `timestamp` (ISO 8601) in `buffer_id`, as a
+    /// `HistoryResults` tagged `request`. Default is a no-op.
+    fn fetch_context(&self, _buffer_id: &str, _timestamp: &str, _request: &str) {}
 
     /// True if `complete` asks the server to complete input.
     fn supports_completion(&self) -> bool { false }

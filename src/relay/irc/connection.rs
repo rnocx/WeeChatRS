@@ -21,6 +21,10 @@ pub enum IrcCommand {
     FetchBufferList,
     MarkRead { buffer_id: String },
     FetchBefore { buffer_id: String, before_ts: String },
+    /// soju.im/search in one buffer; answered with `HistoryResults` tagged `request`.
+    Search { buffer_id: String, text: String, request: String },
+    /// CHATHISTORY AROUND a timestamp; answered with `HistoryResults` tagged `request`.
+    Context { buffer_id: String, timestamp: String, request: String },
     Disconnect,
 }
 
@@ -61,6 +65,14 @@ struct Session {
     /// connection of its own, bound with BOUNCER BIND.
     bouncer_control: bool,
     network_updates: Vec<NetworkUpdate>,
+    /// Requests sent with a `label` tag (labeled-response), by label.
+    labels: HashMap<String, String>,
+    next_label: u64,
+    /// labeled-response batches, by batch ref, and the request each answers.
+    labeled_batches: HashMap<String, String>,
+    /// Search or context batches being collected, by batch ref. Kept apart from
+    /// `batch_buf`, whose lines go into the chat.
+    history_batches: HashMap<String, (String, Vec<(String, Line)>)>,
 }
 
 impl Session {
@@ -89,6 +101,10 @@ impl Session {
             pending_pm_targets: Vec::new(),
             bouncer_control: false,
             network_updates: Vec::new(),
+            labels: HashMap::new(),
+            next_label: 0,
+            labeled_batches: HashMap::new(),
+            history_batches: HashMap::new(),
         }
     }
 
@@ -114,6 +130,7 @@ impl Session {
             "msgid",
             "soju.im/bouncer-networks",
             "soju.im/bouncer-networks-notify",
+            "soju.im/search",
             "draft/read-marker",
             "soju.im/read",
         ]
@@ -134,6 +151,19 @@ impl Session {
         } else {
             None
         }
+    }
+
+    /// Searches need soju.im/search, and labeled-response to tell their replies apart.
+    fn can_search(&self) -> bool {
+        self.negotiated_caps.contains("soju.im/search") && self.negotiated_caps.contains("labeled-response")
+    }
+
+    /// A `@label=… ` prefix for a command whose reply answers `request`.
+    fn label(&mut self, request: &str) -> String {
+        self.next_label += 1;
+        let label = format!("w{}", self.next_label);
+        self.labels.insert(label.clone(), request.to_string());
+        format!("@label={} ", label)
     }
 
     fn cap_req(&self, has_sasl_creds: bool) -> String {
@@ -225,6 +255,48 @@ fn make_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>, highlight: b
 /// displayed=false: hidden when "show filtered lines" is off, never counted as unread.
 fn make_presence_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>) -> Line {
     Line::new(id.to_string(), ts, prefix.to_string(), text.to_string(), false, false)
+}
+
+/// Escape a value for the message-tag attribute format (SEARCH attributes).
+fn escape_attribute(v: &str) -> String {
+    v.replace('\\', "\\\\").replace(';', "\\:").replace(' ', "\\s").replace('\r', "\\r").replace('\n', "\\n")
+}
+
+/// A PRIVMSG or NOTICE as a chat line, and the buffer it belongs in: the channel,
+/// the other nick for a private message, or `status` for the server's own.
+fn message_line(msg: &IrcMessage, session: &Session, line_counter: &mut u64) -> Option<(String, Line)> {
+    let target = msg.param(0).unwrap_or("");
+    let text = msg.param(1).unwrap_or("");
+    let nick = msg.nick().unwrap_or("*");
+    // Server-originated message: prefix has no '!' (e.g. irc.server.net)
+    let is_server_source = !msg.prefix.as_deref().unwrap_or("").contains('!');
+
+    let buffer_id = if is_channel(target) {
+        target.to_lowercase()
+    } else if is_server_source {
+        "status".to_string()
+    } else if nick.eq_ignore_ascii_case(&session.our_nick) {
+        target.to_lowercase()
+    } else {
+        nick.to_lowercase()
+    };
+    if buffer_id.is_empty() { return None; }
+
+    let highlight = text.to_lowercase().contains(&session.our_nick.to_lowercase())
+        || target.eq_ignore_ascii_case(&session.our_nick);
+
+    let prefix = if msg.command == "NOTICE" {
+        format!("-{}-", nick)
+    } else {
+        format!("{}{}\x1B[0m", nick_color_ansi(nick), nick)
+    };
+
+    let display_text = if let Some(inner) = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')) {
+        format!("* {} {}", nick, inner)
+    } else { text.to_string() };
+
+    *line_counter += 1;
+    Some((buffer_id, make_line(&line_counter.to_string(), &prefix, &display_text, timestamp_from_msg(msg), highlight)))
 }
 
 fn is_channel(target: &str) -> bool {
@@ -369,6 +441,21 @@ async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
 fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, config: &IrcConfig) -> Vec<BackendEvent> {
     let mut events = Vec::new();
     let has_sasl_creds = !config.password.is_empty();
+
+    // Lines of a search or context reply belong to the results, not the chat, and
+    // have often been seen live already, so they skip deduplication.
+    if let Some(batch_ref) = msg.tag("batch") {
+        if session.history_batches.contains_key(batch_ref) {
+            if matches!(msg.command.as_str(), "PRIVMSG" | "NOTICE") {
+                if let Some(line) = message_line(msg, session, line_counter) {
+                    if let Some((_, lines)) = session.history_batches.get_mut(batch_ref) {
+                        lines.push(line);
+                    }
+                }
+            }
+            return events;
+        }
+    }
 
     // msgid deduplication: drop any message we've already seen (bouncer replays, reconnects)
     if let Some(id) = msg.tag("msgid") {
@@ -544,6 +631,13 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             }
         }
 
+        // A labelled request that failed, or that got an empty reply (ACK).
+        "FAIL" | "ACK" if msg.tag("label").is_some_and(|l| session.labels.contains_key(l)) => {
+            let request = msg.tag("label").and_then(|l| session.labels.remove(l)).unwrap_or_default();
+            let error = (msg.command == "FAIL").then(|| msg.params.last().cloned().unwrap_or_default());
+            events.push(BackendEvent::HistoryResults { request, lines: Vec::new(), error });
+        }
+
         "PING" => {
             let token = msg.params.last().map(String::as_str).unwrap_or("");
             session.whois_lines.push(format!("PONG :{}", token));
@@ -553,7 +647,17 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             let ref_param = msg.param(0).unwrap_or("");
             if let Some(batch_ref) = ref_param.strip_prefix('+') {
                 let kind = msg.param(1).unwrap_or("");
-                if kind == "chathistory" {
+                // A labelled reply: soju wraps it in a labeled-response batch whose inner
+                // batch holds the lines; a server may also label that batch directly.
+                let label_request = msg.tag("label").and_then(|l| session.labels.remove(l));
+                let outer_request = msg.tag("batch").and_then(|outer| session.labeled_batches.get(outer)).cloned();
+                if kind == "labeled-response" {
+                    if let Some(request) = label_request {
+                        session.labeled_batches.insert(batch_ref.to_string(), request);
+                    }
+                } else if let Some(request) = label_request.or(outer_request) {
+                    session.history_batches.insert(batch_ref.to_string(), (request, Vec::new()));
+                } else if kind == "chathistory" {
                     let target = msg.param(2).unwrap_or("").to_lowercase();
                     session.batch_buf.insert(batch_ref.to_string(), (target, Vec::new()));
                 } else if kind == "draft/chathistory-targets" || kind == "chathistory-targets" {
@@ -563,7 +667,10 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 // labeled-response batches are intentionally NOT added to batch_buf so that
                 // messages inside them flow through the normal handlers immediately.
             } else if let Some(batch_ref) = ref_param.strip_prefix('-') {
-                if let Some((buffer_id, lines)) = session.batch_buf.remove(batch_ref) {
+                if let Some((request, lines)) = session.history_batches.remove(batch_ref) {
+                    events.push(BackendEvent::HistoryResults { request, lines, error: None });
+                } else if session.labeled_batches.remove(batch_ref).is_some() {
+                } else if let Some((buffer_id, lines)) = session.batch_buf.remove(batch_ref) {
                     // Soju replays PM chathistory on connect before we've seen any live PRIVMSG,
                     // so the buffer may not exist yet — open it now if needed.
                     if !is_channel(&buffer_id) && !buffer_id.is_empty() && !session.joined.contains(&buffer_id) {
@@ -740,36 +847,8 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 return events;
             }
 
-            // Server-originated message: prefix has no '!' (e.g. irc.server.net)
             let is_server_source = !msg.prefix.as_deref().unwrap_or("").contains('!');
-
-            let buffer_id = if is_channel(&target) {
-                target.to_lowercase()
-            } else if is_server_source {
-                "status".to_string()
-            } else if nick.eq_ignore_ascii_case(&session.our_nick) {
-                target.to_lowercase()
-            } else {
-                nick.to_lowercase()
-            };
-
-            if buffer_id.is_empty() { return events; }
-
-            let highlight = text.to_lowercase().contains(&session.our_nick.to_lowercase())
-                || target.eq_ignore_ascii_case(&session.our_nick);
-
-            let prefix = if msg.command == "NOTICE" {
-                format!("-{}-", nick)
-            } else {
-                format!("{}{}\x1B[0m", nick_color_ansi(&nick), nick)
-            };
-
-            let display_text = if let Some(inner) = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')) {
-                format!("* {} {}", nick, inner)
-            } else { text.clone() };
-
-            *line_counter += 1;
-            let line = make_line(&line_counter.to_string(), &prefix, &display_text, ts, highlight);
+            let Some((buffer_id, line)) = message_line(msg, session, line_counter) else { return events };
 
             if let Some(batch_ref) = msg.tag("batch") {
                 if let Some((_buf, lines)) = session.batch_buf.get_mut(batch_ref) {
@@ -1091,6 +1170,7 @@ pub fn spawn(
     mut cmd_rx: mpsc::UnboundedReceiver<IrcCommand>,
     connected: Arc<AtomicBool>,
     network_tx: Option<mpsc::UnboundedSender<NetworkUpdate>>,
+    search_supported: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         macro_rules! send {
@@ -1189,6 +1269,7 @@ pub fn spawn(
                                             for update in session.network_updates.drain(..) {
                                                 if let Some(tx) = &network_tx { let _ = tx.send(update); }
                                             }
+                                            if session.can_search() { search_supported.store(true, Ordering::Relaxed); }
                                             for line in take_write_queue(&mut session) {
                                                 if write_half.write_all(format!("{}\r\n", line).as_bytes()).await.is_err() {
                                                     break 'conn;
@@ -1317,6 +1398,25 @@ pub fn spawn(
                                         if let Some(cmd) = session.read_marker_cmd() {
                                             let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
                                             let _ = write_half.write_all(format!("{} {} timestamp={}\r\n", cmd, buffer_id, now).as_bytes()).await;
+                                        }
+                                    }
+                                    Some(IrcCommand::Search { buffer_id, text, request }) => {
+                                        if session.can_search() {
+                                            let label = session.label(&request);
+                                            let line = format!("{}SEARCH in={};text={};limit=100\r\n",
+                                                label, escape_attribute(&buffer_id), escape_attribute(&text));
+                                            let _ = write_half.write_all(line.as_bytes()).await;
+                                        } else {
+                                            send!(BackendEvent::HistoryResults { request, lines: Vec::new(), error: Some("The server doesn't support search".to_string()) });
+                                        }
+                                    }
+                                    Some(IrcCommand::Context { buffer_id, timestamp, request }) => {
+                                        if session.has_chathistory() && session.negotiated_caps.contains("labeled-response") {
+                                            let label = session.label(&request);
+                                            let line = format!("{}CHATHISTORY AROUND {} timestamp={} 41\r\n", label, buffer_id, timestamp);
+                                            let _ = write_half.write_all(line.as_bytes()).await;
+                                        } else {
+                                            send!(BackendEvent::HistoryResults { request, lines: Vec::new(), error: Some("The server doesn't keep history".to_string()) });
                                         }
                                     }
                                     Some(IrcCommand::FetchBefore { buffer_id, before_ts }) => {
@@ -1466,6 +1566,49 @@ mod tests {
         assert_eq!(opened, vec!["orbit".to_string()]);
         let sent = take_write_queue(&mut session);
         assert_eq!(sent, vec!["MARKREAD orbit".to_string(), "CHATHISTORY LATEST orbit * 300".to_string()]);
+    }
+
+    #[test]
+    fn labelled_search_replies_become_results() {
+        let config = config(Some("1"));
+        let mut session = Session::new("tester");
+        let search = session.label("search1");
+        let context = session.label("context2");
+        assert_eq!((search.as_str(), context.as_str()), ("@label=w1 ", "@label=w2 "));
+        // A line seen live first must still show up as a result.
+        session.seen_msgids.insert("tj2r".into());
+        let mut counter = 0;
+        let mut events = Vec::new();
+        // As captured from soju 0.9.
+        for line in [
+            "@label=w1 BATCH +2 labeled-response",
+            "@batch=2 BATCH +1 soju.im/search",
+            "@time=2026-10-28T15:58:06.840Z;msgid=tj2r;batch=1 :orbit!~u@host PRIVMSG #alpha :tester: did the bouncer pick this up?",
+            "@batch=2 BATCH -1",
+            "BATCH -2",
+            "@label=w2 :soju.test FAIL CHATHISTORY INVALID_PARAMS AROUND x :Invalid first bound",
+        ] {
+            events.extend(translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config));
+        }
+        match &events[..] {
+            [BackendEvent::HistoryResults { request: r1, lines, error: None },
+             BackendEvent::HistoryResults { request: r2, lines: empty, error: Some(e) }] => {
+                assert_eq!(r1, "search1");
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0].0, "#alpha");
+                assert!(lines[0].1.highlight);
+                assert_eq!(r2, "context2");
+                assert!(empty.is_empty());
+                assert_eq!(e, "Invalid first bound");
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+        assert!(session.labels.is_empty() && session.labeled_batches.is_empty() && session.history_batches.is_empty());
+    }
+
+    #[test]
+    fn search_attributes_are_escaped() {
+        assert_eq!(escape_attribute("did it; work"), "did\\sit\\:\\swork");
     }
 
     #[test]
