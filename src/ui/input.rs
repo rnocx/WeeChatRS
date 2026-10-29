@@ -253,12 +253,20 @@ impl WeeChatApp {
                 return;
             } else if msg.trim() == "/np" || msg.starts_with("/np ") {
                 if let Some(buffer_id) = self.selected_buffer_id.clone() {
+                    self.np_error = None;
                     let custom = msg.trim().strip_prefix("/np").map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string());
                     let tx = self.np_tx.clone();
                     tokio::spawn(async move {
                         let text = if let Some(c) = custom {
                             format!("{} 🎵", c)
-                        } else if let Some(np) = crate::ui::np::get_now_playing().await {
+                        } else {
+                            let np = match crate::ui::np::get_now_playing().await {
+                                Ok(np) => np,
+                                Err(e) => {
+                                    let _ = tx.send(Err(e));
+                                    return;
+                                }
+                            };
                             let mut s = np.track;
                             if !np.source.is_empty() {
                                 s.push_str(&format!(" @ {}", np.source));
@@ -268,10 +276,8 @@ impl WeeChatApp {
                                 s.push_str(&format!(" {}", np.url));
                             }
                             s
-                        } else {
-                            return;
                         };
-                        let _ = tx.send((buffer_id, text));
+                        let _ = tx.send(Ok((buffer_id, text)));
                     });
                 }
                 self.input_text.clear();

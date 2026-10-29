@@ -737,9 +737,10 @@ pub struct WeeChatApp {
     /// Channel from the wallpaper-watcher background thread.
     pub(crate) wallpaper_rx: Option<std::sync::mpsc::Receiver<crate::ui::theme::AppTheme>>,
 
-    // /np (now-playing) channel: tokio task → main loop → send message
-    pub(crate) np_tx: mpsc::UnboundedSender<(String, String)>,
-    pub(crate) np_rx: mpsc::UnboundedReceiver<(String, String)>,
+    // /np (now-playing) channel: tokio task → main loop; Ok = message to send, Err = why not
+    pub(crate) np_tx: mpsc::UnboundedSender<Result<(String, String), String>>,
+    pub(crate) np_rx: mpsc::UnboundedReceiver<Result<(String, String), String>>,
+    pub(crate) np_error: Option<String>,
 
     // /sysinfo channel: background thread → main loop → send to active buffer
     pub(crate) sysinfo_tx: mpsc::UnboundedSender<(String, String)>,
@@ -790,7 +791,7 @@ impl WeeChatApp {
         let (shared_event_tx, event_rx) = mpsc::unbounded_channel::<(String, BackendEvent)>();
         let (image_tx, image_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
-        let (np_tx, np_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let (np_tx, np_rx) = mpsc::unbounded_channel::<Result<(String, String), String>>();
         let (sysinfo_tx, sysinfo_rx) = mpsc::unbounded_channel::<(String, String)>();
         let (file_share_tx, file_share_rx) = mpsc::unbounded_channel::<Result<(String, String), String>>();
 
@@ -931,6 +932,7 @@ impl WeeChatApp {
             ctx_menu_just_opened: false,
             np_tx,
             np_rx,
+            np_error: None,
             sysinfo_tx,
             sysinfo_rx,
             file_share_tx,
@@ -1466,10 +1468,15 @@ impl eframe::App for WeeChatApp {
         }
         if got_preview { ctx.request_repaint(); }
 
-        // /np drain: send the formatted now-playing message to the active buffer.
-        while let Ok((buf_id, np_text)) = self.np_rx.try_recv() {
-            if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
-                client.send_message(&raw_id, &np_text);
+        // /np drain: send the formatted now-playing message, or show why there is none.
+        while let Ok(result) = self.np_rx.try_recv() {
+            match result {
+                Ok((buf_id, np_text)) => {
+                    if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
+                        client.send_message(&raw_id, &np_text);
+                    }
+                }
+                Err(e) => self.np_error = Some(e),
             }
         }
 
@@ -2272,6 +2279,15 @@ impl eframe::App for WeeChatApp {
                                 .color(Color32::from_rgb(220, 80, 80)).small());
                             if ui.small_button(icons::X).clicked() {
                                 self.file_share_error = None;
+                            }
+                        });
+                    }
+                    if let Some(err) = self.np_error.clone() {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("/np: {}", err))
+                                .color(Color32::from_rgb(220, 80, 80)).small());
+                            if ui.small_button(icons::X).clicked() {
+                                self.np_error = None;
                             }
                         });
                     }
