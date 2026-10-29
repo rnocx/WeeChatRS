@@ -4,8 +4,8 @@
 //!   PNG passed as `image-data` hint. No subprocess, no fallback CLI.
 //! - **macOS**: `UNUserNotificationCenter` (bundled `.app` only). The banner
 //!   shows the bundle icon, plus the app icon attached as an image.
-//! - **Windows**: `notify-rust` is still used (kept for now; native Win32 toast
-//!   support can be added later).
+//! - **Windows**: `notify-rust` toasts, sent under the app's own AppUserModelID
+//!   (registered under HKCU on start) so they show "WeeChatRS" and its icon.
 //!
 //! Every call spawns a short-lived OS thread so we never block the UI loop, and
 //! so zbus on Linux gets a clean stack outside of any tokio runtime context
@@ -252,13 +252,55 @@ mod backend {
     use super::Notification;
     use std::sync::OnceLock;
 
-    pub fn init() {}
+    /// AppUserModelID the toasts are sent under. Windows names a toast after its
+    /// AUMID; without one, notify-rust falls back to PowerShell's.
+    const APP_ID: &str = "com.github.rnocx.weechat-gui";
 
+    pub fn init() {
+        register_app_id();
+    }
+
+    /// Give APP_ID a display name and icon under HKCU, which is how an app that
+    /// has no Start-menu shortcut makes Windows show its own name on toasts.
+    fn register_app_id() {
+        use windows::core::{HSTRING, PCWSTR};
+        use windows::Win32::System::Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
+
+        let key = HSTRING::from(format!(r"Software\Classes\AppUserModelId\{}", APP_ID));
+        let mut values = vec![("DisplayName", "WeeChatRS".to_string())];
+        if let Some(icon) = icon_path() {
+            values.push(("IconUri", icon.to_string()));
+        }
+        for (name, value) in values {
+            let data: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+            let name = HSTRING::from(name);
+            let err = unsafe {
+                RegSetKeyValueW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(key.as_ptr()),
+                    PCWSTR(name.as_ptr()),
+                    REG_SZ.0,
+                    Some(data.as_ptr().cast()),
+                    (data.len() * 2) as u32,
+                )
+            };
+            if err.is_err() {
+                log::warn!("notify: could not register {} {}: {:?}", APP_ID, name, err);
+            }
+        }
+    }
+
+    /// The icon as a PNG file, for the toast image and the registered IconUri. Kept
+    /// in %LOCALAPPDATA% rather than the temp folder, which cleanup tools empty.
     fn icon_path() -> Option<&'static str> {
         static ICON_PATH: OnceLock<Option<String>> = OnceLock::new();
         ICON_PATH.get_or_init(|| {
             let bytes: &[u8] = include_bytes!("../../assets/notification-icon.png");
-            let path = std::env::temp_dir().join("weechat-rs-notification-icon.png");
+            let dir = std::env::var_os("LOCALAPPDATA")
+                .map(|d| std::path::PathBuf::from(d).join("WeeChatRS"))
+                .unwrap_or_else(std::env::temp_dir);
+            std::fs::create_dir_all(&dir).ok()?;
+            let path = dir.join("notification-icon.png");
             std::fs::write(&path, bytes).ok()?;
             Some(path.to_string_lossy().into_owned())
         }).as_deref()
@@ -268,7 +310,8 @@ mod backend {
         let mut n = notify_rust::Notification::new();
         n.summary(&notif.title)
             .body(&notif.body)
-            .appname(&notif.app_name);
+            .appname(&notif.app_name)
+            .app_id(APP_ID);
         if let Some(p) = icon_path() {
             n.icon(p);
         }
