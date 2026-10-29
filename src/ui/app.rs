@@ -1637,7 +1637,13 @@ impl eframe::App for WeeChatApp {
                 alpha,
             )
         } else {
-            Color32::from_rgba_unmultiplied(30, 30, 30, alpha)
+            // A step lighter than the background, keeping the theme's tint.
+            Color32::from_rgba_unmultiplied(
+                base_bg.r().saturating_add(10),
+                base_bg.g().saturating_add(10),
+                base_bg.b().saturating_add(10),
+                alpha,
+            )
         };
 
         let card_bg = if is_light {
@@ -1665,7 +1671,9 @@ impl eframe::App for WeeChatApp {
         visuals.extreme_bg_color = if is_light {
             Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
         } else {
-            Color32::from_rgba_unmultiplied(10, 10, 10, alpha)
+            // Text fields: a darker shade of the background, not a flat black.
+            let shade = |c: u8| (c as f32 * 0.65) as u8;
+            Color32::from_rgba_unmultiplied(shade(base_bg.r()), shade(base_bg.g()), shade(base_bg.b()), alpha)
         };
         visuals.widgets.active.bg_fill = accent_color;
         visuals.selection.bg_fill = accent_color.linear_multiply(0.5);
@@ -2247,7 +2255,7 @@ impl eframe::App for WeeChatApp {
                 .unwrap_or(false);
 
             egui::Panel::bottom("input_panel")
-                .frame(Frame::NONE.fill(surface_color).inner_margin(Margin::symmetric(16, 10)))
+                .frame(Frame::NONE.fill(bg_color).inner_margin(Margin::symmetric(16, 10)))
                 .show(root_ui, |ui| {
                     // Upload progress: name, bar with percentage/size, and Cancel.
                     if let Some(progress) = self.file_share_progress.clone() {
