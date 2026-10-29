@@ -1780,6 +1780,11 @@ impl eframe::App for WeeChatApp {
                         .collect();
                     let multi_conn = conn_label_map.len() > 1;
 
+                    // The floating bar would sit over the fold chevrons at the right edge
+                    // of the server rows, so while the list scrolls the rows end short
+                    // of the bar at its widest (hovered).
+                    let scroll = &mut ui.spacing_mut().scroll;
+                    scroll.floating_allocated_width = scroll.bar_width + scroll.bar_inner_margin;
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 2.0;
