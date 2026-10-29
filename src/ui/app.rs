@@ -2226,13 +2226,60 @@ impl eframe::App for WeeChatApp {
 
                                     let label_res = ui.add(Label::new(job).truncate().sense(egui::Sense::click()));
                                     label_res.context_menu(|ui| {
-                                        if ui.button(format!("Query {}", nick.name)).clicked() {
-                                            self.send_command(&format!("/query {}", nick.name));
+                                        let name = &nick.name;
+                                        if ui.button(format!("Query {}", name)).clicked() {
+                                            self.send_command(&format!("/query {}", name));
                                             ui.close();
                                         }
-                                        if ui.button(format!("Whois {}", nick.name)).clicked() {
-                                            self.send_command(&format!("/whois {}", nick.name));
+                                        if ui.button(format!("Whois {}", name)).clicked() {
+                                            self.send_command(&format!("/whois {}", name));
                                             ui.close();
+                                        }
+                                        if ui.button("Mention").clicked() {
+                                            if self.input_text.trim().is_empty() {
+                                                self.input_text = format!("{}: ", name);
+                                            } else {
+                                                if !self.input_text.ends_with(' ') { self.input_text.push(' '); }
+                                                self.input_text.push_str(&format!("{} ", name));
+                                            }
+                                            ui.close();
+                                        }
+                                        if ui.button("Copy nick").clicked() {
+                                            ui.ctx().copy_text(name.clone());
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                        ui.menu_button("CTCP", |ui| {
+                                            for (label, ctcp) in [("Version", "VERSION"), ("Ping", "PING"), ("Time", "TIME")] {
+                                                if ui.button(label).clicked() {
+                                                    self.send_command(&format!("/ctcp {} {}", name, ctcp));
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                        // Shown to everyone: we don't track our own channel modes,
+                                        // and the server refuses these without the rights.
+                                        if current_buffer_kind == "channel" {
+                                            ui.menu_button("Moderation", |ui| {
+                                                let op = if nick.prefix.contains('@') { "deop" } else { "op" };
+                                                let voice = if nick.prefix.contains('+') { "devoice" } else { "voice" };
+                                                let actions: [(&str, &[&str]); 5] = [
+                                                    (if op == "op" { "Give op" } else { "Take op" }, &[op]),
+                                                    (if voice == "voice" { "Give voice" } else { "Take voice" }, &[voice]),
+                                                    ("Kick", &["kick"]),
+                                                    ("Ban", &["ban"]),
+                                                    ("Kick + ban", &["ban", "kick"]),
+                                                ];
+                                                for (label, commands) in actions {
+                                                    if label == "Kick" { ui.separator(); }
+                                                    if ui.button(label).clicked() {
+                                                        for command in commands {
+                                                            self.send_command(&format!("/{} {}", command, name));
+                                                        }
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
                                         }
                                     });
                                 }

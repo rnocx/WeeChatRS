@@ -370,6 +370,24 @@ fn expand_irc_command(buffer_id: &str, text: &str) -> Option<String> {
             }
         }
 
+        // /ctcp nick TYPE [args]  →  PRIVMSG nick :\x01TYPE args\x01
+        "ctcp" => {
+            let mut parts = rest.splitn(2, |c: char| c.is_ascii_whitespace());
+            let nick = parts.next().unwrap_or("").trim();
+            let query = parts.next().map(str::trim).unwrap_or("");
+            if nick.is_empty() || query.is_empty() { return None; }
+            let (kind, args) = query.split_once(' ').unwrap_or((query, ""));
+            let mut ctcp = kind.to_ascii_uppercase();
+            // PING wants a token back; the time lets the reply be timed.
+            let args = if ctcp == "PING" && args.trim().is_empty() {
+                Utc::now().timestamp_millis().to_string()
+            } else {
+                args.trim().to_string()
+            };
+            if !args.is_empty() { ctcp = format!("{} {}", ctcp, args); }
+            Some(format!("PRIVMSG {} :\x01{}\x01", nick, ctcp))
+        }
+
         // Mode shortcuts — all require a channel context
         "op" | "deop" | "voice" | "devoice" | "unvoice"
         | "halfop" | "dehalfop" | "ban" | "unban" | "quiet" | "unquiet" => {
@@ -1617,5 +1635,15 @@ mod tests {
         let mut session = Session::new("sam");
         let sent = feed(&mut session, &config, &[":soju.test 903 sam :SASL authentication successful"]);
         assert_eq!(sent, vec!["BOUNCER BIND 7".to_string(), "CAP END".to_string()]);
+    }
+
+    #[test]
+    fn ctcp_becomes_a_privmsg() {
+        assert_eq!(expand_irc_command("#chan", "/ctcp bob version").as_deref(),
+            Some("PRIVMSG bob :\x01VERSION\x01"));
+        assert_eq!(expand_irc_command("#chan", "/ctcp bob PING 123").as_deref(),
+            Some("PRIVMSG bob :\x01PING 123\x01"));
+        assert!(expand_irc_command("#chan", "/ctcp bob ping").unwrap().starts_with("PRIVMSG bob :\x01PING "));
+        assert_eq!(expand_irc_command("#chan", "/ctcp bob"), None);
     }
 }
