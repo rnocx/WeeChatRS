@@ -5,50 +5,113 @@
   with first-class support for the <a href="https://soju.im/">soju</a> and <a href="https://znc.in/">ZNC</a> bouncers.<br>
   Built in Rust using <code>egui</code> and <code>tokio</code>.<br>
   Real-time chat with a polished native UI, full ANSI color support, and zero runtime dependencies.</p>
+  <p><a href="#install">Download</a> · <a href="#connecting">Connecting</a> · <a href="#features">Features</a> · <a href="docs/bouncers.md">Bouncers</a> · <a href="CONTACT.md">Contact</a></p>
 </div>
+
+![Main chat view](screenshots/main.png)
+
+*Buffers grouped by network with unread and highlight counts, the unread divider, grouped messages, and a nick list in the same colours as the chat*
+
+## Highlights
+
+- **One client for WeeChat and IRC**: a WeeChat Relay (API v2 over WebSocket), any IRC server, or a soju or ZNC bouncer, side by side.
+- **Every bouncer network from one login**: each network in its own group; history, unread counts and ZNC network management included.
+- **460+ themes**: Ghostty's theme collection bundled, your own Ghostty themes, or colours taken from your wallpaper.
+- **Inline images and link previews**, file sharing with `/share`, and `/np` for what's playing.
+- **WeeChat's options as a real settings table** with `/fset`.
+- **Native on macOS, Linux and Windows**, with desktop notifications and an SSH tunnel built in.
+
+## Install
+
+Download the latest release from [GitHub](https://github.com/rnocx/WeeChatRS/releases/latest):
+
+| Platform | File | Notes |
+| :--- | :--- | :--- |
+| macOS (Apple Silicon + Intel) | `WeeChatRS-<version>-macos-universal.dmg` | Drag WeeChatRS to Applications. Signed and notarized. |
+| Linux x86_64 / ARM64 | `WeeChatRS-<version>-linux-<arch>.zip` | Unzip and run `./install.sh` for a per-user install (`--uninstall` removes it), or run `./weechat-rs` directly. Needs glibc 2.28 or later. |
+| Windows x86_64 | `WeeChatRS-<version>-windows-x86_64.zip` | Not code-signed, so SmartScreen may warn on first launch: *More info → Run anyway*. |
+
+Checksums are in each release's `SHA256SUMS`. To build it yourself, see [BUILDING.md](BUILDING.md).
+
+## Connecting
+
+Open **Connections** (`⌘⇧C` / `Ctrl+Shift+C`) and add a connection. Pick the backend for what you run:
+
+| You have | Backend | What you need |
+| :--- | :--- | :--- |
+| WeeChat (4.0.0 or later) | **WeeChat** | The relay's host, port and password ([set up the relay](#weechat-relay)) |
+| An IRC server | **IRC** | Host, port, nick; SASL username and password if you use them |
+| A soju bouncer | **IRC** | Your soju username and password |
+| A ZNC bouncer | **IRC** | Your ZNC username and password |
+
+Every connection can go through an **SSH tunnel** (your SSH agent, `~/.ssh` keys or a saved password), reconnects on its own when it drops, and saves its password in the system keychain if you ask it to.
+
+### WeeChat relay
+
+WeeChatRS talks to the WeeChat **Relay API v2**. In WeeChat:
+
+```
+/relay add api 9000
+/set relay.network.password "your-password"
+```
+
+For TLS, load a certificate and use a `tls.api` relay instead:
+
+```
+/set relay.network.ssl_certfile /path/to/cert.pem
+/relay add tls.api 9001
+```
+
+`/relay listfull` should show the `api` relay as `listening`. Connect with that host, port and password; allow the port through any firewall if you connect remotely.
+
+> WeeChatRS sends the WebSocket origin `weechatrs://app`. If you restrict origins with `relay.network.websocket_allowed_origins`, allow it, or the relay refuses the connection with `403 Forbidden`:
+> ```
+> /set relay.network.websocket_allowed_origins "^weechatrs://app$"
+> ```
+
+### IRC servers
+
+Add an **IRC** connection with the server's host and port, your nick, and TLS on or off. A password is sent as the server password and, when the server offers SASL, used to log in with SASL PLAIN as *SASL username* (or your nick). It speaks a wide range of IRCv3: see [IRC protocol support](docs/irc.md).
+
+### soju and ZNC
+
+Log in with just your bouncer username and **every network opens**, each in its own group in the buffer list; put a network in the username (`alice/libera`) to open only that one. History is loaded on connect, and unread counts start from where you left off.
+
+With ZNC, the Connections window also lists your networks and adds, deletes, connects and disconnects them:
+
+![ZNC networks in the Connections window](screenshots/connections_znc.png)
+
+The details of both, from soju's read markers and search to ZNC's playback module, are in [Bouncers](docs/bouncers.md).
 
 ## Features
 
-### Connectivity
-- **Dual backend** — connects to a WeeChat Relay (WebSocket) *or* directly to any IRC server / soju bouncer (TCP/TLS)
-- **Full WeeChat Relay API v2** over WebSocket with SSL/TLS
-- **IRCv3** — extensive capability negotiation; see [IRCv3 support](#ircv3-support) below
-- **soju bouncer support** — every network from one login, each in its own group, plus read-marker sync and history; see [Soju support](#soju-support) below
-- **ZNC bouncer support** — every network from one login, ZNC's buffer replayed as history, and your networks managed from the Connections window; see [ZNC support](#znc-support) below
-- **SSH tunnel** — built-in SSH port-forwarding; connect to relays on private networks without VPN; uses your SSH agent, `~/.ssh` keys, or a saved password
-- **Auto-reconnect** — exponential backoff on dropped connections, with dead-connection detection (IRC PING/PONG keepalive; WebSocket idle timeout)
-- **Multiple connection profiles** — save and switch between named relay/IRC/bouncer profiles
-
-### Chat & UI
-- **Advanced ANSI engine** — 16-color, 256-color, and TrueColor (RGB) sequences rendered natively
-- **Read synchronization** — bidirectional sync of read markers; unread divider line shows where you left off
-- **Inline images** — `🖼 preview` button on image URLs (`.png` `.jpg` `.gif` `.webp`); click to load and display inline
-- **Link previews** — `🔗 preview` button on non-image URLs; fetches OpenGraph tags and renders a preview card
-- **Server group headers** — buffer list groups channels by network with labeled dividers (toggleable)
-- **Tab completion** — nicknames and emoji (`:fire` + Tab → 🔥), cycling through all matches; on WeeChat, commands and their arguments (`/set irc.look.` + Tab, servers, channels, option values) are completed by WeeChat itself
-- **Command history** — Arrow Up/Down in the input bar
-- **Inline search** — `Ctrl+F` filters current buffer scrollback
-- **Context menus** — right-click messages to copy; right-click nicks for `/query` and `/whois`; right-click buffers to leave, hide, or close
-- **Buffer reordering** — drag and drop buffers and server groups in the buffer list; order persists across restarts
-- **fset integration** — `/fset` opens a settings table in the chat area: current value, default, inherited values, ranges, allowed values and descriptions; switches for booleans, menus for enums, click-to-edit for the rest; filter box and quick filters (modified, type, file) using fset's filter syntax. While it is open the app switches fset to its second format (`fset.format.option2`) to read the options, and puts your own settings back two minutes after you leave it (or when it closes or the app quits)
+### Chat
+- **ANSI and IRC colours**: 16-color, 256-color and TrueColor, IRC formatting codes, and nick colours from the chat in the nick list.
+- **Read position**: the unread divider shows where you left off; read markers sync with WeeChat and soju.
+- **Inline images**: a `🖼 preview` button on image links (`.png` `.jpg` `.gif` `.webp`) loads them into the chat.
+- **Link previews**: a `🔗 preview` button on other links shows the page's title, description and image.
+- **Search**: `⌘/Ctrl + F` filters the buffer; on soju it also searches the server's history.
+- **Tab completion**: nicks and emoji (`:fire` + Tab → 🔥); on WeeChat also commands, options and their values, completed by WeeChat itself.
+- **Context menus**: on messages (copy message or link), on nicks (query, whois, mention, copy, CTCP, and op, voice, kick and ban in channels) and on buffers (mute, hide, leave, close).
+- **Buffer list**: grouped by network, drag and drop to reorder (the order is kept), and a quick switcher (`⌘/Ctrl + P`).
+- **`/fset`**: WeeChat's options as a table, with the default and inherited values, ranges and descriptions, switches for booleans, menus for enums, and filters. Your own fset format is put back when you leave it.
 
 ### Commands
-- **`/np`** — posts now-playing track to the current channel; detects Apple Music, Spotify, Vox, and YouTube Music on macOS; playerctl on Linux; System Media Transport Controls (WinRT) on Windows
-- **`/sysinfo`** — posts system information (OS, CPU, memory) to the current channel
-- **`/share [path]`** — uploads a file and posts the link to the current buffer (no path opens a file picker); dragging a file onto the window or the paperclip button does the same. Uses Jirafeau (your own server or the default) or Litterbox with the expiry and passwords from Settings → File sharing, with a progress bar and Cancel
+- **`/share [path]`**: uploads a file and posts the link (no path opens a file picker; dropping a file on the window or the paperclip button does the same). Uses Jirafeau, your own server or the default one, or Litterbox, with a progress bar and Cancel.
+- **`/np`**: posts what's playing: on macOS whatever the Now Playing widget shows (music apps and browsers), on Linux the first playing MPRIS player (`playerctl`), on Windows the system media controls.
+- **`/sysinfo`**: posts your OS, CPU and memory.
 
-### Settings & Customization
-- **Keybind editor** — configure all keyboard shortcuts from the Settings window; shortcuts are saved per-profile and take effect immediately
-- **Theming** — pick from Ghostty's collection of over 460 themes (bundled, with a searchable list and quick buttons for popular ones), your own themes from `~/.config/ghostty/themes`, or import a Ghostty theme file; background, foreground, and all 16 ANSI colors applied live, with 256-color and RGB colors (such as WeeChat's numbered nick colors) fitted to the theme
-- **Adaptive theme** — automatically derives accent color and surface tones from the imported palette
-- **Native notifications** — system alerts for highlights and private messages (macOS, Windows, Linux)
-- **Opacity control** — real-time transparency adjustment, with optional native background blur on macOS
-- **Font & layout options** — font size, monospace toggle, prefix column alignment, timestamp display
-- **Quick switcher** — fuzzy-find any buffer from the keyboard
+### Look and settings
+- **Themes**: over 460 bundled Ghostty themes with search and quick buttons, your own from `~/.config/ghostty/themes`, or an imported theme file; all 16 colours editable, and 256-colour and RGB colours fitted to the theme.
+- **Adaptive theme**: colours derived from your desktop wallpaper, following it when it changes.
+- **Window**: opacity, with native background blur on macOS; font, font size, timestamps and nick column alignment.
+- **Notifications**: desktop notifications for highlights and private messages on macOS, Windows and Linux.
+- **Keyboard**: every shortcut can be rebound in Settings → Keybinds.
 
-## Keyboard Shortcuts
+<details>
+<summary><b>Keyboard shortcuts</b></summary>
 
-Default shortcuts — all are rebindable in **Settings → Keybinds**.
+All of them can be rebound in **Settings → Keybinds**.
 
 | Shortcut | Action |
 | :--- | :--- |
@@ -65,15 +128,11 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 | `Tab` | Complete nick, emoji or WeeChat command (cycles matches) |
 | `Arrow ↑ / ↓` | Cycle command history (input bar) |
 | `Enter` | Send message |
-| Right-click message | Copy message / Copy URL |
-| Right-click nick | Query / Whois |
-| Right-click buffer | Mute / Hide / Leave / Close |
 
-## Screenshots
+</details>
 
-![Main chat view](screenshots/main.png)
-
-*Main window — buffers grouped by network with unread and highlight counts, the unread divider, grouped messages, highlighted lines, and a nick list in the same colours as the chat*
+<details>
+<summary><b>More screenshots</b></summary>
 
 ![Catppuccin Mocha and Catppuccin Latte](screenshots/themes.png)
 
@@ -93,7 +152,7 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 
 ![Connections](screenshots/connections.png)
 
-*Connections — WeeChat relays and IRC/soju servers side by side, each with its own status*
+*Connections — WeeChat relays and IRC servers side by side, each with its own status*
 
 ![WeeChat Relay connection dialog](screenshots/connection_weechat.png)
 
@@ -103,182 +162,22 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 
 *IRC, soju or ZNC connection — server, port, nick, username (for ZNC: `user` for all networks, `user/network` for one), SASL auth, and TLS options*
 
-![ZNC networks in the Connections window](screenshots/connections_znc.png)
+</details>
 
-*A ZNC connection — the user's networks with their state, and buttons to add, remove, connect and disconnect them*
-
-## Platform Support
+## Platform notes
 
 | Platform | Status |
 | :--- | :--- |
 | macOS (Apple Silicon + Intel) | Fully supported |
-| Linux x86_64 | Supported |
+| Linux x86_64 / ARM64 | Supported |
 | Windows x86_64 | Supported |
 
-**Linux notes:**
-- Dropping files onto the window works on X11 but not yet under Wayland (the windowing library has no Wayland file-drop support). Use `/share <path>`, `/share` or the paperclip button instead.
-- The file picker (`/share` without a path, paperclip) uses the desktop's file-chooser portal (`xdg-desktop-portal`), standard on GNOME and KDE. `/share <path>` works without it.
-
-## WeeChat Requirements
-
-WeeChatRS connects via the **WeeChat Relay API v2** (WebSocket). You need WeeChat 4.0.0 or later with the `relay` plugin enabled and configured.
-
-### Enabling the WeeChat Relay
-
-In WeeChat, run the following commands:
-
-```
-/relay add api 9000
-/set relay.network.password "your-password"
-```
-
-Replace `9000` with your preferred port. For SSL, load a certificate and enable it on the relay port:
-
-```
-/set relay.network.ssl_certfile /path/to/cert.pem
-/relay add tls.api 9001
-```
-
-**Verify the relay is listening:**
-```
-/relay listfull
-```
-
-You should see an `api` relay entry with status `listening`. Once it is running, launch WeeChatRS and connect using the host, port, and password you configured above.
-
-> The relay listens for WebSocket connections at `ws(s)://host:port/api`. Make sure any firewall or router allows TCP on the relay port if connecting remotely.
-
-> WeeChatRS sends the WebSocket origin `weechatrs://app`. If you restrict origins with `relay.network.websocket_allowed_origins`, allow it, or the relay refuses the connection with `403 Forbidden`:
-> ```
-> /set relay.network.websocket_allowed_origins "^weechatrs://app$"
-> ```
-
-## IRCv3 support
-
-All capabilities are negotiated via `CAP LS 302` on connect and requested only when the server advertises them. `cap-notify` allows new caps to be requested mid-session.
-
-| Capability | Behaviour |
-| :--- | :--- |
-| `sasl` | SASL PLAIN authentication; only requested when a password is configured |
-| `message-tags` | Enables server-time, msgid, and other tag-based features |
-| `server-time` | Accurate message timestamps from the `@time=` tag |
-| `multi-prefix` | All mode prefixes shown per nick (e.g. `@+`) in NAMES and WHO |
-| `away-notify` | Server pushes `AWAY` when a nick's away status changes; nicklist dims away nicks |
-| `account-notify` | Server pushes `ACCOUNT` on services login/logout; shown as a channel notice |
-| `extended-join` | JOIN includes the account name; displayed in join messages |
-| `batch` | Used to deliver `chathistory` replies as a single atomic batch |
-| `chathistory` | `CHATHISTORY LATEST` fetched on join; `CHATHISTORY BEFORE` used for scroll-back |
-| `echo-message` | Server echoes sent messages back; local self-echo is suppressed to avoid duplicates |
-| `invite-notify` | Receive `INVITE` events for other users in shared channels |
-| `chghost` | Host changes for nicks in shared channels shown as a channel notice |
-| `userhost-in-names` | `nick!user@host` format in NAMES is parsed and stripped correctly |
-| `cap-notify` | Newly advertised caps are requested dynamically mid-session |
-| `labeled-response` | Negotiated for future use; responses flow through normal handlers immediately |
-| `msgid` | Deduplicates messages by ID to prevent bouncer replay duplicates (ring-buffer capped at 2000) |
-| `MONITOR` | `MONITOR + nick` sent when a DM buffer is opened; online/offline status shown in the DM buffer |
-
-CTCP auto-responses: `PING` (echo token back) and `VERSION` (replies with app name and version).
-
-## Soju support
-
-WeeChatRS can connect directly to a [soju](https://soju.im/) bouncer as an IRC backend. Add it as an **IRC** connection with your soju username and password.
-
-| Feature | Behaviour |
-| :--- | :--- |
-| All networks from one login | With `soju.im/bouncer-networks`, WeeChatRS lists your networks (`BOUNCER LISTNETWORKS`) and opens a connection bound to each one (`BOUNCER BIND`). Every network gets its own group in the buffer list, headed by its name. |
-| Live network changes | With `soju.im/bouncer-networks-notify`, networks added or removed in soju appear or disappear right away, and a network's connection state and errors show in its server buffer. |
-| One network only | Put the network in the username (`username/network`) to connect to just that network, as before. |
-| Read markers | `draft/read-marker` (or the older `soju.im/read`): opening a buffer sends `MARKREAD`, so the read position is shared with your other soju clients, and unread counts after a reconnect start from it. |
-| History | `chathistory` fills each channel and private conversation on connect, and *Load older messages* fetches more. |
-| Plain IRC servers | The same backend works for any IRC server; soju-specific features are only used when the server advertises them. |
-
-## ZNC support
-
-WeeChatRS recognises a [ZNC](https://znc.in/) bouncer by the `znc.in/*` capabilities it offers, and labels the connection **ZNC** in the Connections window. Add it as an **IRC** connection: your ZNC username in *Username*, your ZNC password in *Password*, SSL as your ZNC listener is set up.
-
-### All your networks from one login
-
-Log in with just your ZNC username (`alice`) and WeeChatRS opens every network of that user:
-
-1. The login asks ZNC for the user's networks (`/znc ListNetworks`).
-2. Each network gets a connection of its own, logged in as `alice/<network>`, with its own group in the buffer list, headed by the network's name.
-3. The login itself stays connected as the *control* connection. Its server buffer shows only what ZNC's modules say (`*status`, `*controlpanel`, …). ZNC always attaches a login to one of the networks, but that network's chat comes in on the network's own connection, so nothing shows twice.
-
-Talk to ZNC from the control buffer as in any client: `/znc help`, `/znc ListNetworks`, or `/msg *controlpanel help`. To connect to one network only, put it in the username (`alice/libera`), as before.
-
-### Managing networks
-
-![ZNC networks in the Connections window](screenshots/connections_znc.png)
-
-While a ZNC connection is up, its card in **Connections** (`⌘⇧C` / `Ctrl+Shift+C`) lists the user's networks: a green dot when ZNC is connected to the network's IRC server, its server and how many channels it is in. From there you can:
-
-- **Add network**: a name and a first server (host, port, TLS, optional server password). WeeChatRS sends `AddNetwork` and `AddServer` to `*controlpanel`, and the new network appears in the buffer list once ZNC has connected.
-- **Delete** a network (✕, then confirm): `DelNetwork`; its buffers close.
-- **Connect** / **Disconnect** a network: ZNC joins or leaves its IRC server (`Reconnect` / `Disconnect`).
-- **Refresh** the list. ZNC doesn't announce changes, so after changes from another client or the web admin, Refresh picks them up; changes made here refresh it on their own.
-
-ZNC's answer to the last command shows under the list. Managing networks needs ZNC's `controlpanel` module (`/znc LoadMod controlpanel`). The server address is the one ZNC connects to, as seen from the ZNC host.
-
-### History and unread lines
-
-| Feature | Behaviour |
-| :--- | :--- |
-| Buffer replay | ZNC's replay of a channel or conversation (`znc.in/playback` batches) goes in as history: it counts as unread, mentions included, but doesn't send notifications. |
-| Playback module | With the [playback module](https://github.com/jpnurmi/znc-playback) (`znc.in/playback`), WeeChatRS asks for everything ZNC has kept (`PLAY * 0`) after connecting, instead of ZNC's replay on join. You then get the whole buffer even when another client has already seen it, and ZNC doesn't clear it. Recommended, with `AutoClearChanBuffer` and `AutoClearQueryBuffer` off. |
-| Read position | ZNC doesn't keep one, so WeeChatRS remembers when you last read each buffer. After a reconnect, only lines since then count as unread. Kept per device. |
-| Your own messages | `znc.in/self-message`: what you send from another client shows up here too. |
-
-## Building from Source
-
-See [BUILDING.md](BUILDING.md) for full instructions covering macOS, Linux, Windows (native and WSL 2), and cross-compilation.
-
-## Transparency on Windows
-
-Requires **Transparency effects** to be enabled: Settings → Personalization → Colors → Transparency effects: On. Without it the window renders with a solid background.
-
-## Architecture
-
-```
-src/
-  main.rs                    — tokio runtime, eframe window setup, app icon loading
-  relay/
-    backend.rs               — BackendClient trait + BackendEvent enum (protocol-agnostic)
-    models.rs                — Buffer, Line, Nick, BufferActivity, WeeChatResponse
-    weechat/
-      mod.rs                 — WeeChat WebSocket client, auth, reconnect, idle keepalive
-      event_handler.rs       — WeeChatResponse → BackendEvent, hotlist, buffer sync,
-                               read-state tracking
-    irc/
-      mod.rs                 — IrcClient: BackendClient impl, command dispatch,
-                               a connection per soju or ZNC network
-      connection.rs          — TCP/TLS connection loop, IRCv3 CAP negotiation, SASL,
-                               PING/PONG keepalive, message translation → BackendEvent,
-                               mIRC formatting → ANSI, ZNC module queries
-      parser.rs              — IRCv3 message parser (tags, prefix, command, params)
-  ui/
-    mod.rs                   — ui module re-exports
-    app.rs                   — WeeChatApp struct, AppSettings, main render loop,
-                               buffer list drag-and-drop reorder, layout panels
-    event_handler.rs         — BackendEvent dispatch, multi-connection buffer grouping
-    input.rs                 — nick and emoji tab completion, command history,
-                               buffer keyboard navigation
-    ansi.rs                  — ANSI SGR parser (8-color, 256-color, TrueColor,
-                               bold, italic, underline, URL detection)
-    theme.rs                 — AppTheme, Ghostty theme parser and theme catalogue
-    settings.rs              — Settings and Connections window UI, SSH tunnel config
-    keybinds.rs              — KeybindAction enum, SerdeModifiers, KeybindsMap,
-                               rebindable shortcut storage and runtime dispatch
-    fset.rs                  — fset buffer parser and inline settings panel renderer
-    np.rs                    — /np now-playing detection (macOS osascript, Linux
-                               playerctl, Windows WinRT SMTC)
-    ssh_tunnel.rs            — SSH port-forward tunnel via openssh subprocess
-    znc.rs                   — ZNC networks panel and per-device read markers
-    emoji.rs                 — emoji shortcode table (~150 entries)
-```
+- **Linux:** dropping files onto the window works on X11 but not yet under Wayland; use `/share <path>`, `/share` or the paperclip button instead. The file picker uses the desktop's file-chooser portal (`xdg-desktop-portal`), standard on GNOME and KDE; `/share <path>` works without it.
+- **Windows:** window transparency needs *Transparency effects* on (Settings → Personalization → Colors); without it the window has a solid background.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. See `TODO.md` for planned features and known issues.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, [BUILDING.md](BUILDING.md) to build it, and [Architecture](docs/architecture.md) for how the code is laid out. Planned features and known issues are in [todo.md](todo.md).
 
 ## License
 
