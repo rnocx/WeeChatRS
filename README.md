@@ -93,7 +93,7 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 *WeeChat Relay connection — host, port, password, SSL toggle, and optional SSH tunnel*
 
 ![IRC connection dialog](screenshots/connection_irc.png)
-*Direct IRC/soju connection — server, port, nick, SASL auth, and TLS options*
+*IRC, soju or ZNC connection — server, port, nick, username (for ZNC: `user` for all networks, `user/network` for one), SASL auth, and TLS options*
 
 ![ZNC networks in the Connections window](screenshots/connections_znc.png)
 *A ZNC connection — the user's networks with their state, and buttons to add, remove, connect and disconnect them*

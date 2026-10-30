@@ -145,7 +145,8 @@ fn theme_chip(ui: &mut egui::Ui, theme: &AppTheme, selected: bool) -> egui::Resp
 
 const DEFAULT_CHAT_FONT: &str = "Default (JetBrains Mono)";
 const SETTINGS_SIZE: [f32; 2] = [760.0, 560.0];
-const CONNECTIONS_SIZE: [f32; 2] = [620.0, 520.0];
+// Tall enough for the whole IRC connection form, Save button included.
+const CONNECTIONS_SIZE: [f32; 2] = [620.0, 600.0];
 
 impl WeeChatApp {
     fn settings_viewport_id() -> ViewportId { ViewportId::from_hash_of("weechatrs_settings") }
