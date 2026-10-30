@@ -312,6 +312,74 @@ fn make_presence_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>) -> 
     Line::new(id.to_string(), ts, prefix.to_string(), text.to_string(), false, false)
 }
 
+/// mIRC colour numbers 0–15 as the ANSI colour slots the theme draws them in.
+const MIRC_TO_ANSI: [u8; 16] = [15, 0, 4, 2, 9, 1, 5, 3, 11, 10, 6, 14, 12, 13, 8, 7];
+
+/// IRC formatting codes (bold, italic, underline, colours, reset) as the ANSI escapes
+/// the chat view draws; codes it can't draw (reverse, strikethrough, monospace) are
+/// dropped. Extended colours 16–98 have no theme slot and are left at the default.
+fn irc_to_ansi(text: &str) -> String {
+    if !text.contains(['\x02', '\x03', '\x04', '\x0F', '\x11', '\x16', '\x1D', '\x1E', '\x1F']) {
+        return text.to_string();
+    }
+    // Up to `max` characters of `chars` from `i` that satisfy `f`.
+    fn take(chars: &[char], i: &mut usize, max: usize, f: fn(&char) -> bool) -> String {
+        let s: String = chars[*i..].iter().take(max).take_while(|c| f(c)).collect();
+        *i += s.chars().count();
+        s
+    }
+    let colour = |n: &str, base: u8| -> String {
+        match n.parse::<usize>() {
+            Ok(n) if n < 16 => format!("{};5;{}", base, MIRC_TO_ANSI[n]),
+            _ => format!("{}", base + 1),
+        }
+    };
+    let rgb = |hex: &str, base: u8| -> String {
+        let v = u32::from_str_radix(hex, 16).unwrap_or(0);
+        format!("{};2;{};{};{}", base, v >> 16, (v >> 8) & 0xff, v & 0xff)
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let (mut bold, mut italic, mut underline) = (false, false, false);
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        match c {
+            '\x02' => { bold = !bold; out.push_str(if bold { "\x1B[1m" } else { "\x1B[22m" }); }
+            '\x1D' => { italic = !italic; out.push_str(if italic { "\x1B[3m" } else { "\x1B[23m" }); }
+            '\x1F' => { underline = !underline; out.push_str(if underline { "\x1B[4m" } else { "\x1B[24m" }); }
+            '\x0F' => { (bold, italic, underline) = (false, false, false); out.push_str("\x1B[0m"); }
+            '\x03' | '\x04' => {
+                let (digits, max, code): (fn(&char) -> bool, usize, &dyn Fn(&str, u8) -> String) = if c == '\x03' {
+                    (char::is_ascii_digit, 2, &colour)
+                } else {
+                    (char::is_ascii_hexdigit, 6, &rgb)
+                };
+                let fg = take(&chars, &mut i, max, digits);
+                if fg.is_empty() || (c == '\x04' && fg.len() < 6) {
+                    // A bare \x03 ends the colours.
+                    out.push_str("\x1B[39;49m");
+                    continue;
+                }
+                out.push_str(&format!("\x1B[{}m", code(&fg, 38)));
+                // ",bg" only when digits follow the comma; otherwise the comma is text.
+                if chars.get(i) == Some(&',') && chars.get(i + 1).is_some_and(digits) {
+                    i += 1;
+                    let bg = take(&chars, &mut i, max, digits);
+                    out.push_str(&format!("\x1B[{}m", code(&bg, 48)));
+                }
+            }
+            '\x11' | '\x16' | '\x1E' => {}
+            _ => out.push(c),
+        }
+    }
+    if bold || italic || underline {
+        out.push_str("\x1B[0m");
+    }
+    out
+}
+
 /// Escape a value for the message-tag attribute format (SEARCH attributes).
 fn escape_attribute(v: &str) -> String {
     v.replace('\\', "\\\\").replace(';', "\\:").replace(' ', "\\s").replace('\r', "\\r").replace('\n', "\\n")
@@ -347,8 +415,8 @@ fn message_line(msg: &IrcMessage, session: &Session, line_counter: &mut u64) -> 
     };
 
     let display_text = if let Some(inner) = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')) {
-        format!("* {} {}", nick, inner)
-    } else { text.to_string() };
+        format!("* {} {}", nick, irc_to_ansi(inner))
+    } else { irc_to_ansi(text) };
 
     *line_counter += 1;
     Some((buffer_id, make_line(&line_counter.to_string(), &prefix, &display_text, timestamp_from_msg(msg), highlight)))
@@ -1034,13 +1102,13 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
 
         "332" => {
             let channel = msg.param(1).unwrap_or("").to_lowercase();
-            let topic = msg.param(2).unwrap_or("").to_string();
+            let topic = irc_to_ansi(msg.param(2).unwrap_or(""));
             events.push(BackendEvent::TopicChanged { buffer_id: channel, topic });
         }
 
         "TOPIC" => {
             let channel = msg.param(0).unwrap_or("").to_lowercase();
-            let topic = msg.param(1).unwrap_or("").to_string();
+            let topic = irc_to_ansi(msg.param(1).unwrap_or(""));
             let nick = msg.nick().unwrap_or("*").to_string();
             events.push(BackendEvent::TopicChanged { buffer_id: channel.clone(), topic: topic.clone() });
             *line_counter += 1;
@@ -1925,6 +1993,25 @@ mod tests {
         }
         let sent = take_write_queue(&mut session);
         assert!(sent.ends_with(&["PRIVMSG *status :ListNetworks".to_string(), "PING :wcrs-znc-2".to_string()]), "{sent:?}");
+    }
+
+    #[test]
+    fn irc_formatting_becomes_ansi() {
+        // ZNC's help, as captured from ZNC 1.9.1.
+        assert_eq!(irc_to_ansi("\x02Version\x02: Print which version of ZNC this is"),
+            "\x1B[1mVersion\x1B[22m: Print which version of ZNC this is");
+        assert_eq!(irc_to_ansi("\x034red\x03 and \x0312,1blue on black\x0f!"),
+            "\x1B[38;5;9mred\x1B[39;49m and \x1B[38;5;12m\x1B[48;5;0mblue on black\x1B[0m!");
+        // A comma not followed by a colour is text; extended colours keep the default.
+        assert_eq!(irc_to_ansi("\x033,ok \x0345x"), "\x1B[38;5;2m,ok \x1B[39mx");
+        assert_eq!(irc_to_ansi("\x04ff8000hex"), "\x1B[38;2;255;128;0mhex");
+        // Unclosed styles end with the line; codes it can't draw disappear.
+        assert_eq!(irc_to_ansi("\x1Dit \x16rev"), "\x1B[3mit rev\x1B[0m");
+        assert_eq!(irc_to_ansi("plain"), "plain");
+        // The chat view reads it back as styled text without control characters.
+        let plain: String = crate::ui::ansi::ANSIParser::parse(&irc_to_ansi("\x02\x0304bold red\x0f done"))
+            .iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(plain, "bold red done");
     }
 
     #[test]
