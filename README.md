@@ -72,30 +72,39 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 ## Screenshots
 
 ![Main chat view](screenshots/main.png)
+
 *Main window — buffers grouped by network with unread and highlight counts, the unread divider, grouped messages, highlighted lines, and a nick list in the same colours as the chat*
 
 ![Catppuccin Mocha and Catppuccin Latte](screenshots/themes.png)
+
 *Themes — the same channel in Catppuccin Mocha and Catppuccin Latte, two of the bundled Ghostty themes*
 
 ![Theme settings](screenshots/settings_theme.png)
+
 *Theme page — searchable theme list, quick buttons drawn in each theme's colours, Ghostty theme import, and the 16-colour editor*
 
 ![fset settings panel](screenshots/fset.png)
+
 *fset — browse and edit WeeChat options: dropdowns for enums, checkboxes for booleans, modified options marked with a reset button*
 
 ![Settings window](screenshots/settings_chat.png)
+
 *Settings — chat options, nick column alignment, and inline image and link previews*
 
 ![Connections](screenshots/connections.png)
+
 *Connections — WeeChat relays and IRC/soju servers side by side, each with its own status*
 
 ![WeeChat Relay connection dialog](screenshots/connection_weechat.png)
+
 *WeeChat Relay connection — host, port, password, SSL toggle, and optional SSH tunnel*
 
 ![IRC connection dialog](screenshots/connection_irc.png)
+
 *IRC, soju or ZNC connection — server, port, nick, username (for ZNC: `user` for all networks, `user/network` for one), SASL auth, and TLS options*
 
 ![ZNC networks in the Connections window](screenshots/connections_znc.png)
+
 *A ZNC connection — the user's networks with their state, and buttons to add, remove, connect and disconnect them*
 
 ## Platform Support
