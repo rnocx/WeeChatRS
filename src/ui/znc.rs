@@ -3,7 +3,7 @@
 
 use crate::relay::backend::ZncNetwork;
 use crate::relay::models::Buffer;
-use crate::ui::app::WeeChatApp;
+use crate::ui::app::{local_buffer_key, WeeChatApp};
 use crate::ui::icons;
 use egui::{Color32, RichText};
 
@@ -38,11 +38,6 @@ pub(crate) fn znc_user(username: &str, nick: &str) -> String {
     login.split(['@', '/']).next().unwrap_or(login).to_string()
 }
 
-/// A buffer's read-marker key: connection, network group and buffer name, which stay
-/// the same from one session to the next (buffer ids of ZNC networks may not).
-fn read_marker_key(conn_prefix: &str, buffer: &Buffer) -> String {
-    format!("{}|{}|{}", conn_prefix, buffer.server, buffer.name.to_lowercase())
-}
 
 impl WeeChatApp {
     fn is_znc_connection(&self, conn_prefix: &str) -> bool {
@@ -53,7 +48,7 @@ impl WeeChatApp {
     /// unread when ZNC replays them (as soju's read marker does for soju).
     pub(crate) fn apply_local_read_marker(&self, conn_prefix: &str, buffer: &mut Buffer) {
         if self.is_znc_connection(conn_prefix) {
-            if let Some(ts) = self.bouncer_read_markers.get(&read_marker_key(conn_prefix, buffer)) {
+            if let Some(ts) = self.bouncer_read_markers.get(&local_buffer_key(conn_prefix, buffer)) {
                 buffer.last_markread_ts = Some(*ts);
             }
         }
@@ -65,7 +60,7 @@ impl WeeChatApp {
         if !self.is_znc_connection(conn_prefix) { return; }
         let Some(buffer) = self.buffer_by_id(buffer_id) else { return };
         let Some(ts) = buffer.messages.back().map(|l| l.timestamp) else { return };
-        let key = read_marker_key(conn_prefix, buffer);
+        let key = local_buffer_key(conn_prefix, buffer);
         if let Some(buffer) = self.buffer_by_id_mut(buffer_id) {
             buffer.last_markread_ts = Some(ts);
         }

@@ -167,6 +167,13 @@ impl WeeChatApp {
                 buf.id = full_id.clone();
                 buf.full_name = full_full_name;
                 self.apply_local_read_marker(conn_prefix, &mut buf);
+                // WeeChat sends its own hidden flag; the other backends' buffers get the
+                // hidden and muted state the app saved for them.
+                if self.connections.iter().any(|c| c.prefix == conn_prefix && c.backend_type != crate::ui::app::BackendType::WeeChat) {
+                    let key = crate::ui::app::local_buffer_key(conn_prefix, &buf);
+                    buf.hidden = self.hidden_buffer_keys.contains(&key);
+                    buf.muted = self.muted_buffer_names.contains(&key);
+                }
                 if !self.buffer_idx_of(&full_id).is_some() {
                     // Keep a network's buffers together: after the last buffer of its group,
                     // or for a new group after the connection's last buffer. A soju login's

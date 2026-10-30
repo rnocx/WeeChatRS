@@ -366,6 +366,13 @@ fn apply_drag_reorder(buffers: &mut Vec<Buffer>, drag_id: &str, drop_before_id: 
     }
 }
 
+/// The key under which the app keeps a buffer's state that the server doesn't (hidden,
+/// muted, ZNC read markers): connection, network group and buffer name, which tell a
+/// bouncer's networks apart and stay the same from one session to the next.
+pub(crate) fn local_buffer_key(conn_prefix: &str, buffer: &Buffer) -> String {
+    format!("{}|{}|{}", conn_prefix, buffer.server, buffer.name.to_lowercase())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum BackendType {
     #[default]
@@ -534,6 +541,10 @@ pub struct AppSettings {
     pub font_path: String,
     #[serde(default)]
     pub muted_buffer_names: HashSet<String>,
+    /// Hidden buffers of connections other than WeeChat (which keeps its own), by
+    /// `local_buffer_key`.
+    #[serde(default)]
+    pub hidden_buffer_keys: HashSet<String>,
     #[serde(default = "default_true")]
     pub show_toolbar: bool,
     #[serde(default = "default_nicklist_width")]
@@ -609,6 +620,7 @@ impl Default for AppSettings {
             font_name: String::new(),
             font_path: String::new(),
             muted_buffer_names: HashSet::new(),
+            hidden_buffer_keys: HashSet::new(),
             show_toolbar: true,
             nicklist_width: 0.0,
             buffers_width: 0.0,
@@ -748,6 +760,7 @@ pub struct WeeChatApp {
 
     // Muted buffers (stored by full_name, stable across WeeChat restarts).
     pub(crate) muted_buffer_names: HashSet<String>,
+    pub(crate) hidden_buffer_keys: HashSet<String>,
     pub(crate) bouncer_read_markers: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub(crate) znc_ui: crate::ui::znc::ZncUiState,
     /// Per-buffer cooldown tracking for OS notifications. Prevents a noisy channel
@@ -983,6 +996,7 @@ impl WeeChatApp {
             available_fonts,
             selected_view_since: None,
             muted_buffer_names: settings.muted_buffer_names,
+            hidden_buffer_keys: settings.hidden_buffer_keys,
             bouncer_read_markers: settings.bouncer_read_markers,
             znc_ui: Default::default(),
             last_notif_at: HashMap::new(),
@@ -1243,6 +1257,19 @@ impl WeeChatApp {
         self.record_local_read(&id);
     }
 
+    /// The key a buffer's hidden and muted state is saved under, and whether its
+    /// connection is WeeChat: WeeChat's full name there (WeeChat keeps hidden buffers
+    /// itself), `local_buffer_key` for the others.
+    pub(crate) fn saved_state_key(&self, buffer_id: &str) -> Option<(String, bool)> {
+        let conn = self.connections.iter().find(|c| buffer_id.starts_with(&format!("{}/", c.prefix)))?;
+        let buffer = self.buffer_by_id(buffer_id)?;
+        Some(if conn.backend_type == BackendType::WeeChat {
+            (buffer.full_name.clone(), true)
+        } else {
+            (local_buffer_key(&conn.prefix, buffer), false)
+        })
+    }
+
     pub(crate) fn log_conn_for(&mut self, conn_prefix: &str, msg: impl Into<String>) {
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         let text = format!("[{}]  {}", ts, msg.into());
@@ -1432,6 +1459,7 @@ impl eframe::App for WeeChatApp {
             font_name: self.font_name.clone(),
             font_path: self.font_path.clone(),
             muted_buffer_names: self.muted_buffer_names.clone(),
+            hidden_buffer_keys: self.hidden_buffer_keys.clone(),
             accept_invalid_certs: false,
             irc_nick: String::new(),
             connections: self.profiles.clone(),
@@ -2200,10 +2228,11 @@ impl eframe::App for WeeChatApp {
         }
 
         if let Some((buf_id, full_name, mute)) = pending_mute {
+            let key = self.saved_state_key(&buf_id).map(|(key, _)| key).unwrap_or(full_name);
             if mute {
-                self.muted_buffer_names.insert(full_name);
+                self.muted_buffer_names.insert(key);
             } else {
-                self.muted_buffer_names.remove(&full_name);
+                self.muted_buffer_names.remove(&key);
             }
             if let Some(b) = self.buffer_by_id_mut(&buf_id) {
                 b.muted = mute;
@@ -2215,7 +2244,26 @@ impl eframe::App for WeeChatApp {
         }
 
         if let Some((id, cmd)) = pending_buffer_command {
-            self.send_command_to_buffer(&id, &cmd);
+            let hide = match cmd.as_str() {
+                "/buffer hide" => Some(true),
+                "/buffer unhide" => Some(false),
+                _ => None,
+            };
+            match (hide, self.saved_state_key(&id)) {
+                // Only WeeChat has hidden buffers of its own; for the others the app
+                // keeps them (an IRC server would get "BUFFER hide" as a command).
+                (Some(hide), Some((key, false))) => {
+                    if hide {
+                        self.hidden_buffer_keys.insert(key);
+                    } else {
+                        self.hidden_buffer_keys.remove(&key);
+                    }
+                    if let Some(b) = self.buffer_by_id_mut(&id) {
+                        b.hidden = hide;
+                    }
+                }
+                _ => self.send_command_to_buffer(&id, &cmd),
+            }
         }
 
         self.update_fset_session(ctx);
@@ -3256,6 +3304,27 @@ mod tests {
         assert_eq!(styles["alice"].fg, AnsiColor::Indexed(13));
         assert_eq!(styles["bob"].fg, AnsiColor::Indexed(3));
         assert_eq!(styles["carol"].fg, AnsiColor::Indexed(4));
+    }
+
+    #[test]
+    fn local_buffer_keys_tell_bouncer_networks_apart() {
+        use super::local_buffer_key;
+        let buffer = |id: &str, server: &str, name: &str| crate::relay::models::Buffer {
+            id: id.into(), number: 1, name: name.into(), full_name: format!("irc.{}", name.to_lowercase()),
+            plugin: "irc".into(), kind: "channel".into(), server: server.into(),
+            messages: Default::default(), nicks: Default::default(),
+            activity: crate::relay::models::BufferActivity::None, unread_count: 0,
+            last_read_id: None, last_markread_ts: None, topic: String::new(), modes: String::new(),
+            hidden: false, muted: false, has_nicklist: true, visit_start_marker_id: None,
+        };
+        // The same channel on two networks of one bouncer login: same full name, two keys.
+        let libera = buffer("home/net1/#rust", "znc.example/znc/libera", "#Rust");
+        let oftc = buffer("home/net2/#rust", "znc.example/znc/oftc", "#rust");
+        assert_eq!(libera.full_name, oftc.full_name);
+        assert_ne!(local_buffer_key("home", &libera), local_buffer_key("home", &oftc));
+        // A network's number may change between sessions; the key doesn't use it.
+        let renumbered = buffer("home/net5/#rust", "znc.example/znc/libera", "#rust");
+        assert_eq!(local_buffer_key("home", &libera), local_buffer_key("home", &renumbered));
     }
 
     #[test]
