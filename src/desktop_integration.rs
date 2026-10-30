@@ -65,11 +65,31 @@ fn install() -> Result<(), String> {
 
     if changed {
         log::info!("desktop integration: installed {}", desktop_path.display());
-        // Best effort: refresh menu/icon caches where the tools exist.
-        let _ = std::process::Command::new("update-desktop-database").arg(data.join("applications")).status();
-        let _ = std::process::Command::new("gtk-update-icon-cache").args(["-q", "-t"]).arg(data.join("icons/hicolor")).status();
+        // Best effort, and quiet: these tools' complaints are about other apps' files.
+        let _ = quiet("update-desktop-database").arg(data.join("applications")).status();
+        refresh_icon_theme(&data.join("icons/hicolor"));
     }
     Ok(())
+}
+
+fn quiet(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    command
+}
+
+/// Let the desktop see new icons in `theme`, as xdg-icon-resource does. A per-user
+/// hicolor folder usually has no index.theme and no cache, and is read directly;
+/// building a cache there would cover every app's icons in it, and gtk-update-icon-cache
+/// refuses ("the generated cache was invalid") when any of them is off. So the cache is
+/// only rebuilt where the theme has an index; elsewhere the folder's time is bumped,
+/// which makes GTK treat an existing cache as stale.
+fn refresh_icon_theme(theme: &Path) {
+    if theme.join("index.theme").is_file() {
+        let _ = quiet("gtk-update-icon-cache").arg("-q").arg(theme).status();
+    } else if let Ok(dir) = std::fs::File::open(theme) {
+        let _ = dir.set_modified(std::time::SystemTime::now());
+    }
 }
 
 /// Write `contents` to `path` unless it already holds exactly that. Returns whether it wrote.
@@ -101,6 +121,8 @@ mod tests {
         for size in ["256x256", "512x512"] {
             assert!(dir.join(format!("icons/hicolor/{size}/apps/weechatrs.png")).is_file());
         }
+        // No index.theme in a per-user folder: no icon cache is built there.
+        assert!(!dir.join("icons/hicolor/icon-theme.cache").exists());
 
         // Unchanged files aren't rewritten.
         let before = std::fs::metadata(dir.join("applications/weechatrs.desktop")).unwrap().modified().unwrap();

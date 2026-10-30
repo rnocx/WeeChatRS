@@ -35,8 +35,17 @@ for s in $SIZES; do
 done
 
 # Refresh caches where the tools exist; harmless if they don't.
-command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DATA_DIR/applications" || true
-command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t "$DATA_DIR/icons/hicolor" || true
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DATA_DIR/applications" >/dev/null 2>&1 || true
+# As xdg-icon-resource does: rebuild the icon cache only where the theme has an
+# index. A per-user hicolor folder usually has neither, and is read directly; a cache
+# would cover every app's icons there, and gtk-update-icon-cache refuses ("the
+# generated cache was invalid") when any of them is off. Bumping the folder's time
+# makes GTK treat an existing cache as stale.
+if [ -f "$DATA_DIR/icons/hicolor/index.theme" ]; then
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$DATA_DIR/icons/hicolor" >/dev/null 2>&1 || true
+else
+    touch "$DATA_DIR/icons/hicolor"
+fi
 
 echo "WeeChatRS installed to $BIN_DIR/weechat-rs"
 case ":$PATH:" in
