@@ -1400,6 +1400,22 @@ fn take_write_queue(session: &mut Session) -> Vec<String> {
 
 // ── Main connection task ──────────────────────────────────────────────────────
 
+/// `fut`'s output, or None if the UI asks to disconnect first. Used while there is no
+/// session, so Disconnect isn't stuck behind a connect attempt or a retry delay;
+/// other commands need a session and are dropped.
+async fn unless_disconnected<T>(
+    cmd_rx: &mut mpsc::UnboundedReceiver<IrcCommand>,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            out = &mut fut => return Some(out),
+            cmd = cmd_rx.recv() => if matches!(cmd, None | Some(IrcCommand::Disconnect)) { return None },
+        }
+    }
+}
+
 pub fn spawn(
     config: Arc<IrcConfig>,
     event_tx: mpsc::UnboundedSender<BackendEvent>,
@@ -1413,6 +1429,19 @@ pub fn spawn(
         macro_rules! send {
             ($ev:expr) => {{ let _ = event_tx.send($ev); ctx.request_repaint(); }};
         }
+        // Await outside a session; a Disconnect meanwhile ends the task.
+        macro_rules! wait {
+            ($fut:expr) => {
+                match unless_disconnected(&mut cmd_rx, $fut).await {
+                    Some(out) => out,
+                    None => {
+                        connected.store(false, Ordering::Relaxed);
+                        send!(BackendEvent::Disconnected);
+                        return;
+                    }
+                }
+            };
+        }
 
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(30);
@@ -1425,14 +1454,14 @@ pub fn spawn(
             if let Some(tport) = config.tunnel_port {
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
                 loop {
-                    match TcpStream::connect(("127.0.0.1", tport)).await {
+                    match wait!(TcpStream::connect(("127.0.0.1", tport))) {
                         Ok(_) => break,
                         Err(_) => {
                             if tokio::time::Instant::now() >= deadline {
                                 send!(BackendEvent::Error("SSH tunnel did not become ready within 15 s".to_string()));
                                 break;
                             }
-                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            wait!(tokio::time::sleep(Duration::from_millis(500)));
                         }
                     }
                 }
@@ -1440,13 +1469,13 @@ pub fn spawn(
 
             let addr = format!("{}:{}", config.host.trim(), config.port);
 
-            let tcp = match TcpStream::connect(&addr).await {
+            let tcp = match wait!(TcpStream::connect(&addr)) {
                 Ok(s) => s,
                 Err(e) => {
                     connected.store(false, Ordering::Relaxed);
                     send!(BackendEvent::Error(format!("Connection failed: {}", e)));
                     if !config.auto_reconnect { return; }
-                    tokio::time::sleep(backoff).await;
+                    wait!(tokio::time::sleep(backoff));
                     backoff = (backoff * 2).min(max_backoff);
                     continue;
                 }
@@ -1697,13 +1726,13 @@ pub fn spawn(
                     Ok(cx) => cx,
                     Err(e) => {
                         send!(BackendEvent::Error(format!("TLS setup failed: {}", e)));
-                        tokio::time::sleep(backoff).await;
+                        wait!(tokio::time::sleep(backoff));
                         backoff = (backoff * 2).min(max_backoff);
                         continue;
                     }
                 };
                 let cx = tokio_native_tls::TlsConnector::from(tls_cx);
-                match cx.connect(&config.host, tcp).await {
+                match wait!(cx.connect(&config.host, tcp)) {
                     Ok(tls_stream) => { run_session!(tls_stream); }
                     Err(e) => {
                         connected.store(false, Ordering::Relaxed);
@@ -1717,7 +1746,7 @@ pub fn spawn(
             connected.store(false, Ordering::Relaxed);
             if clean || !config.auto_reconnect { return; }
 
-            tokio::time::sleep(backoff).await;
+            wait!(tokio::time::sleep(backoff));
             backoff = (backoff * 2).min(max_backoff);
         }
     });

@@ -1118,6 +1118,11 @@ impl WeeChatApp {
         if let Some(prefix) = do_disconnect {
             if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == prefix) {
                 conn.client.disconnect();
+                // Asked for: not a failed login, and nothing to retry. Connect makes a
+                // new handle, so this one's flags don't outlive it.
+                conn.connecting_pending = false;
+                conn.auth_error = None;
+                conn.auto_reconnect = false;
             }
         }
         if let Some(idx) = do_delete {

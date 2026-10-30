@@ -470,6 +470,37 @@ mod tests {
         }
     }
 
+    /// Disconnect while the connection keeps failing: it stops at once instead of
+    /// waiting out the retry delay, and doesn't try again.
+    #[tokio::test]
+    async fn disconnect_stops_a_failing_connection() {
+        // A port nothing listens on: refused straight away, then a retry delay.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let config = IrcConfig {
+            label: "down".into(), host: "127.0.0.1".into(), port,
+            nick: "sam".into(), username: String::new(), sasl_username: String::new(),
+            password: String::new(), use_ssl: false, accept_invalid_certs: false,
+            channel: String::new(), tunnel_port: None, auto_reconnect: true,
+            bind_netid: None, list_networks: true,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut client = IrcClient::new(config, tx, EguiContext::default());
+        client.connect();
+        let mut events = Vec::new();
+        collect(&mut rx, &mut events, 5, |e| e.iter().any(|e| matches!(e, BackendEvent::Error(_)))).await;
+        assert!(matches!(events.last(), Some(BackendEvent::Error(_))), "{events:?}");
+
+        client.disconnect();
+        let started = std::time::Instant::now();
+        let mut events = Vec::new();
+        collect(&mut rx, &mut events, 5, |e| !e.is_empty()).await;
+        assert!(matches!(events[..], [BackendEvent::Disconnected]), "{events:?}");
+        // Well inside the first one-second retry delay.
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "{:?}", started.elapsed());
+        collect(&mut rx, &mut events, 3, |e| e.len() > 1).await;
+        assert_eq!(events.len(), 1, "it tried again: {events:?}");
+    }
+
     /// End-to-end against the ZNC rig in docker/znc-test (user test/test, networks alpha
     /// and beta on two Ergo servers, the playback module loaded). Run with
     /// `ZNC_TEST_ADDR=127.0.0.1:6501 ZNC_TEST_IRC=127.0.0.1:16667

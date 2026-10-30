@@ -23,6 +23,22 @@ enum ClientCommand {
     Disconnect,
 }
 
+/// `fut`'s output, or None if the UI asks to disconnect first. Used while there is no
+/// connection, so Disconnect isn't stuck behind a connect attempt or a retry delay;
+/// requests need a connection and are dropped.
+async fn unless_disconnected<T>(
+    cmd_rx: &mut mpsc::UnboundedReceiver<ClientCommand>,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            out = &mut fut => return Some(out),
+            cmd = cmd_rx.recv() => if matches!(cmd, None | Some(ClientCommand::Disconnect)) { return None },
+        }
+    }
+}
+
 // ── Config (cheaply cloneable, passed into the reconnect loop) ────────────────
 
 #[derive(Clone)]
@@ -112,6 +128,19 @@ impl BackendClient for WeeChatClient {
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(30);
+            // Await outside a connection; a Disconnect meanwhile ends the task.
+            macro_rules! wait {
+                ($fut:expr) => {
+                    match unless_disconnected(&mut cmd_rx, $fut).await {
+                        Some(out) => out,
+                        None => {
+                            connected.store(false, Ordering::Relaxed);
+                            send!(BackendEvent::Disconnected);
+                            return;
+                        }
+                    }
+                };
+            }
 
             loop {
                 // If connecting through an SSH tunnel, wait until the local
@@ -131,7 +160,7 @@ impl BackendClient for WeeChatClient {
                             send!(BackendEvent::Error("SSH tunnel did not become ready within 15 s".to_string()));
                             break;
                         }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        wait!(tokio::time::sleep(Duration::from_millis(500)));
                     }
                 }
 
@@ -192,7 +221,7 @@ impl BackendClient for WeeChatClient {
                     None
                 };
 
-                match connect_async_tls_with_config(request, None, false, connector).await {
+                match wait!(connect_async_tls_with_config(request, None, false, connector)) {
                     Ok((ws_stream, _)) => {
                         connected.store(true, Ordering::Relaxed);
                         send!(BackendEvent::Connected);
@@ -293,7 +322,7 @@ impl BackendClient for WeeChatClient {
                 }
 
                 if !config.auto_reconnect { return; }
-                tokio::time::sleep(backoff).await;
+                wait!(tokio::time::sleep(backoff));
                 backoff = (backoff * 2).min(max_backoff);
             }
         });
@@ -388,5 +417,32 @@ impl BackendClient for WeeChatClient {
             None,
             Some(serde_json::json!({"colors": "ansi", "input": false})),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Disconnect while the relay can't be reached: it stops at once instead of
+    /// waiting out the retry delay, and doesn't try again.
+    #[tokio::test]
+    async fn disconnect_stops_a_failing_connection() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let config = WeeChatConfig {
+            host: "127.0.0.1".into(), port, password: "x".into(), use_ssl: false,
+            accept_invalid_certs: false, tunnel_port: None, auto_reconnect: true,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut client = WeeChatClient::new(config, tx, EguiContext::default());
+        client.connect();
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(5), rx.recv()).await, Ok(Some(BackendEvent::Error(_)))));
+
+        client.disconnect();
+        let started = std::time::Instant::now();
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(5), rx.recv()).await, Ok(Some(BackendEvent::Disconnected))));
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        // The task has ended: the channel closes with nothing more sent.
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(3), rx.recv()).await, Ok(None) | Err(_)));
     }
 }
