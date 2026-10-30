@@ -757,6 +757,8 @@ pub struct WeeChatApp {
     pub(crate) font_search: String,
     // Transient search text inside the theme dropdown, and the last import failure.
     pub(crate) theme_search: String,
+    /// The theme in use when the theme dropdown opened, while ↑/↓ preview others.
+    pub(crate) theme_before_preview: Option<crate::ui::theme::AppTheme>,
     pub(crate) theme_import_error: Option<String>,
 
     // Prefix column alignment (mirrors weechat.look.prefix_align_max / prefix_suffix).
@@ -976,6 +978,7 @@ impl WeeChatApp {
             loading_more_buffer_id: None,
             font_search: String::new(),
             theme_search: String::new(),
+            theme_before_preview: None,
             theme_import_error: None,
             prefix_align_max: settings.prefix_align_max,
             prefix_suffix: settings.prefix_suffix,

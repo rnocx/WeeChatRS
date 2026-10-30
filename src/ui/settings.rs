@@ -393,6 +393,9 @@ impl WeeChatApp {
         }
     }
 
+    /// The theme dropdown. While it is open, ↑/↓ apply each theme as a preview; a
+    /// click or Enter keeps the theme, and closing it any other way (Esc, clicking
+    /// outside) goes back to the theme it was opened with.
     fn theme_picker(&mut self, ui: &mut egui::Ui) {
         let mut picked: Option<AppTheme> = None;
         let combo_resp = egui::ComboBox::from_id_salt("theme_combo")
@@ -400,6 +403,38 @@ impl WeeChatApp {
             .width(240.0)
             .height(380.0)
             .show_ui(ui, |ui| {
+                if self.theme_before_preview.is_none() {
+                    self.theme_before_preview = Some(self.theme.clone());
+                }
+                // Taken before the search box sees them: it would move its cursor,
+                // and Enter would only drop its focus.
+                let (down, up, enter) = ui.input_mut(|i| (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                ));
+                let query = self.theme_search.to_lowercase();
+                let shown: Vec<&crate::ui::theme::CatalogTheme> = crate::ui::theme::catalog().iter()
+                    .filter(|entry| query.is_empty() || entry.theme.name.to_lowercase().contains(&query))
+                    .collect();
+                // Step from the theme in use, so the highlight is always the applied one.
+                let current = shown.iter().position(|entry| entry.theme.name == self.theme.name);
+                let step = match (down, up, current) {
+                    (true, _, Some(i)) => Some((i + 1).min(shown.len().saturating_sub(1))),
+                    (_, true, Some(i)) => Some(i.saturating_sub(1)),
+                    (true, _, None) | (_, true, None) => Some(0),
+                    _ => None,
+                };
+                let mut stepped = false;
+                if let Some(entry) = step.and_then(|i| shown.get(i)) {
+                    stepped = entry.theme.name != self.theme.name;
+                    self.theme = entry.theme.clone();
+                }
+                if enter && current.is_some() {
+                    picked = Some(self.theme.clone());
+                    ui.close();
+                }
+
                 let search_edit = ui.add(
                     egui::TextEdit::singleline(&mut self.theme_search)
                         .hint_text("Search themes…")
@@ -408,31 +443,36 @@ impl WeeChatApp {
                 if search_edit.gained_focus() || (!search_edit.has_focus() && egui::Popup::is_any_open(ui.ctx())) {
                     search_edit.request_focus();
                 }
-                let query = self.theme_search.to_lowercase();
                 let mut section: Option<bool> = None;
-                for entry in crate::ui::theme::catalog() {
-                    if !query.is_empty() && !entry.theme.name.to_lowercase().contains(&query) {
-                        continue;
-                    }
+                for entry in shown {
                     if section != Some(entry.user) {
                         section = Some(entry.user);
                         ui.separator();
                         hint(ui, if entry.user { "Your Ghostty themes" } else { "Ghostty themes" });
                     }
-                    let clicked = ui.horizontal(|ui| {
+                    let selected = entry.theme.name == self.theme.name;
+                    let label = ui.horizontal(|ui| {
                         theme_swatch(ui, &entry.theme);
-                        ui.selectable_label(entry.theme.name == self.theme.name, entry.theme.name.as_str()).clicked()
+                        ui.selectable_label(selected, entry.theme.name.as_str())
                     }).inner;
-                    if clicked {
+                    if selected && stepped {
+                        label.scroll_to_me(None);
+                    }
+                    if label.clicked() {
                         picked = Some(entry.theme.clone());
                     }
                 }
             });
         if combo_resp.inner.is_none() {
             self.theme_search.clear();
+            // Closed without a pick: undo the arrow-key preview.
+            if let Some(theme) = self.theme_before_preview.take() {
+                self.theme = theme;
+            }
         }
         if let Some(theme) = picked {
             self.theme = theme;
+            self.theme_before_preview = None;
             self.theme_search.clear();
             self.theme_import_error = None;
         }
