@@ -57,6 +57,52 @@ fn timestamp(v: &Value) -> Option<DateTime<Utc>> {
                 .map(|d| d.with_timezone(&Utc))
         })
 }
+/// A join, part, quit, kick or nick change as the IRC backend shows it: a presence
+/// line, which "show filtered lines" hides. `v` is a live event or a stored history
+/// entry (which also has `type` and a ready-made `text`); `kind` is its type. Other
+/// history entries that aren't messages (topic, mode, …) become a `--` notice.
+/// None for messages.
+fn event_line(v: &Value, kind: &str, channel: &str) -> Option<Line> {
+    let ts = timestamp(&v["timestamp"]).unwrap_or_else(Utc::now);
+    let nick = string(v, "nick");
+    let channel = Some(string(v, "channel")).filter(|c| !c.is_empty()).unwrap_or(channel);
+    // Stored entries have the reason only in their text: "bob has quit (reason)".
+    let reason = [string(v, "reason"), string(v, "kickReason")]
+        .into_iter()
+        .find(|r| !r.is_empty())
+        .map(str::to_owned)
+        .or_else(|| string(v, "text").split_once('(').map(|(_, r)| r.trim_end().trim_end_matches(')').to_owned()))
+        .unwrap_or_default();
+    let with_reason = |text: String| if reason.is_empty() { text } else { format!("{} ({})", text, irc_to_ansi(&reason)) };
+    let (prefix, text, who) = match kind {
+        "privmsg" | "action" | "notice" | "" => return None,
+        "join" => {
+            let (ident, host) = (string(v, "ident"), string(v, "hostname"));
+            let from = if ident.is_empty() || host.is_empty() { String::new() } else { format!(" ({}@{})", ident, host) };
+            ("-->", format!("{}{} has joined {}", nick, from, channel), nick)
+        }
+        "part" => ("<--", with_reason(format!("{} has left {}", nick, channel)), nick),
+        "quit" => ("<--", with_reason(format!("{} has quit", nick)), nick),
+        "kick" => {
+            let kicked = Some(string(v, "kicked")).filter(|k| !k.is_empty()).unwrap_or(string(v, "kickedNick"));
+            ("<--", with_reason(format!("{} was kicked from {} by {}", kicked, channel, nick)), kicked)
+        }
+        "nick" => {
+            let old = Some(string(v, "oldNick")).filter(|o| !o.is_empty()).unwrap_or(nick);
+            ("--", format!("{} is now known as {}", old, string(v, "newNick")), old)
+        }
+        _ => {
+            let text = string(v, "text");
+            if text.is_empty() { return None; }
+            let id = json!([kind, ts.timestamp_millis(), nick, text]).to_string();
+            return Some(Line::new(id, ts, "--".into(), irc_to_ansi(text), true, false));
+        }
+    };
+    // Live events carry no message ID; an ID from the event itself lets the same
+    // event from history count as already shown.
+    let id = json!([kind, ts.timestamp_millis(), casefold(who)]).to_string();
+    Some(Line::new(id, ts, prefix.into(), text, false, false))
+}
 fn nick(v: &Value) -> Nick {
     Nick {
         name: string(v, "nick").into(),
@@ -130,6 +176,11 @@ impl State {
         state
     }
     fn emit(&self, e: BackendEvent) {
+        // RUST_LOG=weechat_rs::relay::injected=debug shows what reaches the UI, and when.
+        if log::log_enabled!(log::Level::Debug) {
+            let text = format!("{:?}", e);
+            log::debug!("event: {}", text.chars().take(200).collect::<String>());
+        }
         emit(&self.tx, &self.ctx, e);
     }
     fn request(&mut self, name: &str, value: Value, request: Request) {
@@ -246,6 +297,12 @@ impl State {
         self.request("history:get", payload, Request::History { id: id.into() });
     }
     fn line(&mut self, id: &str, v: &Value, history: bool) -> Line {
+        if history {
+            let channel = self.buffers.get(id).map(|b| b.1.clone()).unwrap_or_default();
+            if let Some(line) = event_line(v, string(v, "type"), &channel) {
+                return line;
+            }
+        }
         self.sequence += 1;
         let ts = timestamp(&v["timestamp"]).unwrap_or_else(Utc::now);
         let who = string(v, "nick");
@@ -288,6 +345,18 @@ impl State {
         let ident =
             wire_id.unwrap_or_else(|| json!([ts.timestamp_millis(), who, text]).to_string());
         Line::new(ident, ts, prefix.into(), text, true, highlight)
+    }
+    /// The line for a live join, part, quit, kick or nick change in buffer `id`.
+    fn presence(&mut self, id: &str, kind: &str, v: &Value) {
+        let channel = self.buffers.get(id).map(|b| b.1.clone()).unwrap_or_default();
+        if let Some(line) = event_line(v, kind, &channel) {
+            if self.remember(id, &line) {
+                self.emit(BackendEvent::LineAdded { buffer_id: id.into(), line });
+            }
+        }
+    }
+    fn is_member(&self, id: &str, who: &str) -> bool {
+        self.members.get(id).is_some_and(|m| m.iter().any(|n| casefold(&n.name) == casefold(who)))
     }
     fn remember(&mut self, id: &str, line: &Line) -> bool {
         let key = (id.into(), line.id.clone());
@@ -652,25 +721,34 @@ impl State {
                 self.emit(BackendEvent::NickAdded {buffer_id:id.clone(),nick:new});
                 let own=self.nicks.get(&server).cloned().unwrap_or_default();
                 if !own.is_empty() && casefold(string(&v,"nick"))==casefold(&own) { self.history(&id,100,None); self.command(Command::Nicks(id)); }
+                else { self.presence(&id,"join",&v); }
             }
             "irc:event:part" | "irc:event:kick"=> {
-                let who=string(&v,if name.ends_with(":kick") {"kicked"} else {"nick"});
+                let kind=if name.ends_with(":kick") {"kick"} else {"part"};
+                let who=string(&v,if kind=="kick" {"kicked"} else {"nick"});
                 let id=buffer_id(&server,string(&v,"channel"));
-                if self.nicks.get(&server).map(|n|casefold(n)==casefold(who)).unwrap_or(false) {self.close(&id);} else {self.remove_nick(&id,who);}
+                if self.nicks.get(&server).map(|n|casefold(n)==casefold(who)).unwrap_or(false) {self.close(&id);}
+                else { self.presence(&id,kind,&v); self.remove_nick(&id,who); }
             }
             "irc:event:quit"=> {
                 let who=string(&v,"nick");
                 let ids:Vec<_>=self.buffers.iter().filter(|(_, (s,_))| s==&server).map(|(id,_)|id.clone()).collect();
-                for id in ids {self.remove_nick(&id,who);}
+                for id in ids {
+                    // In the channels they were in, as the IRC backend does.
+                    if self.is_member(&id,who) { self.presence(&id,"quit",&v); }
+                    self.remove_nick(&id,who);
+                }
             }
             "irc:event:nick"=> {
                 let old=string(&v,"oldNick"); let new=string(&v,"newNick");
                 if self.nicks.get(&server).map(|n|casefold(n)==casefold(old)).unwrap_or(false) {self.nicks.insert(server.clone(),new.into());}
                 let ids:Vec<_>=self.buffers.iter().filter(|(_, (s,_))| s==&server).map(|(id,_)|id.clone()).collect();
                 for id in ids {
+                    let mut renamed=false;
                     if let Some(users)=self.members.get_mut(&id) {
-                        if let Some(user)=users.iter_mut().find(|n|casefold(&n.name)==casefold(old)) {user.name=new.into(); let users=users.clone(); self.emit(BackendEvent::NicklistLoaded {buffer_id:id,nicks:users});}
+                        if let Some(user)=users.iter_mut().find(|n|casefold(&n.name)==casefold(old)) {user.name=new.into(); let users=users.clone(); renamed=true; self.emit(BackendEvent::NicklistLoaded {buffer_id:id.clone(),nicks:users});}
                     }
+                    if renamed { self.presence(&id,"nick",&v); }
                 }
             }
             "irc:event:mode"=> {
@@ -1045,6 +1123,63 @@ mod tests {
             json!({"serverId":"net","channel":"#rust","kicked":"alice_"}),
         );
         assert!(!s.buffers.contains_key(&buffer_id("net", "#rust")));
+    }
+    #[test]
+    fn joins_parts_quits_are_filtered_lines_live_and_from_history() {
+        let (mut s, mut rx) = state();
+        s.event("irc:event:connection-state", json!({"serverId":"net","status":"connected","nickname":"alice"}));
+        s.event("irc:event:user-list", json!({"serverId":"net","channel":"#rust","users":[{"nick":"alice"},{"nick":"bob"}]}));
+        s.event("irc:event:user-list", json!({"serverId":"net","channel":"#go","users":[{"nick":"alice"}]}));
+        drain(&mut rx);
+        // Live events, with the fields the official web client reads.
+        let ts = 1700000000000i64;
+        for (name, v) in [
+            ("join", json!({"channel":"#rust","nick":"carol","ident":"c","hostname":"host","timestamp":ts})),
+            ("part", json!({"channel":"#rust","nick":"carol","reason":"bye","timestamp":ts + 1})),
+            ("nick", json!({"oldNick":"bob","newNick":"bobby","timestamp":ts + 2})),
+            ("kick", json!({"channel":"#rust","nick":"alice","kicked":"bobby","reason":"spam","timestamp":ts + 3})),
+            ("join", json!({"channel":"#rust","nick":"dave","timestamp":ts + 4})),
+            ("quit", json!({"nick":"dave","reason":"Ping timeout","timestamp":ts + 5})),
+        ] {
+            let mut v = v;
+            v["serverId"] = json!("net");
+            s.event(&format!("irc:event:{name}"), v);
+        }
+        let rust = buffer_id("net", "#rust");
+        let lines: Vec<(String, String, String, bool)> = drain(&mut rx).into_iter().filter_map(|e| match e {
+            BackendEvent::LineAdded { buffer_id, line } => Some((buffer_id, line.plain_prefix, line.plain_message, line.displayed)),
+            _ => None,
+        }).collect();
+        let presence = |prefix: &str, text: &str| (rust.clone(), prefix.to_string(), text.to_string(), false);
+        // Presence lines (displayed = false), so "show filtered lines" hides them; the
+        // quit only in #rust, where dave was.
+        assert_eq!(lines, vec![
+            presence("-->", "carol (c@host) has joined #rust"),
+            presence("<--", "carol has left #rust (bye)"),
+            presence("--", "bob is now known as bobby"),
+            presence("<--", "bobby was kicked from #rust by alice (spam)"),
+            presence("-->", "dave has joined #rust"),
+            presence("<--", "dave has quit (Ping timeout)"),
+        ]);
+
+        // History as Injected stores it: a type and a ready-made text. An event already
+        // seen live isn't repeated; the rest become the same lines, not messages.
+        s.history(&rust, 100, None);
+        s.ack(s.next_ack, json!({"messages":[
+            {"id":"h1","type":"part","nick":"carol","text":"carol has left #rust (bye)","timestamp":ts + 1},
+            {"id":"h2","type":"quit","nick":"erin","ident":"e","hostname":"h","text":"erin has quit (Quit: later)","timestamp":ts - 5},
+            {"id":"h3","type":"topic","nick":"alice","text":"alice changed the topic to: hi","timestamp":ts - 4},
+            {"id":"h4","type":"privmsg","nick":"bob","text":"hello","timestamp":ts - 3},
+        ]}));
+        let loaded: Vec<(String, String, bool)> = drain(&mut rx).into_iter().find_map(|e| match e {
+            BackendEvent::LinesLoaded { lines, .. } => Some(lines.into_iter().map(|l| (l.plain_prefix, l.plain_message, l.displayed)).collect()),
+            _ => None,
+        }).unwrap();
+        assert_eq!(loaded, vec![
+            ("<--".to_string(), "erin has quit (Quit: later)".to_string(), false),
+            ("--".to_string(), "alice changed the topic to: hi".to_string(), true),
+            ("bob".to_string(), "hello".to_string(), true),
+        ]);
     }
     #[test]
     fn pagination_is_coalesced_and_read_sync_is_monotonic() {
