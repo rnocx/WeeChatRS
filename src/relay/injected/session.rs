@@ -135,9 +135,14 @@ struct State {
     local_echoes: VecDeque<(String, String, String, i64)>,
     latest: HashMap<String, i64>,
     read_lines: HashMap<String, VecDeque<(i64, bool)>>,
+    /// The read state last sent per buffer, so a sync that changes nothing sends nothing.
+    read_state: HashMap<String, (BufferActivity, u32, i64)>,
     lastseen: serde_json::Map<String, Value>,
     pending: HashMap<u64, Pending>,
     history_inflight: HashSet<String>,
+    /// Buffers whose latest history has been asked for. Live events keep them
+    /// current, so switching to one doesn't fetch it again.
+    history_loaded: HashSet<String>,
     out: VecDeque<String>,
     sync_ready: bool,
     pending_reads: HashSet<String>,
@@ -158,9 +163,11 @@ impl State {
             local_echoes: VecDeque::new(),
             latest: HashMap::new(),
             read_lines: HashMap::new(),
+            read_state: HashMap::new(),
             lastseen: serde_json::Map::new(),
             pending: HashMap::new(),
             history_inflight: HashSet::new(),
+            history_loaded: HashSet::new(),
             out: VecDeque::new(),
             sync_ready: false,
             pending_reads: HashSet::new(),
@@ -287,6 +294,9 @@ impl State {
             return;
         };
         let mut payload = json!({"serverId":server,"target":target,"limit":count.clamp(1,1000)});
+        if before.is_none() {
+            self.history_loaded.insert(id.into());
+        }
         if let Some(before) = before {
             payload["before"] = json!(before);
         }
@@ -335,15 +345,10 @@ impl State {
                 .to_lowercase()
                 .split(|c: char| !c.is_alphanumeric() && !"_-[]{}\\`^|".contains(c))
                 .any(|s| casefold(s) == casefold(own));
-        let wire_id = v["tags"]["msgid"]
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| v["id"].as_str().map(str::to_owned))
-            .or_else(|| v["id"].as_i64().map(|n| n.to_string()));
-        // Live messages and history do not always share a server-generated ID.
-        // A deterministic fallback keeps repeated history pages idempotent.
-        let ident =
-            wire_id.unwrap_or_else(|| json!([ts.timestamp_millis(), who, text]).to_string());
+        // Live messages carry no ID and history has numeric ones, so the same message
+        // is known by its time, sender and text, live or from history; with the wire
+        // ID, history brought back lines already shown live.
+        let ident = json!([ts.timestamp_millis(), casefold(who), text]).to_string();
         Line::new(ident, ts, prefix.into(), text, true, highlight)
     }
     /// The line for a live join, part, quit, kick or nick change in buffer `id`.
@@ -489,6 +494,7 @@ impl State {
             let old = self.lastseen.get(key).and_then(Value::as_i64).unwrap_or(0);
             self.lastseen.insert(key.clone(), json!(ts.max(old)));
         }
+        let mut changes = Vec::new();
         for (id, (server, target)) in &self.buffers {
             if let Some(ts) = self
                 .lastseen
@@ -507,19 +513,28 @@ impl State {
                             })
                     })
                     .unwrap_or((0, false));
-                self.emit(BackendEvent::ActivityChanged {
-                    buffer_id: id.clone(),
-                    activity: if highlight {
-                        BufferActivity::Highlight
-                    } else if unread > 0 {
-                        BufferActivity::Message
-                    } else {
-                        BufferActivity::None
-                    },
-                    unread_count: unread,
-                    markread_ts: Some(ts),
-                });
+                let activity = if highlight {
+                    BufferActivity::Highlight
+                } else if unread > 0 {
+                    BufferActivity::Message
+                } else {
+                    BufferActivity::None
+                };
+                let state = (activity, unread, ts.timestamp_millis());
+                if self.read_state.get(id) != Some(&state) {
+                    changes.push((id.clone(), state, ts));
+                }
             }
+        }
+        // Every settings sync, our own read updates' echo included, lands here.
+        for (id, state, ts) in changes {
+            self.read_state.insert(id.clone(), state.clone());
+            self.emit(BackendEvent::ActivityChanged {
+                buffer_id: id,
+                activity: state.0,
+                unread_count: state.1,
+                markread_ts: Some(ts),
+            });
         }
     }
     fn timeout_requests(&mut self) {
@@ -533,6 +548,7 @@ impl State {
             if let Some(p) = self.pending.remove(&ack) {
                 if let Request::History { id } = p.request {
                     self.history_inflight.remove(&id);
+                    self.history_loaded.remove(&id);
                     self.emit(BackendEvent::LinesLoaded {
                         buffer_id: id,
                         lines: vec![],
@@ -619,16 +635,16 @@ impl State {
     fn command(&mut self, command: Command) {
         match command {
             Command::Send(id, text) => self.send(&id, &text),
-            Command::History(id, count, before) => self.history(&id, count, before),
+            // From the UI on every switch to a buffer: only what isn't there yet.
+            // Fetching it again brought back lines and a nick list already shown.
+            Command::History(id, count, before) => {
+                if before.is_some() || !self.history_loaded.contains(&id) {
+                    self.history(&id, count, before);
+                }
+            }
             Command::Nicks(id) => {
-                if let Some((server, target)) = self.buffers.get(&id).cloned() {
-                    if target.starts_with(['#', '&', '!', '+']) {
-                        self.request(
-                            "irc:send-raw",
-                            json!({"serverId":server,"raw":format!("NAMES {}",target)}),
-                            Request::Action,
-                        );
-                    }
+                if !self.members.get(&id).is_some_and(|m| !m.is_empty()) {
+                    self.names(&id);
                 }
             }
             Command::Read(id) => {
@@ -720,7 +736,7 @@ impl State {
                 if !members.iter().any(|n| casefold(&n.name)==casefold(&new.name)) {members.push(new.clone());}
                 self.emit(BackendEvent::NickAdded {buffer_id:id.clone(),nick:new});
                 let own=self.nicks.get(&server).cloned().unwrap_or_default();
-                if !own.is_empty() && casefold(string(&v,"nick"))==casefold(&own) { self.history(&id,100,None); self.command(Command::Nicks(id)); }
+                if !own.is_empty() && casefold(string(&v,"nick"))==casefold(&own) { self.history(&id,100,None); self.names(&id); }
                 else { self.presence(&id,"join",&v); }
             }
             "irc:event:part" | "irc:event:kick"=> {
@@ -753,7 +769,7 @@ impl State {
             }
             "irc:event:mode"=> {
                 let channel=string(&v,"channel");
-                if !channel.is_empty() { self.command(Command::Nicks(buffer_id(&server,channel))); }
+                if !channel.is_empty() { self.names(&buffer_id(&server,channel)); }
             }
             "irc:event:whois" => {
                 let id = self.open(&server, "@status");
@@ -796,11 +812,25 @@ impl State {
             nick_name: who.into(),
         });
     }
+    /// Ask the server for a channel's nick list (NAMES).
+    fn names(&mut self, id: &str) {
+        if let Some((server, target)) = self.buffers.get(id).cloned() {
+            if target.starts_with(['#', '&', '!', '+']) {
+                self.request(
+                    "irc:send-raw",
+                    json!({"serverId":server,"raw":format!("NAMES {}",target)}),
+                    Request::Action,
+                );
+            }
+        }
+    }
     fn close(&mut self, id: &str) {
         self.buffers.remove(id);
+        self.history_loaded.remove(id);
         self.members.remove(id);
         self.latest.remove(id);
         self.read_lines.remove(id);
+        self.read_state.remove(id);
         self.history_inflight.remove(id);
         self.pending_reads.remove(id);
         self.seen.retain(|(buffer, _)| buffer != id);
@@ -1182,6 +1212,30 @@ mod tests {
         ]);
     }
     #[test]
+    fn switching_to_a_loaded_buffer_fetches_nothing_and_history_repeats_no_live_line() {
+        let (mut s, mut rx) = state();
+        s.event("irc:event:user-list", json!({"serverId":"net","channel":"#lrh","users":[{"nick":"alice"},{"nick":"bob"}]}));
+        let id = buffer_id("net", "#lrh");
+        s.history(&id, 100, None);
+        s.ack(s.next_ack, json!({"messages":[]}));
+        // A live message: Injected sends it without an ID.
+        s.event("irc:event:message", json!({"serverId":"net","channel":"#lrh","nick":"bob","message":"seen live","timestamp":1700000001000i64}));
+        drain(&mut rx);
+        // Switching to the buffer asks for history and nicks: both are there already.
+        let sent = s.out.len();
+        s.command(Command::History(id.clone(), 50, None));
+        s.command(Command::Nicks(id.clone()));
+        assert_eq!(s.out.len(), sent, "nothing goes to the server");
+        // The same message from history, with a numeric ID, isn't added again.
+        s.history_loaded.remove(&id);
+        s.command(Command::History(id.clone(), 50, None));
+        s.ack(s.next_ack, json!({"messages":[{"id":34117060,"nick":"bob","text":"seen live","timestamp":1700000001000i64}]}));
+        assert!(drain(&mut rx).iter().any(|e| matches!(e, BackendEvent::LinesLoaded { lines, .. } if lines.is_empty())));
+        // Older lines still load on request.
+        s.command(Command::History(id.clone(), 50, Some(1700000000000)));
+        assert!(s.out.back().unwrap().contains("\"before\":1700000000000"));
+    }
+    #[test]
     fn pagination_is_coalesced_and_read_sync_is_monotonic() {
         let (mut s, mut rx) = state();
         let id = s.open("net", "#rust");
@@ -1299,6 +1353,12 @@ mod tests {
                 ..
             }
         ));
+        // The same read state again (our own update echoed back, or another
+        // buffer's change) sends nothing: it would redraw the buffer list.
+        s.merge_seen(&json!({"net:#rust":1700000000000i64}));
+        drain(&mut rx);
+        s.merge_seen(&json!({"net:#rust":1700000000000i64}));
+        assert!(!drain(&mut rx).iter().any(|e| matches!(e, BackendEvent::ActivityChanged { .. })));
     }
 
     async fn receive_event(

@@ -306,9 +306,14 @@ impl WeeChatApp {
             }
             BackendEvent::ActivityChanged { buffer_id, activity, unread_count, markread_ts } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                // The buffer on screen is being read, whatever the server's read position
+                // says: an unread count there would come and go in the buffer list.
+                let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                    buf.activity = activity;
-                    buf.unread_count = unread_count;
+                    if !is_selected {
+                        buf.activity = activity;
+                        buf.unread_count = unread_count;
+                    }
                     if let Some(ts) = markread_ts {
                         buf.last_markread_ts = Some(ts);
                     }
