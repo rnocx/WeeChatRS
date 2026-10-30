@@ -1,7 +1,7 @@
 pub mod connection;
 pub mod parser;
 
-use crate::relay::backend::{BackendClient, BackendEvent};
+use crate::relay::backend::{BackendClient, BackendEvent, ZncNetwork};
 use egui::Context as EguiContext;
 use tokio::sync::mpsc;
 use std::collections::{HashMap, HashSet};
@@ -31,6 +31,17 @@ pub struct IrcConfig {
     pub list_networks: bool,
 }
 
+/// What a profile's connections find out about the server, for `IrcClient`.
+#[derive(Default)]
+pub struct Shared {
+    /// Set once any of the connections has negotiated soju.im/search.
+    pub search_supported: AtomicBool,
+    /// The server is a ZNC bouncer.
+    pub znc: AtomicBool,
+    /// The ZNC user's networks, from the main connection.
+    pub znc_networks: Mutex<Vec<ZncNetwork>>,
+}
+
 /// Command senders of the per-network connections, by buffer-id prefix (`net<id>`).
 type NetworkSenders = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<IrcCommand>>>>;
 
@@ -41,8 +52,7 @@ pub struct IrcClient {
     cmd_tx: mpsc::UnboundedSender<IrcCommand>,
     connected: Arc<AtomicBool>,
     networks: NetworkSenders,
-    /// Set once any of the connections has negotiated soju.im/search.
-    search_supported: Arc<AtomicBool>,
+    shared: Arc<Shared>,
 }
 
 impl IrcClient {
@@ -59,7 +69,7 @@ impl IrcClient {
             cmd_tx,
             connected: Arc::new(AtomicBool::new(false)),
             networks: Arc::default(),
-            search_supported: Arc::default(),
+            shared: Arc::default(),
         }
     }
 
@@ -90,15 +100,16 @@ impl BackendClient for IrcClient {
             cmd_rx,
             Arc::clone(&self.connected),
             Some(network_tx),
-            Arc::clone(&self.search_supported),
+            Arc::clone(&self.shared),
         );
         tokio::spawn(run_router(Router {
             config: Arc::clone(&self.config),
             event_tx: self.event_tx.clone(),
             ctx: self.ctx.clone(),
             senders: Arc::clone(&self.networks),
-            search_supported: Arc::clone(&self.search_supported),
+            shared: Arc::clone(&self.shared),
             networks: HashMap::new(),
+            znc_ids: HashMap::new(),
             line_counter: 0,
         }, main_rx, network_rx));
     }
@@ -135,7 +146,7 @@ impl BackendClient for IrcClient {
     }
 
     fn supports_search(&self) -> bool {
-        self.search_supported.load(Ordering::Relaxed)
+        self.shared.search_supported.load(Ordering::Relaxed)
     }
 
     fn search(&self, buffer_id: &str, text: &str, request: &str) {
@@ -152,6 +163,18 @@ impl BackendClient for IrcClient {
             timestamp: timestamp.to_string(),
             request: request.to_string(),
         });
+    }
+
+    fn is_znc(&self) -> bool {
+        self.shared.znc.load(Ordering::Relaxed)
+    }
+
+    fn znc_networks(&self) -> Vec<ZncNetwork> {
+        self.shared.znc_networks.lock().unwrap().clone()
+    }
+
+    fn znc_command(&self, module: &str, text: &str) {
+        let _ = self.cmd_tx.send(IrcCommand::ZncCommand { module: module.to_string(), text: text.to_string() });
     }
 
     fn fetch_lines_before(&self, buffer_id: &str, before_ts: &str) {
@@ -181,8 +204,11 @@ struct Router {
     event_tx: mpsc::UnboundedSender<BackendEvent>,
     ctx: EguiContext,
     senders: NetworkSenders,
-    search_supported: Arc<AtomicBool>,
+    shared: Arc<Shared>,
     networks: HashMap<String, Network>,
+    /// ZNC networks have names only; each gets a number the first time it is listed,
+    /// kept for the session so its buffers keep their place.
+    znc_ids: HashMap<String, String>,
     line_counter: u64,
 }
 
@@ -240,45 +266,72 @@ impl Router {
                     self.start(netid, &attrs);
                 }
             }
-            NetworkUpdate::Removed { netid } => {
-                let key = network_key(&netid);
-                if let Some(network) = self.networks.remove(&key) {
-                    self.senders.lock().unwrap().remove(&key);
-                    stop(&network);
-                    let buffers: Vec<String> = network.buffers.lock().unwrap().drain().collect();
-                    for id in buffers {
-                        self.send(BackendEvent::BufferClosed { buffer_id: format!("{}/{}", key, id) });
+            NetworkUpdate::Removed { netid } => self.remove(&network_key(&netid)),
+            NetworkUpdate::ZncListed(names) => {
+                let gone: Vec<String> = self.znc_ids.iter()
+                    .filter(|(name, _)| !names.contains(name))
+                    .map(|(_, netid)| network_key(netid))
+                    .collect();
+                for key in gone {
+                    self.remove(&key);
+                }
+                for name in names {
+                    let next = (self.znc_ids.len() + 1).to_string();
+                    let netid = self.znc_ids.entry(name.clone()).or_insert(next).clone();
+                    if !self.networks.contains_key(&network_key(&netid)) {
+                        let attrs = HashMap::from([("name".to_string(), name), ("znc".to_string(), String::new())]);
+                        self.start(netid, &attrs);
                     }
-                    self.send(BackendEvent::ConnLog(format!("Bouncer network {} was removed", network.name)));
                 }
             }
         }
     }
 
+    fn remove(&mut self, key: &str) {
+        if let Some(network) = self.networks.remove(key) {
+            self.senders.lock().unwrap().remove(key);
+            stop(&network);
+            let buffers: Vec<String> = network.buffers.lock().unwrap().drain().collect();
+            for id in buffers {
+                self.send(BackendEvent::BufferClosed { buffer_id: format!("{}/{}", key, id) });
+            }
+            self.send(BackendEvent::ConnLog(format!("Bouncer network {} was removed", network.name)));
+        }
+    }
+
     /// Open a connection bound to the network, its buffers grouped under `net<id>/`.
+    /// soju binds it with BOUNCER BIND; ZNC (`znc` in `attrs`) by `user/network`.
     fn start(&mut self, netid: String, attrs: &HashMap<String, String>) {
         let key = network_key(&netid);
         let name = attrs.get("name").filter(|n| !n.is_empty())
             .or_else(|| attrs.get("host"))
             .cloned()
             .unwrap_or_else(|| netid.clone());
+        let znc = attrs.contains_key("znc");
+        let user = if self.config.username.is_empty() { &self.config.nick } else { &self.config.username };
         let config = IrcConfig {
             label: name.clone(),
             channel: String::new(),
             auto_reconnect: true,
-            bind_netid: Some(netid.clone()),
+            username: if znc { format!("{}/{}", user, name) } else { self.config.username.clone() },
+            bind_netid: (!znc).then(|| netid.clone()),
             list_networks: false,
             ..(*self.config).clone()
         };
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         connection::spawn(Arc::new(config), event_tx, self.ctx.clone(), cmd_rx, Arc::default(), None,
-            Arc::clone(&self.search_supported));
+            Arc::clone(&self.shared));
 
         let stopped = Arc::new(AtomicBool::new(false));
         let buffers: Arc<Mutex<HashSet<String>>> = Arc::default();
-        // Group key for the buffer list, unique per bouncer and network.
-        let group = format!("{}/{}", self.config.host.trim(), key);
+        // Group key for the buffer list, unique per bouncer and network. A ZNC network's
+        // number can change between sessions; its name can't.
+        let group = if znc {
+            format!("{}/znc/{}", self.config.host.trim(), name)
+        } else {
+            format!("{}/{}", self.config.host.trim(), key)
+        };
         {
             let (key, name, stopped, buffers) = (key.clone(), name.clone(), Arc::clone(&stopped), Arc::clone(&buffers));
             let (ui_tx, ctx) = (self.event_tx.clone(), self.ctx.clone());
@@ -384,6 +437,7 @@ fn network_event(
             lines: lines.into_iter().map(|(b, l)| (id(b), l)).collect(),
             error,
         },
+        BackendEvent::BouncerReply { command, lines } => BackendEvent::BouncerReply { command, lines },
         BackendEvent::_WeeChat(r) => BackendEvent::_WeeChat(r),
     }]
 }
@@ -402,6 +456,106 @@ mod tests {
             last_read_id: None, last_markread_ts: None, topic: String::new(), modes: String::new(),
             hidden: false, muted: false, has_nicklist: true, visit_start_marker_id: None,
         }
+    }
+
+    /// Collect events until `done` holds for those seen so far, or `secs` pass.
+    async fn collect(rx: &mut mpsc::UnboundedReceiver<BackendEvent>, events: &mut Vec<BackendEvent>, secs: u64,
+        done: impl Fn(&[BackendEvent]) -> bool) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while !done(events) {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(event)) => events.push(event),
+                _ => break,
+            }
+        }
+    }
+
+    /// End-to-end against the ZNC rig in docker/znc-test (user test/test, networks alpha
+    /// and beta on two Ergo servers, the playback module loaded). Run with
+    /// `ZNC_TEST_ADDR=127.0.0.1:6501 ZNC_TEST_IRC=127.0.0.1:16667
+    ///  cargo test --bin weechat-rs -- --ignored znc_end_to_end`
+    /// (ZNC_TEST_IRC is network alpha's Ergo, where a second user says something first).
+    #[tokio::test]
+    #[ignore = "needs the ZNC rig in docker/znc-test (ZNC_TEST_ADDR / ZNC_TEST_IRC)"]
+    async fn znc_end_to_end() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let addr = std::env::var("ZNC_TEST_ADDR").expect("ZNC_TEST_ADDR");
+        let irc = std::env::var("ZNC_TEST_IRC").expect("ZNC_TEST_IRC");
+        let nonce = format!("e2e-{}", std::process::id());
+
+        // While the app is away: a mention in #alpha, which ZNC keeps.
+        let stream = tokio::net::TcpStream::connect(&irc).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"NICK talker\r\nUSER talker 0 * :talker\r\n").await.unwrap();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if line.contains(" 001 ") { break; }
+        }
+        let say = format!("JOIN #alpha\r\nPRIVMSG #alpha :tester: {}\r\nQUIT\r\n", nonce);
+        write.write_all(say.as_bytes()).await.unwrap();
+        while lines.next_line().await.ok().flatten().is_some() {}
+
+        let (host, port) = addr.rsplit_once(':').unwrap();
+        let config = IrcConfig {
+            label: "znc".into(), host: host.into(), port: port.parse().unwrap(),
+            nick: "tester".into(), username: "test".into(), sasl_username: String::new(),
+            password: "test".into(), use_ssl: false, accept_invalid_certs: false,
+            channel: String::new(), tunnel_port: None, auto_reconnect: false,
+            bind_netid: None, list_networks: true,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut client = IrcClient::new(config, tx, EguiContext::default());
+        client.connect();
+
+        let mut events = Vec::new();
+        let replayed = |events: &[BackendEvent]| events.iter().any(|e| matches!(e,
+            BackendEvent::LinesLoaded { lines, .. } if lines.iter().any(|l| l.message.contains(&nonce))));
+        collect(&mut rx, &mut events, 10, |e| replayed(e) && e.iter().any(|e| matches!(e,
+            BackendEvent::BufferOpened(b) if b.name == "#beta"))).await;
+        assert!(client.is_znc());
+        let names: Vec<String> = client.znc_networks().into_iter().map(|n| n.name).collect();
+        assert!(names.contains(&"alpha".to_string()) && names.contains(&"beta".to_string()), "{names:?}");
+
+        let opened: Vec<&Buffer> = events.iter().filter_map(|e| match e { BackendEvent::BufferOpened(b) => Some(b), _ => None }).collect();
+        let alpha = opened.iter().find(|b| b.name == "#alpha").expect("#alpha opened");
+        assert!(alpha.id.starts_with("net") && alpha.id.ends_with("/#alpha"), "{}", alpha.id);
+        assert_eq!(alpha.server, format!("{}/znc/alpha", host));
+        // The control connection opens only its status buffer; no *playback or *status.
+        assert!(opened.iter().all(|b| !b.name.starts_with('*')), "{:?}", opened.iter().map(|b| &b.id).collect::<Vec<_>>());
+        assert_eq!(opened.iter().filter(|b| b.name == "#alpha").count(), 1, "#alpha opened twice");
+        // The mention came as history, with its highlight, and not as a live line.
+        assert!(replayed(&events), "the mention wasn't replayed");
+        let replay = events.iter().find_map(|e| match e {
+            BackendEvent::LinesLoaded { buffer_id, lines, .. } => lines.iter().find(|l| l.message.contains(&nonce)).map(|l| (buffer_id, l)),
+            _ => None,
+        }).unwrap();
+        assert_eq!(replay.0, &alpha.id);
+        assert!(replay.1.highlight);
+        assert!(!events.iter().any(|e| matches!(e, BackendEvent::LineAdded { line, .. } if line.message.contains(&nonce))));
+
+        // Add a network through *controlpanel: it gets a connection of its own.
+        let net = format!("e2e{}", std::process::id());
+        client.znc_command("*controlpanel", &format!("AddNetwork test {}", net));
+        client.znc_command("*controlpanel", &format!("AddServer test {} ergo-beta 6667", net));
+        let mut events = Vec::new();
+        let group = format!("{}/znc/{}", host, net);
+        collect(&mut rx, &mut events, 10, |e| e.iter().any(|e| matches!(e,
+            BackendEvent::BufferOpened(b) if b.server == group))).await;
+        let replies: Vec<&Vec<String>> = events.iter().filter_map(|e| match e { BackendEvent::BouncerReply { lines, .. } => Some(lines), _ => None }).collect();
+        assert_eq!(replies.len(), 2, "{events:?}");
+        assert!(replies[0][0].contains("added"), "{:?}", replies[0]);
+        let status = events.iter().find_map(|e| match e { BackendEvent::BufferOpened(b) if b.server == group => Some(b.id.clone()), _ => None })
+            .expect("the new network's connection opened a buffer");
+        assert!(client.znc_networks().iter().any(|n| n.name == net));
+
+        // And remove it again: its buffers close.
+        client.znc_command("*controlpanel", &format!("DelNetwork test {}", net));
+        let mut events = Vec::new();
+        // ZNC drops the network's connection at once; the new list follows.
+        collect(&mut rx, &mut events, 10, |_| !client.znc_networks().iter().any(|n| n.name == net)).await;
+        assert!(events.iter().any(|e| matches!(e, BackendEvent::BufferClosed { buffer_id } if *buffer_id == status)), "{events:?}");
+        assert!(!client.znc_networks().iter().any(|n| n.name == net));
+        client.disconnect();
     }
 
     #[test]

@@ -843,6 +843,7 @@ impl WeeChatApp {
         let mut do_delete: Option<usize> = None;
         let mut do_edit: Option<usize> = None;
         let mut toggle_add = false;
+        let mut znc_commands: Vec<(String, String, String)> = Vec::new();
 
         ui.label(RichText::new("Connections").strong().size(20.0));
         ui.add_space(4.0);
@@ -885,7 +886,7 @@ impl WeeChatApp {
                                 ui.label("Username:");
                                 ui.vertical(|ui| {
                                     ui.add(egui::TextEdit::singleline(&mut self.editing_profile.username).desired_width(240.0).hint_text("leave blank to use nick"));
-                                    hint(ui, "IRC USER field — use nick/network for ZNC");
+                                    hint(ui, "IRC USER field. ZNC: user for all networks, user/network for one");
                                 });
                                 ui.end_row();
                                 ui.label("SASL username:");
@@ -1021,7 +1022,12 @@ impl WeeChatApp {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("●").color(dot_color).size(11.0));
                                 ui.label(RichText::new(&profile.label).strong());
-                                let badge = match profile.backend_type { BackendType::WeeChat => "WeeChat", BackendType::Soju => "IRC" };
+                                let is_znc = is_connected && conn_opt.is_some_and(|c| c.client.is_znc());
+                                let badge = match profile.backend_type {
+                                    BackendType::WeeChat => "WeeChat",
+                                    BackendType::Soju if is_znc => "ZNC",
+                                    BackendType::Soju => "IRC",
+                                };
                                 ui.label(RichText::new(badge).small().color(accent_color));
                                 ui.label(RichText::new(format!("{}:{}", profile.host, profile.port)).small().color(ui.visuals().weak_text_color()));
 
@@ -1067,6 +1073,15 @@ impl WeeChatApp {
                             if let Some(err) = conn_opt.and_then(|c| c.auth_error.as_ref()) {
                                 ui.label(RichText::new(format!("{} {}", icons::WARNING, err)).small().color(Color32::from_rgb(220, 80, 80)));
                             }
+                            if let Some(conn) = conn_opt.filter(|c| is_connected && c.client.is_znc()) {
+                                let user = crate::ui::znc::znc_user(&profile.username, &profile.nick);
+                                let networks = conn.client.znc_networks();
+                                for (module, text) in crate::ui::znc::networks_panel(
+                                    ui, &mut self.znc_ui, &prefix, &user, &networks, conn.znc_reply.as_ref(), accent_color,
+                                ) {
+                                    znc_commands.push((prefix.clone(), module, text));
+                                }
+                            }
                         });
                     ui.add_space(4.0);
                 }
@@ -1084,6 +1099,11 @@ impl WeeChatApp {
         });
 
         // Process deferred actions
+        for (prefix, module, text) in znc_commands {
+            if let Some(conn) = self.connections.iter().find(|c| c.prefix == prefix) {
+                conn.client.znc_command(&module, &text);
+            }
+        }
         if let Some(idx) = do_connect_idx {
             if idx < self.profiles.len() {
                 let profile = self.profiles[idx].clone();

@@ -83,6 +83,13 @@ pub enum BackendEvent {
         error: Option<String>,
     },
 
+    /// Output of a ZNC module command sent with `znc_command`: `command` is what was
+    /// sent (`*controlpanel AddNetwork …`), `lines` everything the bouncer answered.
+    BouncerReply {
+        command: String,
+        lines: Vec<String>,
+    },
+
     /// Temporary tunnel for WeeChat relay responses until the event handler
     /// is fully migrated to BackendEvent in Phase 3.
     #[doc(hidden)]
@@ -152,4 +159,25 @@ pub trait BackendClient: Send {
     /// Ask the server to complete `text` at character `position`; the reply comes back
     /// tagged with `tag`. Only WeeChat implements this; default is a no-op.
     fn complete(&self, _buffer_id: &str, _text: &str, _position: usize, _tag: &str) {}
+
+    /// True once the server turned out to be a ZNC bouncer (it offers `znc.in/*` caps).
+    fn is_znc(&self) -> bool { false }
+
+    /// The ZNC user's networks, as of the last `*status ListNetworks`.
+    fn znc_networks(&self) -> Vec<ZncNetwork> { Vec::new() }
+
+    /// Send `text` to the ZNC module `module` (`*controlpanel`, `*status`) without it
+    /// showing in the chat; the reply comes back as `BouncerReply`. Changes to the
+    /// networks are followed by a fresh `znc_networks` list. Default is a no-op.
+    fn znc_command(&self, _module: &str, _text: &str) {}
+}
+
+/// A network of a ZNC user, from a row of `*status ListNetworks`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZncNetwork {
+    pub name: String,
+    /// ZNC is connected to the network's IRC server.
+    pub on_irc: bool,
+    pub server: String,
+    pub channels: String,
 }

@@ -154,6 +154,7 @@ impl WeeChatApp {
                 let full_full_name = format!("{}/{}", conn_prefix, buf.full_name);
                 buf.id = full_id.clone();
                 buf.full_name = full_full_name;
+                self.apply_local_read_marker(conn_prefix, &mut buf);
                 if !self.buffer_idx_of(&full_id).is_some() {
                     // Keep a network's buffers together: after the last buffer of its group,
                     // or for a new group after the connection's last buffer. A soju login's
@@ -347,6 +348,11 @@ impl WeeChatApp {
             }
             BackendEvent::HistoryResults { request, lines, error } => {
                 self.on_history_results(conn_prefix, &request, lines, error);
+            }
+            BackendEvent::BouncerReply { command, lines } => {
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.znc_reply = Some((command, lines));
+                }
             }
             BackendEvent::BufferHidden { buffer_id, hidden } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);

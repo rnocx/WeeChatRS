@@ -1,10 +1,10 @@
 use base64::Engine as _;
-use super::{parser::{parse_attributes, IrcMessage}, IrcConfig};
-use crate::relay::backend::BackendEvent;
+use super::{parser::{parse_attributes, IrcMessage}, IrcConfig, Shared};
+use crate::relay::backend::{BackendEvent, ZncNetwork};
 use crate::relay::models::{Buffer, BufferActivity, Line, Nick};
 use chrono::{DateTime, Utc};
 use egui::Context as EguiContext;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -25,6 +25,8 @@ pub enum IrcCommand {
     Search { buffer_id: String, text: String, request: String },
     /// CHATHISTORY AROUND a timestamp; answered with `HistoryResults` tagged `request`.
     Context { buffer_id: String, timestamp: String, request: String },
+    /// A command for a ZNC module, answered with `BouncerReply`.
+    ZncCommand { module: String, text: String },
     Disconnect,
 }
 
@@ -35,6 +37,24 @@ pub enum NetworkUpdate {
     /// that were sent (all of them in a listing, the changed ones in a notification).
     Changed { netid: String, attrs: HashMap<String, String> },
     Removed { netid: String },
+    /// The full list of a ZNC user's networks, by name. ZNC has no notifications,
+    /// so it is listed again after each change made from the app.
+    ZncListed(Vec<String>),
+}
+
+/// A command sent to a ZNC module, collecting its output until the PONG to the
+/// PING sent after it: ZNC handles a client's lines in order.
+struct ZncQuery {
+    token: String,
+    module: String,
+    text: String,
+    lines: Vec<String>,
+}
+
+impl ZncQuery {
+    fn lists_networks(&self) -> bool {
+        self.module.eq_ignore_ascii_case("*status") && self.text.eq_ignore_ascii_case("ListNetworks")
+    }
 }
 
 // ── Per-connection mutable state ──────────────────────────────────────────────
@@ -73,6 +93,15 @@ struct Session {
     /// Search or context batches being collected, by batch ref. Kept apart from
     /// `batch_buf`, whose lines go into the chat.
     history_batches: HashMap<String, (String, Vec<(String, Line)>)>,
+    /// The server is a ZNC bouncer: it offers znc.in/* caps.
+    is_znc: bool,
+    /// ZNC module commands waiting for the PONG that ends their output, oldest first.
+    znc_queries: VecDeque<ZncQuery>,
+    /// Commands we sent to ZNC modules ourselves, as (module, text): their
+    /// echo-message copies are dropped.
+    znc_echoes: Vec<(String, String)>,
+    /// A new `*status ListNetworks` result, for `Shared`.
+    znc_network_list: Option<Vec<ZncNetwork>>,
 }
 
 impl Session {
@@ -105,6 +134,10 @@ impl Session {
             next_label: 0,
             labeled_batches: HashMap::new(),
             history_batches: HashMap::new(),
+            is_znc: false,
+            znc_queries: VecDeque::new(),
+            znc_echoes: Vec::new(),
+            znc_network_list: None,
         }
     }
 
@@ -133,7 +166,29 @@ impl Session {
             "soju.im/search",
             "draft/read-marker",
             "soju.im/read",
+            // ZNC: our messages sent from other clients, and the playback module
+            // (history on request, instead of ZNC's buffer replay on join).
+            "znc.in/self-message",
+            "znc.in/playback",
         ]
+    }
+
+    /// Send `text` to a ZNC module without it showing in the chat: its echo is
+    /// dropped, and its output collected until the PONG to the PING sent after it.
+    fn znc_query(&mut self, module: &str, text: &str) {
+        self.next_label += 1;
+        let token = format!("wcrs-znc-{}", self.next_label);
+        self.znc_send(module, text);
+        self.whois_lines.push(format!("PING :{}", token));
+        self.znc_queries.push_back(ZncQuery { token, module: module.to_string(), text: text.to_string(), lines: Vec::new() });
+    }
+
+    /// Send `text` to a ZNC module whose echo-message copy is dropped.
+    fn znc_send(&mut self, module: &str, text: &str) {
+        self.whois_lines.push(format!("PRIVMSG {} :{}", module, text));
+        if self.negotiated_caps.contains("echo-message") {
+            self.znc_echoes.push((module.to_lowercase(), text.to_string()));
+        }
     }
 
     fn has_chathistory(&self) -> bool {
@@ -297,6 +352,32 @@ fn message_line(msg: &IrcMessage, session: &Session, line_counter: &mut u64) -> 
 
     *line_counter += 1;
     Some((buffer_id, make_line(&line_counter.to_string(), &prefix, &display_text, timestamp_from_msg(msg), highlight)))
+}
+
+/// The rows of ZNC's `ListNetworks` table:
+/// `| Network | On IRC | IRC Server | IRC User | Channels |`, after a header row.
+fn parse_znc_networks(lines: &[String]) -> Vec<ZncNetwork> {
+    lines.iter()
+        .filter(|l| l.starts_with('|'))
+        .skip(1)
+        .filter_map(|row| {
+            let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+            let cell = |i: usize| cells.get(i).copied().unwrap_or("").to_string();
+            let name = cell(0);
+            (!name.is_empty()).then(|| ZncNetwork {
+                name,
+                on_irc: cell(1).eq_ignore_ascii_case("yes"),
+                server: cell(2),
+                channels: cell(4),
+            })
+        })
+        .collect()
+}
+
+/// Whether a `*controlpanel` command changes the networks, so they are listed again.
+fn changes_znc_networks(text: &str) -> bool {
+    let command = text.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    matches!(command.as_str(), "addnetwork" | "delnetwork" | "addserver" | "delserver" | "disconnect" | "reconnect")
 }
 
 fn is_channel(target: &str) -> bool {
@@ -487,6 +568,17 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
         }
     }
 
+    // ZNC attaches even a login without a network to one of them. That network has a
+    // connection of its own; this one only talks to ZNC's modules.
+    if session.bouncer_control && session.is_znc {
+        let keep = match msg.command.as_str() {
+            "CAP" | "PING" | "PONG" | "ERROR" => true,
+            "PRIVMSG" | "NOTICE" => msg.nick().is_some_and(|n| n.starts_with('*')),
+            _ => false,
+        };
+        if !keep { return events; }
+    }
+
     match msg.command.as_str() {
         "CAP" => {
             let sub = msg.param(1).unwrap_or("").to_uppercase();
@@ -496,6 +588,9 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                     for cap in caps_str.split_whitespace() {
                         let cap_name = cap.split('=').next().unwrap_or(cap);
                         session.available_caps.insert(cap_name.to_string());
+                        if cap_name.starts_with("znc.in/") {
+                            session.is_znc = true;
+                        }
                     }
                     let is_continuation = msg.param(1).map(|p| p == "*").unwrap_or(false);
                     if !is_continuation {
@@ -589,15 +684,27 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 session.server_name = srv.split('!').next().unwrap_or(srv).to_string();
             }
             session.registered = true;
-            // A soju login without a network in the username: list the networks and let
-            // the router open a bound connection for each.
+            // A soju or ZNC login without a network in the username: list the networks
+            // and let the router open a connection for each.
             session.bouncer_control = config.list_networks
                 && config.bind_netid.is_none()
-                && session.negotiated_caps.contains("soju.im/bouncer-networks")
+                && (session.negotiated_caps.contains("soju.im/bouncer-networks") || session.is_znc)
                 && !config.username.contains('/')
                 && !config.sasl_username.contains('/');
-            if session.bouncer_control {
+            if session.bouncer_control && session.is_znc {
+                // Its 001 is from the network ZNC attached it to; it stands for ZNC.
+                session.server_name = config.host.trim().to_string();
+            }
+            if session.is_znc && config.list_networks {
+                // Also for a login to one network: the Connections window lists them.
+                session.znc_query("*status", "ListNetworks");
+            } else if session.bouncer_control {
                 session.whois_lines.push("BOUNCER LISTNETWORKS".to_string());
+            }
+            // The playback module holds back ZNC's replay on join; ask for all it has.
+            // Buffers start empty on every connect, so there is nothing to skip.
+            if session.is_znc && !session.bouncer_control && session.negotiated_caps.contains("znc.in/playback") {
+                session.znc_send("*playback", "PLAY * 0");
             }
             // Connected must fire FIRST so the event handler clears stale buffers from
             // any previous session before we open the fresh status buffer below.
@@ -611,6 +718,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                     events.push(BackendEvent::LineAdded { buffer_id: "status".to_string(), line });
                 }
                 // Prominent "connected" banner so the user sees the server and their nick
+                let znc_control = session.bouncer_control && session.is_znc;
                 let server_display = if !session.server_name.is_empty() { session.server_name.clone() } else { config.host.clone() };
                 *line_counter += 1;
                 events.push(BackendEvent::LineAdded {
@@ -621,7 +729,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                 });
                 // 001 welcome text (e.g. "Welcome to the Libera.Chat IRC Network YourNick!")
                 let welcome = msg.params.last().map(String::as_str).unwrap_or("");
-                if !welcome.is_empty() {
+                if !welcome.is_empty() && !znc_control {
                     *line_counter += 1;
                     events.push(BackendEvent::LineAdded {
                         buffer_id: "status".to_string(),
@@ -675,7 +783,9 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
                     }
                 } else if let Some(request) = label_request.or(outer_request) {
                     session.history_batches.insert(batch_ref.to_string(), (request, Vec::new()));
-                } else if kind == "chathistory" {
+                } else if kind == "chathistory" || kind == "znc.in/playback" {
+                    // ZNC's buffer replay, on join or for *playback PLAY: history, so it
+                    // goes in as loaded lines and doesn't notify.
                     let target = msg.param(2).unwrap_or("").to_lowercase();
                     session.batch_buf.insert(batch_ref.to_string(), (target, Vec::new()));
                 } else if kind == "draft/chathistory-targets" || kind == "chathistory-targets" {
@@ -827,6 +937,21 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             let text = msg.param(1).unwrap_or("").to_string();
             let nick = msg.nick().unwrap_or("*").to_string();
             let ts = timestamp_from_msg(msg);
+
+            // Our own command to a ZNC module, echoed back (echo-message).
+            if nick.eq_ignore_ascii_case(&session.our_nick) {
+                if let Some(i) = session.znc_echoes.iter().position(|(m, t)| m.eq_ignore_ascii_case(&target) && *t == text) {
+                    session.znc_echoes.remove(i);
+                    return events;
+                }
+            }
+            // Output of a module command we sent; replayed lines come in a batch.
+            if nick.starts_with('*') && msg.tag("batch").is_none() {
+                if let Some(query) = session.znc_queries.front_mut() {
+                    query.lines.push(text);
+                    return events;
+                }
+            }
 
             if msg.command == "NOTICE" && !session.registered {
                 // Pre-registration server notices (ident checks, hostname lookups etc.) —
@@ -1013,7 +1138,15 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             }
         }
 
-        "PONG" => { session.pong_received = true; }
+        "PONG" => {
+            session.pong_received = true;
+            let token = msg.params.last().map(String::as_str).unwrap_or("");
+            if let Some(i) = session.znc_queries.iter().position(|q| q.token == token) {
+                if let Some(query) = session.znc_queries.remove(i) {
+                    finish_znc_query(query, session, config, &mut events);
+                }
+            }
+        }
 
         // draft/read-marker uses MARKREAD; legacy soju.im/read uses READ.
         // Both have the same format: <cmd> <target> [timestamp=<rfc3339> | *]
@@ -1170,6 +1303,24 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
     events
 }
 
+/// A ZNC module command's output is complete: a network list goes to `Shared` (and,
+/// on a control connection, to the router); anything else back to the UI, followed
+/// by a new network list if it changed them.
+fn finish_znc_query(query: ZncQuery, session: &mut Session, config: &IrcConfig, events: &mut Vec<BackendEvent>) {
+    if query.lists_networks() {
+        let networks = parse_znc_networks(&query.lines);
+        if session.bouncer_control {
+            session.network_updates.push(NetworkUpdate::ZncListed(networks.iter().map(|n| n.name.clone()).collect()));
+        }
+        session.znc_network_list = Some(networks);
+        return;
+    }
+    if config.list_networks && changes_znc_networks(&query.text) {
+        session.znc_query("*status", "ListNetworks");
+    }
+    events.push(BackendEvent::BouncerReply { command: format!("{} {}", query.module, query.text), lines: query.lines });
+}
+
 // ── Write queue — populated by translate(), flushed by the connection loop ───
 
 fn take_write_queue(session: &mut Session) -> Vec<String> {
@@ -1188,7 +1339,7 @@ pub fn spawn(
     mut cmd_rx: mpsc::UnboundedReceiver<IrcCommand>,
     connected: Arc<AtomicBool>,
     network_tx: Option<mpsc::UnboundedSender<NetworkUpdate>>,
-    search_supported: Arc<AtomicBool>,
+    shared: Arc<Shared>,
 ) {
     tokio::spawn(async move {
         macro_rules! send {
@@ -1283,11 +1434,16 @@ pub fn spawn(
                                         raw_buf.clear();
                                         if let Some(msg) = IrcMessage::parse(&raw) {
                                             let evs = translate(&msg, &mut session, &mut line_counter, &config);
+                                            // Before the events and the router act on them.
+                                            if session.can_search() { shared.search_supported.store(true, Ordering::Relaxed); }
+                                            if session.is_znc { shared.znc.store(true, Ordering::Relaxed); }
+                                            if let Some(networks) = session.znc_network_list.take() {
+                                                *shared.znc_networks.lock().unwrap() = networks;
+                                            }
                                             for ev in evs { send!(ev); }
                                             for update in session.network_updates.drain(..) {
                                                 if let Some(tx) = &network_tx { let _ = tx.send(update); }
                                             }
-                                            if session.can_search() { search_supported.store(true, Ordering::Relaxed); }
                                             for line in take_write_queue(&mut session) {
                                                 if write_half.write_all(format!("{}\r\n", line).as_bytes()).await.is_err() {
                                                     break 'conn;
@@ -1436,6 +1592,10 @@ pub fn spawn(
                                         } else {
                                             send!(BackendEvent::HistoryResults { request, lines: Vec::new(), error: Some("The server doesn't keep history".to_string()) });
                                         }
+                                    }
+                                    Some(IrcCommand::ZncCommand { module, text }) => {
+                                        // Sent with the write queue at the top of the loop.
+                                        session.znc_query(&module, &text);
                                     }
                                     Some(IrcCommand::FetchBefore { buffer_id, before_ts }) => {
                                         if session.has_chathistory() {
@@ -1635,6 +1795,136 @@ mod tests {
         let mut session = Session::new("sam");
         let sent = feed(&mut session, &config, &[":soju.test 903 sam :SASL authentication successful"]);
         assert_eq!(sent, vec!["BOUNCER BIND 7".to_string(), "CAP END".to_string()]);
+    }
+
+    /// A session past CAP negotiation with ZNC 1.9's caps (as captured from ZNC 1.9.1).
+    fn znc_session() -> Session {
+        let mut session = Session::new("tester");
+        for cap in ["batch", "echo-message", "server-time", "znc.in/self-message", "znc.in/playback"] {
+            session.negotiated_caps.insert(cap.into());
+        }
+        session.is_znc = true;
+        session
+    }
+
+    #[test]
+    fn znc_is_detected_and_its_caps_requested() {
+        let config = config(None);
+        let mut session = Session::new("tester");
+        let sent = feed(&mut session, &config, &[
+            ":irc.znc.in CAP unknown-nick LS :batch cap-notify echo-message multi-prefix server-time userhost-in-names znc.in/batch znc.in/playback znc.in/self-message znc.in/server-time-iso",
+        ]);
+        assert!(session.is_znc);
+        assert_eq!(sent, vec!["CAP REQ :server-time multi-prefix batch echo-message userhost-in-names cap-notify znc.in/self-message znc.in/playback".to_string()]);
+    }
+
+    #[test]
+    fn znc_replay_is_history_not_live() {
+        let config = config(Some("1"));
+        let mut session = znc_session();
+        let mut counter = 0;
+        let mut events = Vec::new();
+        for line in [
+            "@time=2026-10-30T10:05:53.385Z :znc.in BATCH +98 znc.in/playback #alpha",
+            "@batch=98;time=2026-10-30T10:05:40.773Z :chatter!~u@host PRIVMSG #alpha :hello tester, are you there? [old-1]",
+            "@time=2026-10-30T10:05:53.385Z :znc.in BATCH -98",
+            "@time=2026-10-30T10:05:53.385Z :znc.in BATCH +bf znc.in/playback chatter",
+            "@batch=bf;time=2026-10-30T10:05:40.773Z :chatter!~u@host PRIVMSG tester :private hi [old-2]",
+            "@time=2026-10-30T10:05:53.385Z :znc.in BATCH -bf",
+        ] {
+            events.extend(translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config));
+        }
+        match &events[..] {
+            [BackendEvent::LinesLoaded { buffer_id: chan, lines: chan_lines, is_prepend: true },
+             BackendEvent::BufferOpened(query),
+             BackendEvent::LinesLoaded { buffer_id: pm, lines: pm_lines, is_prepend: true }] => {
+                assert_eq!(chan, "#alpha");
+                assert!(chan_lines[0].highlight, "a mention, counted as unread but not notified");
+                assert_eq!(chan_lines[0].timestamp.to_rfc3339(), "2026-10-30T10:05:40.773+00:00");
+                assert_eq!(query.id, "chatter");
+                assert_eq!(pm, "chatter");
+                assert_eq!(pm_lines.len(), 1);
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn znc_network_connection_asks_for_playback() {
+        let mut config = config(None);
+        config.username = "test/alpha".into();
+        let mut session = znc_session();
+        let sent = feed(&mut session, &config, &[
+            ":ergo.test 001 tester :Welcome",
+            // Its echo, which must not open a *playback buffer.
+            "@time=2026-10-30T10:06:15.102Z :tester!~u@host PRIVMSG *playback :PLAY * 0",
+        ]);
+        assert!(!session.bouncer_control);
+        assert!(sent.contains(&"PRIVMSG *playback :PLAY * 0".to_string()));
+        assert!(!session.joined.contains("*playback"));
+        assert!(!session.znc_echoes.iter().any(|(module, _)| module == "*playback"));
+    }
+
+    #[test]
+    fn znc_login_without_network_lists_and_hides_its_network() {
+        let config = config(None);
+        let mut session = znc_session();
+        let sent = feed(&mut session, &config, &[":ergo.test 001 tester :Welcome"]);
+        assert!(session.bouncer_control);
+        assert_eq!(&sent[..2], &["PRIVMSG *status :ListNetworks".to_string(), "PING :wcrs-znc-1".to_string()]);
+        assert!(!sent.iter().any(|l| l.contains("PLAY") || l.starts_with("JOIN")));
+        let mut counter = 0;
+        let mut events = Vec::new();
+        // As captured from ZNC 1.9.1.
+        for line in [
+            "@time=2026-10-30T10:08:40.990Z :tester!~u@host JOIN :#alpha",
+            "@time=2026-10-30T10:06:15.607Z :tester!~u@host PRIVMSG *status :ListNetworks",
+            ":*status!status@znc.in PRIVMSG tester :+---------+--------+------------+-----------------------------+----------+",
+            ":*status!status@znc.in PRIVMSG tester :| Network | On IRC | IRC Server | IRC User                    | Channels |",
+            ":*status!status@znc.in PRIVMSG tester :+---------+--------+------------+-----------------------------+----------+",
+            ":*status!status@znc.in PRIVMSG tester :| alpha   | Yes    | ergo.test  | tester!~u@c333d4wipmxsw.irc | 2        |",
+            ":*status!status@znc.in PRIVMSG tester :| beta    | No     |            |                             | 0        |",
+            ":*status!status@znc.in PRIVMSG tester :+---------+--------+------------+-----------------------------+----------+",
+            "@time=2026-10-30T10:06:15.607Z :irc.znc.in PONG irc.znc.in :wcrs-znc-1",
+        ] {
+            events.extend(translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config));
+        }
+        // Neither the attached network's JOIN nor the table reaches the chat.
+        assert!(events.is_empty(), "{events:?}");
+        assert!(session.znc_queries.is_empty());
+        match &session.network_updates[..] {
+            [NetworkUpdate::ZncListed(names)] => assert_eq!(names, &["alpha", "beta"]),
+            _ => panic!("expected a ZNC network list"),
+        }
+        let networks = session.znc_network_list.take().unwrap();
+        assert_eq!(networks[0], ZncNetwork { name: "alpha".into(), on_irc: true, server: "ergo.test".into(), channels: "2".into() });
+        assert!(!networks[1].on_irc);
+    }
+
+    #[test]
+    fn znc_module_reply_comes_back_and_relists() {
+        let config = config(None);
+        let mut session = znc_session();
+        session.registered = true;
+        session.znc_query("*controlpanel", "AddNetwork test gamma");
+        let mut counter = 0;
+        let mut events = Vec::new();
+        for line in [
+            "@time=2026-10-30T10:08:40.990Z :tester!~u@host PRIVMSG *controlpanel :AddNetwork test gamma",
+            ":*controlpanel!controlpanel@znc.in PRIVMSG tester :Network gamma added to user test.",
+            "@time=2026-10-30T10:08:40.991Z :irc.znc.in PONG irc.znc.in :wcrs-znc-1",
+        ] {
+            events.extend(translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config));
+        }
+        match &events[..] {
+            [BackendEvent::BouncerReply { command, lines }] => {
+                assert_eq!(command, "*controlpanel AddNetwork test gamma");
+                assert_eq!(lines, &["Network gamma added to user test."]);
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+        let sent = take_write_queue(&mut session);
+        assert!(sent.ends_with(&["PRIVMSG *status :ListNetworks".to_string(), "PING :wcrs-znc-2".to_string()]), "{sent:?}");
     }
 
     #[test]

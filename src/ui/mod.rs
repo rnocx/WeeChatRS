@@ -21,3 +21,4 @@ mod np;
 pub(crate) mod fileshare;
 pub(crate) mod ssh_tunnel;
 pub(crate) mod server_search;
+pub(crate) mod znc;

@@ -460,6 +460,8 @@ pub struct ConnectionHandle {
     pub auth_error: Option<String>,
     pub auto_reconnect: bool,
     pub connection_log: VecDeque<String>,
+    /// The last ZNC module command sent from the Connections window, and its output.
+    pub znc_reply: Option<(String, Vec<String>)>,
     #[allow(dead_code)] // held for Drop — kills the ssh process on disconnect
     pub ssh_tunnel: Option<crate::ui::ssh_tunnel::SshTunnel>,
 }
@@ -564,6 +566,9 @@ pub struct AppSettings {
     /// Derive theme colours from the current desktop wallpaper.
     #[serde(default)]
     pub adaptive_theme: bool,
+    /// When each ZNC buffer was last read, which ZNC doesn't keep (see ui::znc).
+    #[serde(default)]
+    pub bouncer_read_markers: HashMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 fn default_true() -> bool { true }
@@ -618,6 +623,7 @@ impl Default for AppSettings {
             keybinds: KeybindsMap::default(),
             collapsed_servers: HashSet::new(),
             adaptive_theme: false,
+            bouncer_read_markers: HashMap::new(),
         }
     }
 }
@@ -740,6 +746,8 @@ pub struct WeeChatApp {
 
     // Muted buffers (stored by full_name, stable across WeeChat restarts).
     pub(crate) muted_buffer_names: HashSet<String>,
+    pub(crate) bouncer_read_markers: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    pub(crate) znc_ui: crate::ui::znc::ZncUiState,
     /// Per-buffer cooldown tracking for OS notifications. Prevents a noisy channel
     /// from spamming the OS notification center.
     pub(crate) last_notif_at: HashMap<String, std::time::Instant>,
@@ -972,6 +980,8 @@ impl WeeChatApp {
             available_fonts,
             selected_view_since: None,
             muted_buffer_names: settings.muted_buffer_names,
+            bouncer_read_markers: settings.bouncer_read_markers,
+            znc_ui: Default::default(),
             last_notif_at: HashMap::new(),
             request_attention: false,
             notify_initialized: false,
@@ -1193,6 +1203,7 @@ impl WeeChatApp {
                 if let Some((client, raw_id)) = self.client_for_buffer(&prev_id) {
                     client.mark_read(&raw_id);
                 }
+                self.record_local_read(&prev_id);
             }
         }
 
@@ -1226,6 +1237,7 @@ impl WeeChatApp {
                 client.mark_read(&raw_id);
             }
         }
+        self.record_local_read(&id);
     }
 
     pub(crate) fn log_conn_for(&mut self, conn_prefix: &str, msg: impl Into<String>) {
@@ -1343,6 +1355,7 @@ impl WeeChatApp {
             auth_error: None,
             auto_reconnect: effective_auto_reconnect,
             connection_log: VecDeque::new(),
+            znc_reply: None,
             ssh_tunnel,
         };
 
@@ -1368,6 +1381,9 @@ impl WeeChatApp {
 
 impl eframe::App for WeeChatApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Some(id) = self.selected_buffer_id.clone() {
+            self.record_local_read(&id);
+        }
         let settings = AppSettings {
             backend_type: BackendType::default(),
             host: String::new(),
@@ -1412,6 +1428,7 @@ impl eframe::App for WeeChatApp {
             keybinds: self.keybinds.clone(),
             collapsed_servers: self.collapsed_servers.clone(),
             adaptive_theme: self.adaptive_theme,
+            bouncer_read_markers: self.bouncer_read_markers.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
