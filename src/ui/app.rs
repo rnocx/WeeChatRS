@@ -2764,6 +2764,9 @@ impl eframe::App for WeeChatApp {
                     };
                     let mut show_older_in_memory = false;
 
+                    // The chat runs up to the nick list; a bar on that border looks like
+                    // the nick list's own.
+                    ui.spacing_mut().scroll.bar_outer_margin = 6.0;
                     let chat_scroll = ScrollArea::vertical()
                         .stick_to_bottom(true)
                         .auto_shrink([false, false])
