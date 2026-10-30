@@ -119,6 +119,44 @@ async fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
+/// Most of a page we read looking for its preview tags.
+const MAX_PREVIEW_HTML_BYTES: usize = 1024 * 1024;
+
+fn is_youtube_url(url: &str) -> bool {
+    let Some(host) = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_lowercase)) else {
+        return false;
+    };
+    matches!(host.as_str(),
+        "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be")
+}
+
+/// YouTube's oEmbed answer: title, channel and thumbnail in about 1 KB, where the
+/// watch page is over 1 MB with its tags most of the way down.
+async fn fetch_youtube_preview(client: &reqwest::Client, url: &str) -> Result<LinkPreview, String> {
+    #[derive(serde::Deserialize)]
+    struct OEmbed {
+        title: Option<String>,
+        author_name: Option<String>,
+        thumbnail_url: Option<String>,
+    }
+    let encoded: String = url::form_urlencoded::byte_serialize(url.as_bytes()).collect();
+    let body = client
+        .get(format!("https://www.youtube.com/oembed?format=json&url={}", encoded))
+        .send().await.map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?
+        .bytes().await.map_err(|e| e.to_string())?;
+    let oembed: OEmbed = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    if oembed.title.is_none() {
+        return Err("no preview data".to_string());
+    }
+    Ok(LinkPreview {
+        title: oembed.title,
+        description: oembed.author_name,
+        image_url: oembed.thumbnail_url,
+        site_name: Some("YouTube".to_string()),
+    })
+}
+
 async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
     if !is_safe_public_url(&url) {
         return Err("blocked: non-public URL".to_string());
@@ -128,6 +166,12 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
         .user_agent("Mozilla/5.0 WeeChatRS/0.1 (link preview)")
         .build()
         .map_err(|e| e.to_string())?;
+
+    if is_youtube_url(&url) {
+        if let Ok(preview) = fetch_youtube_preview(&client, &url).await {
+            return Ok(preview);
+        }
+    }
 
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?;
@@ -146,8 +190,18 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
         return Err("not html".to_string());
     }
 
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    let html = String::from_utf8_lossy(&bytes[..bytes.len().min(65536)]);
+    // The tags are in <head>, which on script-heavy pages (YouTube) ends hundreds of
+    // KB in: read up to its end rather than a fixed amount.
+    let mut resp = resp;
+    let mut bytes: Vec<u8> = Vec::new();
+    while bytes.len() < MAX_PREVIEW_HTML_BYTES {
+        let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? else { break };
+        // Search only the new chunk and a tag's length before it.
+        let from = bytes.len().saturating_sub(7);
+        bytes.extend_from_slice(&chunk);
+        if bytes[from..].windows(7).any(|w| w.eq_ignore_ascii_case(b"</head>")) { break; }
+    }
+    let html = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_PREVIEW_HTML_BYTES)]);
 
     let title = extract_og_tag(&html, "og:title").or_else(|| extract_html_title(&html));
     let description = extract_og_tag(&html, "og:description")
