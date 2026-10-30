@@ -25,12 +25,13 @@ Notifications only work from the `.app` bundle, not from `target/release/weechat
 
 ## Linux
 
-Install the required system libraries before building:
+Besides Rust, a build needs only a C compiler, perl and make (OpenSSL is built from
+source). Window system, D-Bus and keyring support need no development packages:
+they are loaded at run time or written in Rust.
 
 ```bash
-sudo apt-get install \
-  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-  libxkbcommon-dev libssl-dev libdbus-1-dev pkg-config
+sudo dnf install gcc perl make                    # Fedora, RHEL
+sudo apt-get install build-essential perl         # Debian, Ubuntu
 
 git clone https://github.com/rnocx/WeeChatRS.git
 cd WeeChatRS
@@ -38,9 +39,21 @@ cargo build --release
 # output: ./target/release/weechat-rs
 ```
 
-`./build-linux.sh` builds x86_64 and aarch64 in Docker and writes
-`dist/linux/WeeChatRS-<version>-linux-<arch>.zip`, containing the binary, a
-`weechatrs.desktop` entry, icons and `install.sh`. To install from the zip:
+That binary is for your own machine: it needs your distro's glibc or newer. For
+zips that run on any distro from 2018 on, as released, use `./build-linux.sh`:
+
+```bash
+./build-linux.sh              # x86_64 and aarch64
+./build-linux.sh --x86_64     # or --aarch64
+# output: dist/linux/WeeChatRS-<version>-linux-<arch>.zip
+```
+
+It builds with [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) against
+glibc 2.28, the same way the release workflow does, on any Linux distro or on macOS,
+without Docker. It also needs `zip`, and fetches cargo-zigbuild and zig into
+`~/.cache` with python3 unless both are installed; it says what is missing and how
+to install it. Each zip holds the binary, a `weechatrs.desktop` entry, icons and
+`install.sh`. To install from the zip:
 
 ```bash
 unzip WeeChatRS-*-linux-x86_64.zip && cd WeeChatRS-*-linux-x86_64
@@ -73,9 +86,7 @@ cargo build --release
 WSL 2 on Windows 11 (or Windows 10 21H2+) with WSLg supports native GUI apps — no X server needed:
 
 ```bash
-sudo apt-get install \
-  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-  libxkbcommon-dev libssl-dev libdbus-1-dev pkg-config
+sudo apt-get install build-essential perl
 
 git clone https://github.com/rnocx/WeeChatRS.git
 cd WeeChatRS
@@ -83,30 +94,29 @@ cargo build --release
 ./target/release/weechat-rs
 ```
 
-## Cross-compile for Windows from macOS
+## Cross-compile for Windows from macOS or Linux
+
+`./build-windows.sh` builds the release zip,
+`dist/windows/WeeChatRS-<version>-windows-x86_64.zip`. It uses the MinGW
+cross-compiler when it's installed:
 
 ```bash
-brew install mingw-w64
-rustup target add x86_64-pc-windows-gnu
+brew install mingw-w64                            # macOS
+sudo dnf install mingw64-gcc                      # Fedora
+sudo apt-get install gcc-mingw-w64-x86-64         # Debian, Ubuntu
 
-# Add to .cargo/config.toml:
-# [target.x86_64-pc-windows-gnu]
-# linker = "x86_64-w64-mingw32-gcc"
-
-cargo build --release --target x86_64-pc-windows-gnu
-# output: target/x86_64-pc-windows-gnu/release/weechat-rs.exe
+./build-windows.sh
 ```
 
-## Cross-compile for Windows from Linux or WSL (Docker)
+Without it, the script builds in a container from `docker/Dockerfile.windows-x86_64`,
+with Docker or Podman. `./build-windows.sh --aarch64` builds for Windows on ARM in a
+container with llvm-mingw (not part of the releases). By hand, the x86_64 build is:
 
 ```bash
-docker build --platform linux/amd64 \
-  -f docker/Dockerfile.windows-x86_64 \
-  -t weechat-windows-x86_64 .
-
-CONTAINER=$(docker create weechat-windows-x86_64)
-docker cp "$CONTAINER:/weechat-rs-windows-x86_64.exe" ./weechat-rs.exe
-docker rm "$CONTAINER"
+rustup target add x86_64-pc-windows-gnu
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+  cargo build --release --target x86_64-pc-windows-gnu
+# output: target/x86_64-pc-windows-gnu/release/weechat-rs.exe
 ```
 
 ## Run in development mode
@@ -120,6 +130,16 @@ cargo run
 ```bash
 cargo run --release
 ```
+
+## Tests
+
+```bash
+cargo test --bin weechat-rs
+```
+
+A few end-to-end tests need servers and are skipped by default; each one's doc
+comment says what it needs. Run one with `-- --ignored <name>`, for example
+`znc_end_to_end` against a local ZNC.
 
 ## Releases (GitHub Actions)
 
@@ -136,3 +156,32 @@ git push github v0.9.0
 - The macOS DMG is only ad-hoc signed. Sign and notarize it locally, replace it on the draft and update its line in `SHA256SUMS`, then add the release notes and publish.
 - Re-running the workflow for a tag replaces the files on the existing draft and keeps its notes.
 - *Actions → Release → Run workflow* builds everything without a release; download the builds from the run's artifacts.
+
+## Releases built locally
+
+The same files can be built on a Mac, for a release somewhere other than GitHub
+(such as a Gitea instance) or to check a release before tagging it. Build from a
+clean checkout of the tag, so uncommitted work stays out:
+
+```bash
+git worktree add ../weechatrs-release v0.9.0 && cd ../weechatrs-release
+./build-macos.sh --dmg      # macOS universal app and DMG (ad-hoc signed)
+./build-linux.sh            # Linux x86_64 and aarch64 zips
+./build-windows.sh          # Windows x86_64 zip
+```
+
+To sign the app with a Developer ID and notarize it, so Gatekeeper opens it on
+other Macs without a warning:
+
+```bash
+IDENTITY="Developer ID Application: Your Name (TEAMID)"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/macos/WeeChatRS.app
+# notarytool takes a zip or DMG; store credentials once with
+#   xcrun notarytool store-credentials <profile>
+ditto -c -k --keepParent dist/macos/WeeChatRS.app /tmp/WeeChatRS.zip
+xcrun notarytool submit /tmp/WeeChatRS.zip --keychain-profile <profile> --wait
+xcrun stapler staple dist/macos/WeeChatRS.app
+```
+
+Then build the DMG from the signed app, and sign, notarize and staple the DMG the
+same way. Finish with `shasum -a 256` over the files for `SHA256SUMS`.

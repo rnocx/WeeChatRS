@@ -3,3 +3,7 @@ release/
 .git/
 screenshots/
 *.md
+dist/
+docker/znc-test/
+tools/
+.claude/
