@@ -586,7 +586,7 @@ impl Default for AppSettings {
             use_ssl: true,
             show_filtered_lines: false,
             colored_nicks: true,
-            theme: AppTheme::default(),
+            theme: crate::ui::theme::default_theme(),
             font_size: 14.0,
             monospace_ui: false,
             show_timestamps: true,

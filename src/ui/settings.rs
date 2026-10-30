@@ -490,7 +490,7 @@ impl WeeChatApp {
                             .fill(p.danger)
                             .min_size(Vec2::new(70.0, 24.0))
                     ).clicked() {
-                        self.theme = AppTheme::default();
+                        self.theme = crate::ui::theme::default_theme();
                     }
                     if ui.add(
                         egui::Button::new(RichText::new("Import Ghostty theme…").color(p.accent))
@@ -520,7 +520,7 @@ impl WeeChatApp {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                let default = AppTheme::default();
+                let default = crate::ui::theme::default_theme();
                 let quick = std::iter::once(&default)
                     .chain(crate::ui::theme::QUICK_THEMES.iter().filter_map(|n| crate::ui::theme::find_theme(n)));
                 for theme in quick {

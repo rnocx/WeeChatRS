@@ -16,7 +16,7 @@
 
 - **One client for WeeChat and IRC**: a WeeChat Relay (API v2 over WebSocket), any IRC server, or a soju or ZNC bouncer, side by side.
 - **Every bouncer network from one login**: each network in its own group; history, unread counts and ZNC network management included.
-- **460+ themes**: Ghostty's theme collection bundled, your own Ghostty themes, or colours taken from your wallpaper.
+- **Themes**: a hand-picked set bundled (Darkweb, Catppuccin, Dracula, Gruvbox, Nord, TokyoNight and more), any Ghostty theme of your own, or colours taken from your wallpaper.
 - **Inline images and link previews**, file sharing with `/share`, and `/np` for what's playing.
 - **WeeChat's options as a real settings table** with `/fset`.
 - **Native on macOS, Linux and Windows**, with desktop notifications and an SSH tunnel built in.
@@ -103,7 +103,7 @@ The details of both, from soju's read markers and search to ZNC's playback modul
 - **`/sysinfo`**: posts your OS, CPU and memory.
 
 ### Look and settings
-- **Themes**: over 460 bundled Ghostty themes with search and quick buttons, your own from `~/.config/ghostty/themes`, or an imported theme file; all 16 colours editable, and 256-colour and RGB colours fitted to the theme.
+- **Themes**: 14 bundled themes (Darkweb by default, Catppuccin Mocha and Latte, Dracula, Gruvbox Dark and Light, Nord, TokyoNight, Solarized Dark, One Half Dark, Batman, Doom One, Glacier, Monokai Pro Light) with search and quick buttons, your own Ghostty themes from `~/.config/ghostty/themes`, or an imported theme file; all 16 colours editable, and 256-colour and RGB colours fitted to the theme.
 - **Adaptive theme**: colours derived from your desktop wallpaper, following it when it changes.
 - **Window**: opacity, with native background blur on macOS; font, font size, timestamps and nick column alignment.
 - **Notifications**: desktop notifications for highlights and private messages on macOS, Windows and Linux.
@@ -184,7 +184,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, [BUILDING.md](BUILDING.md
 
 MIT License — Copyright (c) 2026
 
-The bundled color themes in `assets/themes` come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) in Ghostty's format (MIT, see `assets/themes/LICENSE`); each theme belongs to its author.
+The bundled color themes in `assets/themes`, except Darkweb, come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) in Ghostty's format (MIT, see `assets/themes/LICENSE`); each theme belongs to its author.
 
 ---
 

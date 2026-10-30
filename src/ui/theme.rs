@@ -127,7 +127,14 @@ mod bundled {
     include!(concat!(env!("OUT_DIR"), "/ghostty_themes.rs"));
 }
 
-/// Themes with a quick button on the Theme page, after Default.
+/// The theme of a new install, and of Reset; first of the quick buttons.
+pub const DEFAULT_THEME: &str = "Darkweb";
+
+pub fn default_theme() -> AppTheme {
+    find_theme(DEFAULT_THEME).cloned().unwrap_or_else(AppTheme::default)
+}
+
+/// Themes with a quick button on the Theme page, after the default one.
 pub const QUICK_THEMES: [&str; 8] = [
     "Catppuccin Mocha", "Catppuccin Latte", "Dracula", "Gruvbox Dark",
     "Nord", "TokyoNight", "iTerm2 Solarized Dark", "One Half Dark",
@@ -200,10 +207,10 @@ mod tests {
 
     #[test]
     fn bundled_themes_parse_and_quick_themes_exist() {
-        assert!(bundled::BUNDLED_THEMES.len() > 400);
         for (name, text) in bundled::BUNDLED_THEMES {
             assert!(AppTheme::parse_ghostty(text, name.to_string()).is_some(), "{name}");
         }
+        assert_eq!(default_theme().name, DEFAULT_THEME);
         for name in QUICK_THEMES {
             assert!(bundled::BUNDLED_THEMES.iter().any(|(n, _)| *n == name), "{name}");
         }
