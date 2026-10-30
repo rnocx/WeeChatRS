@@ -2,7 +2,7 @@
 Type=Application
 Name=WeeChatRS
 GenericName=IRC Client
-Comment=GUI client for WeeChat Relay and IRC
+Comment=GUI client for WeeChat Relay, IRC, soju and ZNC
 Exec=weechat-rs
 Icon=weechatrs
 Terminal=false

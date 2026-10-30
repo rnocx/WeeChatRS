@@ -1,8 +1,9 @@
 <div align="center">
   <img src="assets/icon.png" alt="WeeChatRS" width="160" />
   <h1>WeeChatRS</h1>
-  <p>A modern, high-performance GUI client for <a href="https://weechat.org/">WeeChat</a> Relay,<br>
-  built in Rust using <code>egui</code> and <code>tokio</code>.<br>
+  <p>A modern, high-performance GUI client for <a href="https://weechat.org/">WeeChat</a> Relay and IRC,<br>
+  with first-class support for the <a href="https://soju.im/">soju</a> and <a href="https://znc.in/">ZNC</a> bouncers.<br>
+  Built in Rust using <code>egui</code> and <code>tokio</code>.<br>
   Real-time chat with a polished native UI, full ANSI color support, and zero runtime dependencies.</p>
 </div>
 
@@ -13,6 +14,7 @@
 - **Full WeeChat Relay API v2** over WebSocket with SSL/TLS
 - **IRCv3** — extensive capability negotiation; see [IRCv3 support](#ircv3-support) below
 - **soju bouncer support** — every network from one login, each in its own group, plus read-marker sync and history; see [Soju support](#soju-support) below
+- **ZNC bouncer support** — every network from one login, ZNC's buffer replayed as history, and your networks managed from the Connections window; see [ZNC support](#znc-support) below
 - **SSH tunnel** — built-in SSH port-forwarding; connect to relays on private networks without VPN; uses your SSH agent, `~/.ssh` keys, or a saved password
 - **Auto-reconnect** — exponential backoff on dropped connections, with dead-connection detection (IRC PING/PONG keepalive; WebSocket idle timeout)
 - **Multiple connection profiles** — save and switch between named relay/IRC/bouncer profiles
@@ -92,6 +94,9 @@ Default shortcuts — all are rebindable in **Settings → Keybinds**.
 
 ![IRC connection dialog](screenshots/connection_irc.png)
 *Direct IRC/soju connection — server, port, nick, SASL auth, and TLS options*
+
+![ZNC networks in the Connections window](screenshots/connections_znc.png)
+*A ZNC connection — the user's networks with their state, and buttons to add, remove, connect and disconnect them*
 
 ## Platform Support
 
@@ -178,6 +183,42 @@ WeeChatRS can connect directly to a [soju](https://soju.im/) bouncer as an IRC b
 | History | `chathistory` fills each channel and private conversation on connect, and *Load older messages* fetches more. |
 | Plain IRC servers | The same backend works for any IRC server; soju-specific features are only used when the server advertises them. |
 
+## ZNC support
+
+WeeChatRS recognises a [ZNC](https://znc.in/) bouncer by the `znc.in/*` capabilities it offers, and labels the connection **ZNC** in the Connections window. Add it as an **IRC** connection: your ZNC username in *Username*, your ZNC password in *Password*, SSL as your ZNC listener is set up.
+
+### All your networks from one login
+
+Log in with just your ZNC username (`alice`) and WeeChatRS opens every network of that user:
+
+1. The login asks ZNC for the user's networks (`/znc ListNetworks`).
+2. Each network gets a connection of its own, logged in as `alice/<network>`, with its own group in the buffer list, headed by the network's name.
+3. The login itself stays connected as the *control* connection. Its server buffer shows only what ZNC's modules say (`*status`, `*controlpanel`, …). ZNC always attaches a login to one of the networks, but that network's chat comes in on the network's own connection, so nothing shows twice.
+
+Talk to ZNC from the control buffer as in any client: `/znc help`, `/znc ListNetworks`, or `/msg *controlpanel help`. To connect to one network only, put it in the username (`alice/libera`), as before.
+
+### Managing networks
+
+![ZNC networks in the Connections window](screenshots/connections_znc.png)
+
+While a ZNC connection is up, its card in **Connections** (`⌘⇧C` / `Ctrl+Shift+C`) lists the user's networks: a green dot when ZNC is connected to the network's IRC server, its server and how many channels it is in. From there you can:
+
+- **Add network**: a name and a first server (host, port, TLS, optional server password). WeeChatRS sends `AddNetwork` and `AddServer` to `*controlpanel`, and the new network appears in the buffer list once ZNC has connected.
+- **Delete** a network (✕, then confirm): `DelNetwork`; its buffers close.
+- **Connect** / **Disconnect** a network: ZNC joins or leaves its IRC server (`Reconnect` / `Disconnect`).
+- **Refresh** the list. ZNC doesn't announce changes, so after changes from another client or the web admin, Refresh picks them up; changes made here refresh it on their own.
+
+ZNC's answer to the last command shows under the list. Managing networks needs ZNC's `controlpanel` module (`/znc LoadMod controlpanel`). The server address is the one ZNC connects to, as seen from the ZNC host.
+
+### History and unread lines
+
+| Feature | Behaviour |
+| :--- | :--- |
+| Buffer replay | ZNC's replay of a channel or conversation (`znc.in/playback` batches) goes in as history: it counts as unread, mentions included, but doesn't send notifications. |
+| Playback module | With the [playback module](https://github.com/jpnurmi/znc-playback) (`znc.in/playback`), WeeChatRS asks for everything ZNC has kept (`PLAY * 0`) after connecting, instead of ZNC's replay on join. You then get the whole buffer even when another client has already seen it, and ZNC doesn't clear it. Recommended, with `AutoClearChanBuffer` and `AutoClearQueryBuffer` off. |
+| Read position | ZNC doesn't keep one, so WeeChatRS remembers when you last read each buffer. After a reconnect, only lines since then count as unread. Kept per device. |
+| Your own messages | `znc.in/self-message`: what you send from another client shows up here too. |
+
 ## Building from Source
 
 See [BUILDING.md](BUILDING.md) for full instructions covering macOS, Linux, Windows (native and WSL 2), and cross-compilation.
@@ -199,9 +240,11 @@ src/
       event_handler.rs       — WeeChatResponse → BackendEvent, hotlist, buffer sync,
                                read-state tracking
     irc/
-      mod.rs                 — IrcClient: BackendClient impl, command dispatch
+      mod.rs                 — IrcClient: BackendClient impl, command dispatch,
+                               a connection per soju or ZNC network
       connection.rs          — TCP/TLS connection loop, IRCv3 CAP negotiation, SASL,
-                               PING/PONG keepalive, message translation → BackendEvent
+                               PING/PONG keepalive, message translation → BackendEvent,
+                               mIRC formatting → ANSI, ZNC module queries
       parser.rs              — IRCv3 message parser (tags, prefix, command, params)
   ui/
     mod.rs                   — ui module re-exports
@@ -220,6 +263,7 @@ src/
     np.rs                    — /np now-playing detection (macOS osascript, Linux
                                playerctl, Windows WinRT SMTC)
     ssh_tunnel.rs            — SSH port-forward tunnel via openssh subprocess
+    znc.rs                   — ZNC networks panel and per-device read markers
     emoji.rs                 — emoji shortcode table (~150 entries)
 ```
 
