@@ -108,7 +108,7 @@ for arch in "${ARCHES[@]}"; do
     rustup target add "${target}" >/dev/null
     # Keep these portable builds free of WebKitGTK and its newer system ABI.
     # Native Linux builds can enable web sign-in (the Cargo default); see BUILDING.md.
-    cargo zigbuild --release --target "${target}.${GLIBC}"
+    cargo zigbuild --release --no-default-features --target "${target}.${GLIBC}"
     packaging/linux/package.sh "${TARGET_DIR}/${target}/release/weechat-rs" "${arch}" "${VERSION}" "${OUT_DIR}"
 done
 

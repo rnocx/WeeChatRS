@@ -371,6 +371,7 @@ pub enum BackendType {
     #[default]
     WeeChat,
     Soju,
+    Injected,
 }
 
 /// Per-connection saved profile (serialised to AppSettings).
@@ -641,6 +642,7 @@ pub struct WeeChatApp {
     pub(crate) selected_conn_log: Option<String>,
     pub(crate) editing_profile: ConnectionProfile,
     pub(crate) editing_password: String,
+    pub(crate) injected_import: crate::relay::injected::login::ImportState,
     pub(crate) editing_ssh_password: String,
     pub(crate) editing_profile_idx: Option<usize>,
     pub(crate) show_connections: bool,      // connections manager window
@@ -911,6 +913,7 @@ impl WeeChatApp {
             selected_conn_log: None,
             editing_profile: ConnectionProfile::default(),
             editing_password: String::new(),
+            injected_import: Default::default(),
             editing_ssh_password: String::new(),
             editing_profile_idx: None,
             show_connections: false,
@@ -1259,7 +1262,7 @@ impl WeeChatApp {
         self.connections.retain(|c| c.prefix != prefix);
 
         let (per_conn_tx, per_conn_rx) = mpsc::unbounded_channel::<BackendEvent>();
-        let relay_port = profile.port.parse::<u16>().unwrap_or(9001);
+        let relay_port = profile.port.parse::<u16>().unwrap_or(if profile.backend_type == BackendType::Injected { 443 } else { 9001 });
 
         // Cache the relay password for this session so future connects skip the prompt.
         if !password.is_empty() {
@@ -1273,7 +1276,7 @@ impl WeeChatApp {
             } else { None });
 
         let mut ssh_tunnel_log: Option<String> = None;
-        let (effective_host, effective_port, ssh_tunnel) = if profile.ssh_enabled && !profile.ssh_host.is_empty() {
+        let (effective_host, effective_port, ssh_tunnel) = if profile.backend_type != BackendType::Injected && profile.ssh_enabled && !profile.ssh_host.is_empty() {
             match crate::ui::ssh_tunnel::SshTunnel::spawn(
                 &profile.ssh_host,
                 profile.ssh_port,
@@ -1300,6 +1303,7 @@ impl WeeChatApp {
         };
 
         let (proto, path) = match profile.backend_type {
+            BackendType::Injected => (if profile.use_ssl { "https" } else { "http" }, "/socket.io/"),
             BackendType::Soju    => (if profile.use_ssl { "ircs" } else { "irc" }, ""),
             BackendType::WeeChat => (if profile.use_ssl { "wss"  } else { "ws"  }, "/api"),
         };
@@ -1308,6 +1312,17 @@ impl WeeChatApp {
         let effective_auto_reconnect = profile.auto_reconnect && self.auto_reconnect;
 
         let mut client: Box<dyn BackendClient> = match profile.backend_type {
+            BackendType::Injected => {
+                Box::new(crate::relay::injected::InjectedClient::new(
+                    crate::relay::injected::InjectedConfig {
+                        host: profile.host.clone(),
+                        port: relay_port,
+                        token: password.clone(),
+                        use_ssl: profile.use_ssl,
+                        auto_reconnect: effective_auto_reconnect,
+                    }, per_conn_tx.clone(), ctx.clone()))
+            }
+
             BackendType::Soju => {
                 let config = crate::relay::irc::IrcConfig {
                     label: profile.label.clone(),

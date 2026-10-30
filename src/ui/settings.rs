@@ -836,6 +836,27 @@ impl WeeChatApp {
     }
 
     fn connections_contents(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        if let Some(receiver) = &self.injected_import.receiver {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    self.injected_import.receiver = None;
+                    match result {
+                        Ok(session) if self.conn_show_add && self.editing_profile.backend_type == BackendType::Injected => {
+                            self.editing_password = session.token;
+                            self.injected_import.message = Some(format!("Signed in as {}. Save the connection to use it.", session.username));
+                        }
+                        Ok(_) => self.injected_import.message = None,
+                        Err(error) => self.injected_import.message = Some(error),
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.injected_import.receiver = None;
+                    self.injected_import.message = Some("Sign-in stopped. Please retry.".into());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(200)),
+            }
+        }
+
         let accent_color = p.accent;
 
         // Pending deferred actions
@@ -869,10 +890,21 @@ impl WeeChatApp {
                             ui.add(egui::TextEdit::singleline(&mut self.editing_profile.label).desired_width(240.0));
                             ui.end_row();
                             ui.label("Backend:");
+                            let previous_backend = self.editing_profile.backend_type.clone();
                             ui.horizontal(|ui| {
                                 ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::WeeChat, "WeeChat");
                                 ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::Soju, "IRC");
+                                if ui.selectable_value(&mut self.editing_profile.backend_type, BackendType::Injected, "Injected").changed() {
+                                    self.editing_profile.host = "injected-irc.com".into();
+                                    self.editing_profile.port = "443".into();
+                                    self.editing_profile.use_ssl = true;
+                                    self.editing_profile.accept_invalid_certs = false;
+                                    self.editing_profile.ssh_enabled = false;
+                                    self.editing_password.clear();
+                                    self.injected_import = Default::default();
+                                }
                             });
+                            if previous_backend != self.editing_profile.backend_type { self.editing_password.clear(); self.injected_import = Default::default(); }
                             ui.end_row();
                             ui.label("Host:");
                             ui.add(egui::TextEdit::singleline(&mut self.editing_profile.host).desired_width(240.0));
@@ -900,20 +932,50 @@ impl WeeChatApp {
                                 ui.add(egui::TextEdit::singleline(&mut self.editing_profile.channel).desired_width(240.0).hint_text("#channel (optional)"));
                                 ui.end_row();
                             }
-                            ui.label("Password:");
+                            ui.label(if self.editing_profile.backend_type == BackendType::Injected { "Session token:" } else { "Password:" });
                             ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).desired_width(240.0));
                             ui.end_row();
                         });
+                        if self.editing_profile.backend_type == BackendType::Injected {
+                            hint(ui, "Sign in through Injected’s official page. You can also import an existing desktop session or enter a token manually.");
+                            let official = self.editing_profile.host == "injected-irc.com" && self.editing_profile.port == "443" && self.editing_profile.use_ssl;
+                            ui.add_enabled_ui(official && self.injected_import.receiver.is_none(), |ui| {
+                                ui.horizontal(|ui| {
+                                    #[cfg(feature = "injected-web-login")]
+                                    if ui.button("Sign in to Injected…").clicked() {
+                                        crate::relay::injected::web_login::start(&mut self.injected_import, ui.ctx().clone());
+                                    }
+                                    if ui.button("Import Injected session").clicked() {
+                                        self.injected_import.message = None;
+                                        self.injected_import.receiver = Some(crate::relay::injected::login::start(None, ui.ctx().clone()));
+                                    }
+                                    if ui.button("Choose data folder…").clicked() {
+                                        if let Some(folder) = rfd::FileDialog::new().set_title("Choose the Injected app data folder or its Local Storage/leveldb folder").pick_folder() {
+                                            self.injected_import.message = None;
+                                            self.injected_import.receiver = Some(crate::relay::injected::login::start(Some(folder), ui.ctx().clone()));
+                                        }
+                                    }
+                                });
+                            });
+                            if !official { hint(ui, "Session import is available for injected-irc.com with TLS on port 443. Custom endpoints use a manually entered token."); }
+                            if self.injected_import.receiver.is_some() {
+                                ui.label("Waiting for Injected sign-in or session verification…");
+                                if ui.button("Cancel sign-in").clicked() { self.injected_import = Default::default(); }
+                            }
+                            if let Some(message) = &self.injected_import.message { hint(ui, message); }
+                            hint(ui, "The masked token field also accepts a token manually. Save token in keychain keeps it for future connections.");
+                            ui.hyperlink_to("Open Injected to sign in", "https://injected-irc.com");
+                        }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut self.editing_profile.use_ssl, "SSL");
-                            if self.editing_profile.use_ssl {
+                            if self.editing_profile.use_ssl && self.editing_profile.backend_type != BackendType::Injected {
                                 ui.checkbox(&mut self.editing_profile.accept_invalid_certs, "Accept self-signed");
                             }
                             ui.add_space(12.0);
-                            ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel");
+                            if self.editing_profile.backend_type != BackendType::Injected { ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel"); }
                         });
-                        if self.editing_profile.ssh_enabled {
+                        if self.editing_profile.backend_type != BackendType::Injected && self.editing_profile.ssh_enabled {
                             ui.add_space(4.0);
                             egui::Grid::new("ssh_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
                                 ui.label("SSH Host:");
@@ -947,7 +1009,7 @@ impl WeeChatApp {
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
                             ui.checkbox(&mut self.editing_profile.auto_reconnect, "Auto-reconnect");
-                            ui.checkbox(&mut self.editing_profile.save_password, "Save password");
+                            ui.checkbox(&mut self.editing_profile.save_password, if self.editing_profile.backend_type == BackendType::Injected { "Save token in keychain" } else { "Save password" });
                         });
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
@@ -977,6 +1039,7 @@ impl WeeChatApp {
                                 } else {
                                     self.profiles.push(profile);
                                 }
+                                self.injected_import = Default::default();
                                 self.conn_show_add = false;
                                 self.editing_profile = ConnectionProfile::default();
                                 self.editing_password.clear();
@@ -984,6 +1047,7 @@ impl WeeChatApp {
                                 self.editing_profile_idx = None;
                             }
                             if ui.button("Cancel").clicked() {
+                                self.injected_import = Default::default();
                                 self.conn_show_add = false;
                                 self.editing_profile = ConnectionProfile::default();
                                 self.editing_password.clear();
@@ -1025,6 +1089,7 @@ impl WeeChatApp {
                                 ui.label(RichText::new(&profile.label).strong());
                                 let is_znc = is_connected && conn_opt.is_some_and(|c| c.client.is_znc());
                                 let badge = match profile.backend_type {
+                                    BackendType::Injected => "Injected",
                                     BackendType::WeeChat => "WeeChat",
                                     BackendType::Soju if is_znc => "ZNC",
                                     BackendType::Soju => "IRC",
@@ -1039,7 +1104,7 @@ impl WeeChatApp {
                                         if ui.button("Disconnect").clicked() { do_disconnect = Some(prefix.clone()); }
                                     } else if self.conn_connect_idx == Some(idx) {
                                         // Inline password prompt — shown only when passwords aren't cached/stored.
-                                        ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).hint_text("Password…").desired_width(110.0));
+                                        ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).hint_text(if profile.backend_type == BackendType::Injected { "Session token…" } else { "Password…" }).desired_width(110.0));
                                         if profile.ssh_enabled {
                                             ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password).password(true).hint_text("SSH password…").desired_width(110.0));
                                         }
@@ -1137,12 +1202,14 @@ impl WeeChatApp {
                 let profile = &self.profiles[idx];
                 self.editing_password = crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()).unwrap_or_default();
                 self.editing_ssh_password = crate::ui::secure_storage::load_by_key(&profile.ssh_keyring_key()).unwrap_or_default();
+                self.injected_import = Default::default();
                 self.editing_profile = profile.clone();
                 self.editing_profile_idx = Some(idx);
                 self.conn_show_add = true;
             }
         }
         if toggle_add {
+            self.injected_import = Default::default();
             self.editing_profile = ConnectionProfile::default();
             self.editing_password.clear();
             self.editing_ssh_password.clear();

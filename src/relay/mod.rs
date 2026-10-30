@@ -3,3 +3,4 @@ pub mod irc;
 pub mod models;
 pub mod weechat;
 
+pub mod injected;

@@ -43,6 +43,7 @@ Open **Connections** (`⌘⇧C` / `Ctrl+Shift+C`) and add a connection. Pick the
 | An IRC server | **IRC** | Host, port, nick; SASL username and password if you use them |
 | A soju bouncer | **IRC** | Your soju username and password |
 | A ZNC bouncer | **IRC** | Your ZNC username and password |
+| An Injected account | **Injected** | Your session token ([setup and limitations](docs/injected.md)) |
 
 Every connection can go through an **SSH tunnel** (your SSH agent, `~/.ssh` keys or a saved password), reconnects on its own when it drops, and saves its password in the system keychain if you ask it to.
 

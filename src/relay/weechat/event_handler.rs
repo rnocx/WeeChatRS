@@ -34,6 +34,9 @@ impl WeeChatApp {
                             let ts5 = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  → POST /api/sync  {{colors: ansi, input: false}}", ts5));
                         }
+                        crate::ui::app::BackendType::Injected => {
+                            conn.connection_log.push_back("Injected Socket.IO session authenticated".into());
+                        }
                         crate::ui::app::BackendType::Soju => {
                             let ts = chrono::Local::now().format("%H:%M").to_string();
                             conn.connection_log.push_back(format!("[{}]  IRC registration complete (CAP/NICK/USER)", ts));
@@ -103,6 +106,15 @@ impl WeeChatApp {
                 if !self.show_connection_log {
                     self.connection_log_unread = true;
                 }
+            }
+            BackendEvent::AuthError(e) if self.connections.iter().any(|c| c.prefix == conn_prefix && c.backend_type == crate::ui::app::BackendType::Injected) => {
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.is_connecting = false;
+                    conn.connecting_pending = false;
+                    conn.status = "Authentication failed".into();
+                    conn.auth_error = Some(e.clone());
+                }
+                self.log_conn_for(conn_prefix, e);
             }
             BackendEvent::AuthError(e) | BackendEvent::Error(e) => {
                 if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {

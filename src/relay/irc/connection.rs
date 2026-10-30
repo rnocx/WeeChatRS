@@ -262,7 +262,7 @@ impl Session {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn nick_color_ansi(name: &str) -> String {
+pub(crate) fn nick_color_ansi(name: &str) -> String {
     let idx = crate::relay::models::nick_color_slot(name);
     if idx < 8 { format!("\x1B[{}m", 30 + idx) } else { format!("\x1B[{}m", 90 + idx - 8) }
 }
@@ -318,7 +318,7 @@ const MIRC_TO_ANSI: [u8; 16] = [15, 0, 4, 2, 9, 1, 5, 3, 11, 10, 6, 14, 12, 13, 
 /// IRC formatting codes (bold, italic, underline, colours, reset) as the ANSI escapes
 /// the chat view draws; codes it can't draw (reverse, strikethrough, monospace) are
 /// dropped. Extended colours 16–98 have no theme slot and are left at the default.
-fn irc_to_ansi(text: &str) -> String {
+pub(crate) fn irc_to_ansi(text: &str) -> String {
     if !text.contains(['\x02', '\x03', '\x04', '\x0F', '\x11', '\x16', '\x1D', '\x1E', '\x1F']) {
         return text.to_string();
     }

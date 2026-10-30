@@ -23,6 +23,11 @@ fn load_icon() -> egui::IconData {
 
 #[tokio::main]
 async fn main() -> eframe::Result<()> {
+    #[cfg(feature = "injected-web-login")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--injected-login")) {
+        if relay::injected::web_login::run().is_err() { std::process::exit(1); }
+        return Ok(());
+    }
     env_logger::init();
 
     // Before the window exists, so the compositor can match app_id to the desktop entry.

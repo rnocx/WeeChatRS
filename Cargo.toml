@@ -3,7 +3,14 @@ name = "weechat-rs"
 version = "0.9.2"
 edition = "2021"
 
+[features]
+default = ["injected-web-login"]
+injected-web-login = ["dep:wry", "dep:tao", "dep:webbrowser"]
+
 [dependencies]
+wry = { version = "0.57.1", optional = true }
+tao = { version = "0.37.2", optional = true }
+webbrowser = { version = "1.2", optional = true }
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "persistence", "system_fonts", "wayland", "x11"] }
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 tokio = { version = "1.37", features = ["full"] }

@@ -25,19 +25,26 @@ Notifications only work from the `.app` bundle, not from `target/release/weechat
 
 ## Linux
 
-Besides Rust, a build needs only a C compiler, perl and make (OpenSSL is built from
-source). Window system, D-Bus and keyring support need no development packages:
-they are loaded at run time or written in Rust.
+Besides Rust, a build needs a C compiler, perl and make (OpenSSL is built from
+source), and WebKitGTK 4.1 for the [Injected](docs/injected.md) sign-in window,
+which the default build includes:
 
 ```bash
-sudo dnf install gcc perl make                    # Fedora, RHEL
-sudo apt-get install build-essential perl         # Debian, Ubuntu
+sudo dnf install gcc perl make webkit2gtk4.1-devel                # Fedora, RHEL
+sudo apt-get install build-essential perl libwebkit2gtk-4.1-dev   # Debian, Ubuntu
 
 git clone https://github.com/rnocx/WeeChatRS.git
 cd WeeChatRS
 cargo build --release
 # output: ./target/release/weechat-rs
 ```
+
+The binary then needs WebKitGTK 4.1 at run time too (`webkit2gtk4.1`,
+`libwebkit2gtk-4.1-0`). To build without the sign-in window, and without WebKitGTK,
+use `cargo build --release --no-default-features`; Injected connections then sign in
+by importing the desktop app's session or with a token. Window system, D-Bus and
+keyring support need no development packages either way: they are loaded at run
+time or written in Rust.
 
 That binary is for your own machine: it needs your distro's glibc or newer. For
 zips that run on any distro from 2018 on, as released, use `./build-linux.sh`:
@@ -50,10 +57,12 @@ zips that run on any distro from 2018 on, as released, use `./build-linux.sh`:
 
 It builds with [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) against
 glibc 2.28, the same way the release workflow does, on any Linux distro or on macOS,
-without Docker. It also needs `zip`, and fetches cargo-zigbuild and zig into
-`~/.cache` with python3 unless both are installed; it says what is missing and how
-to install it. Each zip holds the binary, a `weechatrs.desktop` entry, icons and
-`install.sh`. To install from the zip:
+without Docker. Like the releases, these zips leave out the Injected sign-in window
+(`--no-default-features`), so they don't depend on WebKitGTK. It also needs `zip`,
+and fetches cargo-zigbuild and zig into `~/.cache` with python3 unless both are
+installed; it says what is missing and how to install it. Each zip holds the
+binary, a `weechatrs.desktop` entry, icons and `install.sh`. To install from the
+zip:
 
 ```bash
 unzip WeeChatRS-*-linux-x86_64.zip && cd WeeChatRS-*-linux-x86_64
@@ -81,12 +90,16 @@ cargo build --release
 # output: target\release\weechat-rs.exe
 ```
 
+The [Injected](docs/injected.md) sign-in window uses the Microsoft Edge WebView2
+Runtime, part of Windows 11 and most Windows 10 installs; install it if the window
+doesn't open. `--no-default-features` builds without it.
+
 ## Windows — WSL 2 (Linux build, runs on Windows desktop via WSLg)
 
 WSL 2 on Windows 11 (or Windows 10 21H2+) with WSLg supports native GUI apps — no X server needed:
 
 ```bash
-sudo apt-get install build-essential perl
+sudo apt-get install build-essential perl libwebkit2gtk-4.1-dev
 
 git clone https://github.com/rnocx/WeeChatRS.git
 cd WeeChatRS
