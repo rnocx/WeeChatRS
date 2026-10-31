@@ -1,7 +1,8 @@
 //! Cross-platform desktop notifications using direct OS APIs (Option A).
 //!
 //! - **Linux**: zbus → `org.freedesktop.Notifications.Notify` with embedded
-//!   PNG passed as `image-data` hint. No subprocess, no fallback CLI.
+//!   PNG passed as `image-data` hint. No subprocess, no fallback CLI. In a
+//!   Flatpak, the notification portal instead.
 //! - **macOS**: `UNUserNotificationCenter` (bundled `.app` only). The banner
 //!   shows the bundle icon, plus the app icon attached as an image.
 //! - **Windows**: `notify-rust` toasts, sent under the app's own AppUserModelID
@@ -63,6 +64,9 @@ mod backend {
 
     pub fn deliver(notif: &Notification) -> Result<(), String> {
         let conn = Connection::session().map_err(|e| format!("dbus session: {}", e))?;
+        if std::env::var_os("FLATPAK_ID").is_some() {
+            return deliver_portal(&conn, notif);
+        }
 
         let mut hints: HashMap<&str, Value> = HashMap::new();
 
@@ -98,6 +102,27 @@ mod backend {
                 expire_timeout,
             ),
         ).map_err(|e| format!("Notify call: {}", e))?;
+        Ok(())
+    }
+
+    /// In a Flatpak, through the notification portal: the sandbox can't reach the
+    /// notification service, and the portal shows the app's name and icon itself.
+    fn deliver_portal(conn: &Connection, notif: &Notification) -> Result<(), String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        // A notification replaces an earlier one with the same id; each is its own.
+        let id = format!("message-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let mut fields: HashMap<&str, Value> = HashMap::new();
+        fields.insert("title", Value::Str(notif.title.as_str().into()));
+        fields.insert("body", Value::Str(notif.body.as_str().into()));
+        fields.insert("priority", Value::Str("normal".into()));
+        conn.call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.portal.Notification"),
+            "AddNotification",
+            &(id.as_str(), fields),
+        ).map_err(|e| format!("AddNotification call: {}", e))?;
         Ok(())
     }
 }
