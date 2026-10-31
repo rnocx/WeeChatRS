@@ -7,6 +7,11 @@ edition = "2021"
 default = ["injected-web-login"]
 injected-web-login = ["dep:wry", "dep:tao", "dep:webbrowser"]
 
+# The Injected sign-in window on its own, for Linux builds without the feature.
+[[bin]]
+name = "weechat-rs-login"
+required-features = ["injected-web-login"]
+
 [dependencies]
 wry = { version = "0.57.1", optional = true }
 tao = { version = "0.37.2", optional = true }

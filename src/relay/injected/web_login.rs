@@ -1,52 +1,10 @@
-//! The sign-in helper is a separate invocation of this executable, with its own
-//! native GUI event loop. Its stdout is a private pipe to the parent process.
+//! Web sign-in from the app's side: start the sign-in window's process and take the
+//! session it hands back. The window is this executable again with `--injected-login`,
+//! or on Linux builds without it, the `weechat-rs-login` helper next to it, which alone
+//! links WebKitGTK.
+use super::bridge::{parse_reply, MAX_REPLY, ORIGIN};
 use super::login::{ImportState, ImportedSession};
-use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
-
-const ORIGIN: &str = "https://injected-irc.com";
-const MAX_REPLY: usize = 32 * 1024;
-const SCRIPT: &str = include_str!("web_login.js");
-
-#[derive(Deserialize, Serialize)]
-struct SessionReply {
-    token: String,
-}
-fn official_url(url: &str) -> bool {
-    url::Url::parse(url)
-        .map(|u| {
-            u.scheme() == "https"
-                && u.host_str() == Some("injected-irc.com")
-                && u.port_or_known_default() == Some(443)
-                && u.username().is_empty()
-                && u.password().is_none()
-        })
-        .unwrap_or(false)
-}
-fn navigation_allowed(url: &str) -> bool {
-    official_url(url)
-        || matches!(url, "about:blank" | "about:srcdoc")
-        || url::Url::parse(url)
-            .map(|u| {
-                u.scheme() == "https"
-                    && u.host_str() == Some("challenges.cloudflare.com")
-                    && u.port_or_known_default() == Some(443)
-            })
-            .unwrap_or(false)
-}
-fn parse_reply(origin: &str, body: &str) -> Option<SessionReply> {
-    if !official_url(origin) || body.len() > MAX_REPLY {
-        return None;
-    }
-    let reply: SessionReply = serde_json::from_str(body).ok()?;
-    if reply.token.is_empty()
-        || reply.token.len() > 16384
-        || reply.token.chars().any(char::is_whitespace)
-    {
-        return None;
-    }
-    Some(reply)
-}
 
 pub fn start(state: &mut ImportState, ctx: egui::Context) {
     // Dropping the prior state cancels and reaps any previous helper.
@@ -69,16 +27,51 @@ pub fn start(state: &mut ImportState, ctx: egui::Context) {
     });
 }
 
-async fn run_child() -> Result<ImportedSession, String> {
-    use tokio::io::AsyncReadExt;
+/// The command that opens the sign-in window.
+#[cfg(feature = "injected-web-login")]
+fn window_command() -> Result<tokio::process::Command, String> {
     let executable = std::env::current_exe()
         .map_err(|_| "Could not locate WeeChatRS for sign-in.".to_string())?;
     let mut command = tokio::process::Command::new(executable);
+    command.arg("--injected-login");
+    Ok(command)
+}
+
+/// The command that opens the sign-in window: the helper next to the executable,
+/// as the Linux zip and install.sh place it.
+#[cfg(not(feature = "injected-web-login"))]
+fn window_command() -> Result<tokio::process::Command, String> {
+    let executable = std::env::current_exe()
+        .map_err(|_| "Could not locate WeeChatRS for sign-in.".to_string())?;
+    let executable = executable.canonicalize().unwrap_or(executable);
+    let helper = executable.with_file_name(HELPER);
+    if !helper.is_file() {
+        return Err(format!("The sign-in helper ({HELPER}) isn't next to WeeChatRS. It comes in the Linux zip, and install.sh installs both."));
+    }
+    Ok(tokio::process::Command::new(helper))
+}
+
+#[cfg(not(feature = "injected-web-login"))]
+const HELPER: &str = "weechat-rs-login";
+
+/// Why the window's process didn't start, from what it wrote to stderr: on Linux,
+/// most likely WebKitGTK 4.1 isn't installed.
+fn start_failure(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    if stderr.contains("libwebkit2gtk-4.1") || stderr.contains("libjavascriptcoregtk-4.1") || stderr.contains("error while loading shared libraries") {
+        "The sign-in window needs WebKitGTK 4.1. Install libwebkit2gtk-4.1-0 (Debian, Ubuntu), webkit2gtk4.1 (Fedora) or webkit2gtk-4.1 (Arch), or use session import.".into()
+    } else {
+        "The sign-in window could not start. Check your system webview installation, or use session import.".into()
+    }
+}
+
+async fn run_child() -> Result<ImportedSession, String> {
+    use tokio::io::AsyncReadExt;
+    let mut command = window_command()?;
     command
-        .arg("--injected-login")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     #[cfg(target_os = "windows")]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW: only the native webview is visible.
@@ -87,13 +80,23 @@ async fn run_child() -> Result<ImportedSession, String> {
         .stdout
         .take()
         .ok_or_else(|| "Could not open sign-in session pipe.".to_string())?;
+    let mut stderr = child.stderr.take();
     let mut bytes = Vec::new();
+    let mut errors = Vec::new();
     let flow = async {
-        stdout
-            .take((MAX_REPLY + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|_| "Could not read the sign-in result.".to_string())?;
+        // stderr is only read for why the window didn't start; WebKit may write a lot
+        // there, so all of it is read and the start kept.
+        let read_errors = async {
+            if let Some(stderr) = stderr.as_mut() {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n @ 1..) = stderr.read(&mut chunk).await {
+                    if errors.len() < 8192 { errors.extend_from_slice(&chunk[..n]); }
+                }
+            }
+        };
+        let mut reply = stdout.take((MAX_REPLY + 1) as u64);
+        let (read, ()) = tokio::join!(reply.read_to_end(&mut bytes), read_errors);
+        read.map_err(|_| "Could not read the sign-in result.".to_string())?;
         if bytes.len() > MAX_REPLY {
             return Err("Invalid sign-in response.".to_string());
         }
@@ -102,7 +105,7 @@ async fn run_child() -> Result<ImportedSession, String> {
             .await
             .map_err(|_| "Sign-in window closed unexpectedly.".to_string())?;
         if bytes.is_empty() {
-            return Err(if status.success() {"Sign-in cancelled."} else {"The sign-in window could not start. Check your system webview installation, or use session import."}.into());
+            return Err(if status.success() { "Sign-in cancelled.".into() } else { start_failure(&errors) });
         }
         if !status.success() {
             return Err("Sign-in window closed unexpectedly.".into());
@@ -120,114 +123,3 @@ async fn run_child() -> Result<ImportedSession, String> {
         .map_err(|_| "Sign-in timed out. Please try again.".to_string())?
 }
 
-/// Called before initializing eframe, logging, persistence or desktop integration.
-/// Never invoked from the UI process's existing event loop.
-pub fn run() -> Result<(), String> {
-    use tao::{
-        event::{Event, WindowEvent},
-        event_loop::{ControlFlow, EventLoopBuilder},
-        window::WindowBuilder,
-    };
-    enum LoginEvent {
-        Session(SessionReply),
-        Open(String),
-    }
-    let event_loop = EventLoopBuilder::<LoginEvent>::with_user_event().build();
-    let window = WindowBuilder::new()
-        .with_title("Sign in to Injected — injected-irc.com")
-        .with_inner_size(tao::dpi::LogicalSize::new(520.0, 760.0))
-        .with_min_inner_size(tao::dpi::LogicalSize::new(420.0, 580.0))
-        .build(&event_loop)
-        .map_err(|_| "Could not create sign-in window.".to_string())?;
-    let ipc_proxy = event_loop.create_proxy();
-    let link_proxy = event_loop.create_proxy();
-    let builder = wry::WebViewBuilder::new()
-        .with_url(format!("{ORIGIN}/#login"))
-        .with_incognito(true)
-        .with_background_color((10, 16, 24, 255))
-        .with_initialization_script(SCRIPT)
-        .with_navigation_handler(|url| navigation_allowed(&url))
-        .with_new_window_req_handler(move |url, _| {
-            if official_url(&url) {
-                let _ = link_proxy.send_event(LoginEvent::Open(url));
-            }
-            wry::NewWindowResponse::Deny
-        })
-        .with_ipc_handler(move |request| {
-            if let Some(reply) = parse_reply(&request.uri().to_string(), request.body()) {
-                let _ = ipc_proxy.send_event(LoginEvent::Session(reply));
-            }
-        });
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let webview = builder
-        .build(&window)
-        .map_err(|_| "Could not initialize system webview.".to_string())?;
-    #[cfg(target_os = "linux")]
-    let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        use wry::WebViewBuilderExtUnix;
-        let container = window
-            .default_vbox()
-            .ok_or_else(|| "Could not create sign-in container.".to_string())?;
-        builder
-            .build_gtk(container)
-            .map_err(|_| "Could not initialize WebKitGTK.".to_string())?
-    };
-    let mut returned = false;
-    event_loop.run(move |event, _, control| {
-        // Keep both alive until the helper exits.
-        let _ = (&webview, &window);
-        *control = ControlFlow::Wait;
-        match event {
-            Event::UserEvent(LoginEvent::Session(reply)) if !returned => {
-                use std::io::Write;
-                returned = true;
-                // This pipe is read only by the parent; never put credentials in
-                // argv, URLs, debug logs, files, or an egui text label.
-                if let Ok(data) = serde_json::to_vec(&reply) {
-                    let _ = std::io::stdout().write_all(&data);
-                    let _ = std::io::stdout().flush();
-                }
-                *control = ControlFlow::Exit;
-            }
-            Event::UserEvent(LoginEvent::Open(url)) => {
-                let _ = webbrowser::open(&url);
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => *control = ControlFlow::Exit,
-            _ => {}
-        }
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn bridge_accepts_only_the_official_https_origin() {
-        assert!(parse_reply(
-            "https://injected-irc.com/#login",
-            r#"{"token":"test-token"}"#
-        )
-        .is_some());
-        for origin in [
-            "https://injected-irc.com.evil.test",
-            "http://injected-irc.com",
-            "https://challenges.cloudflare.com",
-            "https://injected-irc.com:444",
-            "file:///login",
-        ] {
-            assert!(parse_reply(origin, r#"{"token":"test-token"}"#).is_none());
-        }
-        assert!(parse_reply(ORIGIN, r#"{"token":""}"#).is_none());
-        assert!(parse_reply(ORIGIN, r#"{"token":"bad\ntoken"}"#).is_none());
-        assert!(parse_reply(ORIGIN, &"x".repeat(MAX_REPLY + 1)).is_none());
-        assert!(navigation_allowed(
-            "https://challenges.cloudflare.com/turnstile/v0/api.js"
-        ));
-        assert!(navigation_allowed("about:srcdoc"));
-        assert!(!navigation_allowed("https://example.org"));
-    }
-}

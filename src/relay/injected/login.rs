@@ -13,7 +13,7 @@ pub struct ImportedSession {
 #[derive(Default)]
 pub struct ImportState {
     pub receiver: Option<mpsc::Receiver<Result<ImportedSession, String>>>,
-    #[cfg(feature = "injected-web-login")]
+    #[cfg(web_login)]
     pub cancel: Option<tokio::sync::oneshot::Sender<()>>,
     pub message: Option<String>,
 }
@@ -213,7 +213,7 @@ mod tests {
 }
 
 /// Verify the session without exposing server response bodies or credentials.
-#[cfg(feature = "injected-web-login")]
+#[cfg(web_login)]
 pub async fn verify_session(token: String) -> Result<ImportedSession, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))

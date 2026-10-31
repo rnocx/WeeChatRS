@@ -23,7 +23,11 @@ limited to `injected-irc.com:443` with TLS; custom endpoints still use a token.
 
 The web sign-in window is enabled by the default `injected-web-login` Cargo
 feature. It uses WKWebView on macOS, WebView2 on Windows, and WebKitGTK 4.1 on Linux.
-Portable Linux release builds omit it; see [build requirements](../BUILDING.md).
+The Linux release zips keep WebKitGTK out of `weechat-rs` itself: the window is a
+separate `weechat-rs-login` beside it, which needs WebKitGTK 4.1 (package
+`libwebkit2gtk-4.1-0` on Debian and Ubuntu, `webkit2gtk4.1` on Fedora,
+`webkit2gtk-4.1` on Arch) and glibc 2.34 or later. Without them, the app says so, and
+session import and tokens still work. See [build requirements](../BUILDING.md).
 The official form and a successful CAPTCHA were visually checked on macOS.
 Complete session handoff and any WebAuthn/second-factor prompt still need a
 real-account check.

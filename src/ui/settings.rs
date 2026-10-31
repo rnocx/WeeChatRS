@@ -941,7 +941,7 @@ impl WeeChatApp {
                             let official = self.editing_profile.host == "injected-irc.com" && self.editing_profile.port == "443" && self.editing_profile.use_ssl;
                             ui.add_enabled_ui(official && self.injected_import.receiver.is_none(), |ui| {
                                 ui.horizontal(|ui| {
-                                    #[cfg(feature = "injected-web-login")]
+                                    #[cfg(web_login)]
                                     if ui.button("Sign in to Injected…").clicked() {
                                         crate::relay::injected::web_login::start(&mut self.injected_import, ui.ctx().clone());
                                     }

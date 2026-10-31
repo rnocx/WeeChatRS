@@ -1,0 +1,14 @@
+# Builds weechat-rs-login, the Injected sign-in window for the Linux zips. Unlike
+# weechat-rs it links WebKitGTK 4.1, so it's built on the oldest Ubuntu that has it
+# (22.04; it needs glibc 2.34) to run on the distros that do. build-linux.sh mounts the
+# source at /src and keeps cargo's caches in volumes.
+FROM ubuntu:22.04
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl perl pkg-config libwebkit2gtk-4.1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+
+WORKDIR /src

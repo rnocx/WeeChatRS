@@ -62,11 +62,19 @@ jobs:
           ~/zigbuild/bin/pip install --quiet cargo-zigbuild==0.24.0 ziglang==0.16.0
           echo ~/zigbuild/bin >> "$GITHUB_PATH"
       - run: cargo zigbuild --release --no-default-features --target ${{ matrix.arch }}-unknown-linux-gnu.2.28
+      # The Injected sign-in window, which links WebKitGTK 4.1: built natively on
+      # Ubuntu 22.04, like docker/Dockerfile.linux-login; it then needs glibc 2.34.
+      - name: Build the login helper
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev
+          cargo build --release --locked --bin weechat-rs-login
+          strip target/release/weechat-rs-login
       - name: Package
         run: |
           mkdir -p out
           packaging/linux/package.sh target/${{ matrix.arch }}-unknown-linux-gnu/release/weechat-rs \
-            ${{ matrix.arch }} ${{ needs.version.outputs.version }} out
+            ${{ matrix.arch }} ${{ needs.version.outputs.version }} out target/release/weechat-rs-login
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
