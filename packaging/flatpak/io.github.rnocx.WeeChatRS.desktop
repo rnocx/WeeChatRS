@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=WeeChatRS
+GenericName=IRC Client
+Comment=GUI client for WeeChat Relay, IRC, soju and ZNC
+Exec=weechat-rs
+Icon=io.github.rnocx.WeeChatRS
+Terminal=false
+Categories=Network;Chat;IRCClient;
+Keywords=irc;weechat;relay;chat;soju;znc;
+StartupNotify=true
+StartupWMClass=io.github.rnocx.WeeChatRS

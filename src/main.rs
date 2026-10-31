@@ -21,6 +21,15 @@ fn load_icon() -> egui::IconData {
     egui::IconData { rgba: img.into_raw(), width: w, height: h }
 }
 
+#[cfg(target_os = "linux")]
+fn app_id() -> String {
+    desktop_integration::app_id()
+}
+#[cfg(not(target_os = "linux"))]
+fn app_id() -> String {
+    "weechatrs".to_string()
+}
+
 #[tokio::main]
 async fn main() -> eframe::Result<()> {
     #[cfg(feature = "injected-web-login")]
@@ -40,8 +49,9 @@ async fn main() -> eframe::Result<()> {
         .with_inner_size([1024.0, 768.0])
         .with_min_inner_size([400.0, 300.0])
         .with_transparent(true)
-        // Linux: Wayland app_id / X11 WM_CLASS, matched against weechatrs.desktop.
-        .with_app_id("weechatrs")
+        // Linux: Wayland app_id / X11 WM_CLASS, matched against weechatrs.desktop (or
+        // the Flatpak's own entry).
+        .with_app_id(app_id())
         .with_icon(icon);
 
     // On macOS a transparent window also makes the native titlebar see-through.

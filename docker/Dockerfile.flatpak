@@ -1,0 +1,7 @@
+# flatpak-builder for build-flatpak.sh on machines without it (macOS, or Linux
+# without flatpak). Runs privileged, since flatpak-builder sandboxes each build step.
+FROM fedora:43
+RUN dnf -q -y install flatpak flatpak-builder git python3 python3-aiohttp python3-tomlkit \
+    && dnf clean all
+RUN flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+WORKDIR /src

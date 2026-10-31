@@ -3,3 +3,7 @@
 /dist
 *.dmg
 /release
+
+# Flatpak: generated crate list and build state
+packaging/flatpak/cargo-sources.json
+.flatpak-builder/

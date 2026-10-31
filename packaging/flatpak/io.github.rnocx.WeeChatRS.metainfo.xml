@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.rnocx.WeeChatRS</id>
+  <name>WeeChatRS</name>
+  <summary>Chat on IRC through WeeChat, soju, ZNC or directly</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="io.github.rnocx">
+    <name>rnocx</name>
+  </developer>
+  <description>
+    <p>
+      WeeChatRS is a native desktop client for IRC. Connect it to a WeeChat relay to
+      use your running WeeChat from anywhere, or straight to IRC networks, the soju and
+      ZNC bouncers, or the Injected IRC service.
+    </p>
+    <ul>
+      <li>Several connections at once, with buffers grouped by network</li>
+      <li>History, read markers and search where the server keeps them</li>
+      <li>All networks of a soju or ZNC account from one login</li>
+      <li>Link previews, file uploads and desktop notifications</li>
+      <li>Themes, including your own Ghostty themes</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.rnocx.WeeChatRS.desktop</launchable>
+  <url type="homepage">https://github.com/rnocx/WeeChatRS</url>
+  <url type="bugtracker">https://github.com/rnocx/WeeChatRS/issues</url>
+  <url type="vcs-browser">https://github.com/rnocx/WeeChatRS</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>A channel with the buffer and nick lists</caption>
+      <image>https://raw.githubusercontent.com/rnocx/WeeChatRS/master/screenshots/main.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Connections, with a ZNC account's networks</caption>
+      <image>https://raw.githubusercontent.com/rnocx/WeeChatRS/master/screenshots/connections_znc.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Themes</caption>
+      <image>https://raw.githubusercontent.com/rnocx/WeeChatRS/master/screenshots/themes.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+  </content_rating>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <branding>
+    <color type="primary" scheme_preference="light">#8cff9e</color>
+    <color type="primary" scheme_preference="dark">#0f3d24</color>
+  </branding>
+  <releases>
+    <release version="0.9.3" date="2026-10-30">
+      <description>
+        <p>ZNC support, an experimental Injected backend, a hand-picked set of themes, and hiding and muting buffers on every backend.</p>
+      </description>
+    </release>
+    <release version="0.9.2" date="2026-10-30"/>
+  </releases>
+</component>
