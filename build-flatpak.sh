@@ -61,7 +61,10 @@ text = open(src).read()
 # Drop the header comment, which describes the local build.
 text = re.sub(r"\A(#.*\n)+", "", text)
 local = re.search(r"      - type: dir\n(        .*\n)+", text)
-git = (f"      - type: git\n        url: {url}\n        tag: {tag}\n        commit: {commit}\n")
+# x-checker-data: Flathub's checker opens a pull request for each new v* tag (the
+# crate list in it still needs regenerating by hand).
+git = (f"      - type: git\n        url: {url}\n        tag: {tag}\n        commit: {commit}\n"
+       f"        x-checker-data:\n          type: git\n          tag-pattern: ^v([\\d.]+)$\n")
 text = text[:local.start()] + git + text[local.end():]
 open(dst, "w").write(text)
 PY

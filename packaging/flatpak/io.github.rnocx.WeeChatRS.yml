@@ -37,6 +37,7 @@ modules:
       - install -Dm644 packaging/flatpak/io.github.rnocx.WeeChatRS.metainfo.xml /app/share/metainfo/io.github.rnocx.WeeChatRS.metainfo.xml
       - install -Dm644 assets/icon.iconset/icon_256x256.png /app/share/icons/hicolor/256x256/apps/io.github.rnocx.WeeChatRS.png
       - install -Dm644 assets/icon.iconset/icon_512x512.png /app/share/icons/hicolor/512x512/apps/io.github.rnocx.WeeChatRS.png
+      - install -Dm644 assets/icon.svg /app/share/icons/hicolor/scalable/apps/io.github.rnocx.WeeChatRS.svg
     sources:
       - type: dir
         path: ../..

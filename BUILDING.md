@@ -181,6 +181,13 @@ comment says what it needs. Run one with `-- --ignored <name>`, for example
 
 ## Releases (GitHub Actions)
 
+Before tagging, set the version in `Cargo.toml`, and add the release to
+`packaging/flatpak/io.github.rnocx.WeeChatRS.metainfo.xml`: a `<release>` with the
+version, date and a one-line description, above the older ones. Software centres
+show that as the version, and Flathub's linter rejects an out-of-order list (write a
+release candidate as `0.9.5~rc1`, with `type="development"`). See
+[docs/packaging.md](docs/packaging.md) for the Flatpak and publishing it on Flathub.
+
 Pushing a version tag to GitHub builds every platform and uploads the builds, with `SHA256SUMS`, to a **draft** release:
 
 ```bash
@@ -190,7 +197,7 @@ git push github v0.9.0
 ```
 
 - The tag must match the `Cargo.toml` version (`v0.9.0-rc1` for `0.9.0-rc1`), or the run stops before building. Tags with a `-` suffix become pre-releases.
-- Builds: macOS universal DMG, Linux x86_64 and ARM64 zips, Windows x86_64 zip.
+- Builds: macOS universal DMG, Linux x86_64 and ARM64 zips, Windows x86_64 zip, and the Flatpak for x86_64 and ARM64 (checked with Flathub's linter; if it fails, the release goes out without it).
 - The macOS DMG is only ad-hoc signed. Sign and notarize it locally, replace it on the draft and update its line in `SHA256SUMS`, then add the release notes and publish.
 - Re-running the workflow for a tag replaces the files on the existing draft and keeps its notes.
 - *Actions → Release → Run workflow* builds everything without a release; download the builds from the run's artifacts.
