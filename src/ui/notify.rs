@@ -75,7 +75,7 @@ mod backend {
         // Helps notification daemons categorise / pick a sound.
         hints.insert("category", Value::Str("im.received".into()));
         hints.insert("urgency", Value::U8(1)); // 0=low, 1=normal, 2=critical
-        hints.insert("desktop-entry", Value::Str("weechatrs".into()));
+        hints.insert("desktop-entry", Value::Str(crate::desktop_integration::app_id().into()));
 
         let actions: Vec<&str> = Vec::new();
         let app_icon: &str = ""; // covered by image-data hint
@@ -256,8 +256,37 @@ mod backend {
     /// AUMID; without one, notify-rust falls back to PowerShell's.
     const APP_ID: &str = "com.github.rnocx.weechat-gui";
 
+    /// The app's id in packaging/msix/AppxManifest.xml.
+    const PACKAGE_APP: &str = "WeeChatRS";
+
     pub fn init() {
-        register_app_id();
+        if packaged_app_id().is_none() {
+            register_app_id();
+        }
+    }
+
+    /// Installed from an MSIX package (the Microsoft Store), Windows knows the app by
+    /// the package's AUMID, with the name and icon from its manifest.
+    fn packaged_app_id() -> Option<&'static str> {
+        static PACKAGED: OnceLock<Option<String>> = OnceLock::new();
+        PACKAGED.get_or_init(|| {
+            use windows::core::PWSTR;
+            use windows::Win32::Foundation::ERROR_SUCCESS;
+            use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFamilyName;
+            let mut len = 0u32;
+            // Fails with APPMODEL_ERROR_NO_PACKAGE when not packaged, and otherwise
+            // gives the length the name needs.
+            let _ = unsafe { GetCurrentPackageFamilyName(&mut len, PWSTR::null()) };
+            if len == 0 {
+                return None;
+            }
+            let mut name = vec![0u16; len as usize];
+            if unsafe { GetCurrentPackageFamilyName(&mut len, PWSTR(name.as_mut_ptr())) } != ERROR_SUCCESS {
+                return None;
+            }
+            let name = String::from_utf16_lossy(&name[..(len as usize).saturating_sub(1)]);
+            Some(format!("{}!{}", name, PACKAGE_APP))
+        }).as_deref()
     }
 
     /// Give APP_ID a display name and icon under HKCU, which is how an app that
@@ -311,7 +340,7 @@ mod backend {
         n.summary(&notif.title)
             .body(&notif.body)
             .appname(&notif.app_name)
-            .app_id(APP_ID);
+            .app_id(packaged_app_id().unwrap_or(APP_ID));
         if let Some(p) = icon_path() {
             n.icon(p);
         }

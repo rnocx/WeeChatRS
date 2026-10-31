@@ -7,7 +7,8 @@
 //! `Exec` at the running binary — the same files `packaging/linux/install.sh` installs.
 //!
 //! Files are only (re)written when missing or different. Skipped when a system-wide
-//! entry exists, or when `WEECHATRS_NO_DESKTOP_INTEGRATION` is set.
+//! entry exists, when `WEECHATRS_NO_DESKTOP_INTEGRATION` is set, and in a Flatpak,
+//! which exports its own entry under the Flatpak app ID.
 
 use std::path::{Path, PathBuf};
 
@@ -18,10 +19,17 @@ const ICONS: &[(&str, &[u8])] = &[
     ("512x512", include_bytes!("../assets/icon.iconset/icon_512x512.png")),
 ];
 
+/// The app_id the desktop knows us by: the Flatpak app ID in a Flatpak, where the
+/// desktop entry is named after it, else `weechatrs`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn app_id() -> String {
+    std::env::var("FLATPAK_ID").ok().filter(|id| !id.is_empty()).unwrap_or_else(|| APP_ID.to_string())
+}
+
 // Only called on Linux; the module is also compiled for tests elsewhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn ensure_installed() {
-    if std::env::var_os("WEECHATRS_NO_DESKTOP_INTEGRATION").is_some() {
+    if std::env::var_os("WEECHATRS_NO_DESKTOP_INTEGRATION").is_some() || std::env::var_os("FLATPAK_ID").is_some() {
         return;
     }
     let system_entry = ["/usr/share/applications", "/usr/local/share/applications"]

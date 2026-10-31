@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Microsoft Store package. build-msix.sh fills in the @…@ values: identity and
+     publisher from Partner Center (the app's Product identity page), the version from
+     Cargo.toml. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+  <Identity Name="@IDENTITY_NAME@" Publisher="@PUBLISHER@" Version="@VERSION@" ProcessorArchitecture="x64"/>
+  <Properties>
+    <DisplayName>WeeChatRS</DisplayName>
+    <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0"/>
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us"/>
+  </Resources>
+  <Applications>
+    <!-- Id is PACKAGE_APP in src/ui/notify.rs: toasts go out under <family>!WeeChatRS. -->
+    <Application Id="WeeChatRS" Executable="weechat-rs.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="WeeChatRS"
+        Description="Chat on IRC through WeeChat, soju, ZNC or directly"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"/>
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <Capability Name="internetClient"/>
+    <!-- A desktop (Win32) app: required, and allowed in the Store for those. -->
+    <rescap:Capability Name="runFullTrust"/>
+  </Capabilities>
+</Package>

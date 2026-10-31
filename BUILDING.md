@@ -146,6 +146,17 @@ Injected sign-in window links to it. The build leaves it in
 `target/x86_64-pc-windows-gnu/release/build/webview2-com-sys-*/out/x64/`. A build with
 `--no-default-features` has no sign-in window and doesn't need it.
 
+## Flatpak and Microsoft Store (MSIX)
+
+```bash
+./build-flatpak.sh      # dist/flatpak/WeeChatRS-<version>-<arch>.flatpak
+./build-msix.sh         # dist/msix/WeeChatRS-<version>-x64.msix
+```
+
+Both work on Linux and macOS (in a container where the tools aren't installed). See
+[docs/packaging.md](docs/packaging.md) for the details, testing, and publishing on
+Flathub and in the Microsoft Store.
+
 ## Run in development mode
 
 ```bash

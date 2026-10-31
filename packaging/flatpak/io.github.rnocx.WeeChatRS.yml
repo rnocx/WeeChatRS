@@ -1,0 +1,53 @@
+# Flatpak manifest, for local builds with build-flatpak.sh. It builds from this
+# checkout; the Flathub copy builds from a release tag instead (see docs/packaging.md).
+# cargo-sources.json, the crates for an offline build, is generated from Cargo.lock
+# by build-flatpak.sh.
+id: io.github.rnocx.WeeChatRS
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: weechat-rs
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Desktop notifications, and passwords in the keyring (Secret Service).
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
+  # Session import reads the Injected desktop app's data.
+  - --filesystem=xdg-config/injected:ro
+  - --filesystem=xdg-config/Injected:ro
+  # SSH tunnels: the agent, and the user's keys and known hosts.
+  - --socket=ssh-auth
+  - --filesystem=~/.ssh:ro
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+modules:
+  - name: weechat-rs
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/weechat-rs/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline build --release --locked --bin weechat-rs
+      - install -Dm755 target/release/weechat-rs /app/bin/weechat-rs
+      - install -Dm644 packaging/flatpak/io.github.rnocx.WeeChatRS.desktop /app/share/applications/io.github.rnocx.WeeChatRS.desktop
+      - install -Dm644 packaging/flatpak/io.github.rnocx.WeeChatRS.metainfo.xml /app/share/metainfo/io.github.rnocx.WeeChatRS.metainfo.xml
+      - install -Dm644 assets/icon.iconset/icon_256x256.png /app/share/icons/hicolor/256x256/apps/io.github.rnocx.WeeChatRS.png
+      - install -Dm644 assets/icon.iconset/icon_512x512.png /app/share/icons/hicolor/512x512/apps/io.github.rnocx.WeeChatRS.png
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - dist
+          - release
+          - .git
+          - .claude
+          - docker/znc-test
+      - cargo-sources.json
