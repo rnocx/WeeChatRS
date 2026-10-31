@@ -182,9 +182,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, [BUILDING.md](BUILDING.md
 
 ## License
 
-MIT License — Copyright (c) 2026
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Copyright (c) 2026 rnocx. Releases up to 0.9.3 were published under MIT.
 
-The bundled color themes in `assets/themes`, except Darkweb, come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) in Ghostty's format (MIT, see `assets/themes/LICENSE`); each theme belongs to its author.
+The bundled fonts are under the SIL Open Font License (Cascadia Code, Fira Code, JetBrains Mono) and MIT (Phosphor icons); their licenses are in `assets/fonts`. The bundled color themes in `assets/themes`, except Darkweb, come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) in Ghostty's format (MIT, see `assets/themes/LICENSE`); each theme belongs to its author.
 
 ---
 

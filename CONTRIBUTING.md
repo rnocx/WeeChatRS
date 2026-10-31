@@ -16,3 +16,7 @@ All code must be reviewed and verified by a human before being merged. You are r
 ## Reporting Issues
 
 Open an issue on the repository with steps to reproduce, your platform, and the version of WeeChatRS you are running.
+
+## License
+
+Unless you explicitly state otherwise, any contribution you submit for inclusion in WeeChatRS is licensed as MIT OR Apache-2.0, as in the [README](README.md#license), without any additional terms or conditions.
