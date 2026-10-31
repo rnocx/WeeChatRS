@@ -64,6 +64,7 @@ impl WeeChatApp {
             }
             BackendEvent::Disconnected => {
                 if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.server_status.clear();
                     conn.is_connecting = false;
                     if conn.connecting_pending {
                         conn.connecting_pending = false;
@@ -378,6 +379,13 @@ impl WeeChatApp {
                     conn.znc_reply = Some((command, lines));
                 }
             }
+            BackendEvent::ServerStatus { buffer_id, status } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                let Some(server) = self.buffer_by_id(&full_id).map(|b| b.server.clone()) else { return };
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.server_status.insert(server, status);
+                }
+            }
             BackendEvent::BufferHidden { buffer_id, hidden } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
@@ -686,6 +694,8 @@ impl WeeChatApp {
     fn handle_buffer_list(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
         let body = Self::body_as_vec(&resp);
         let mut new_conn_buffers = Vec::new();
+        // Our nick per server, from the irc buffers' `nick` local variable.
+        let mut own_nicks: Vec<(String, String)> = Vec::new();
 
         for val in body {
             if let Some(obj) = val.as_object() {
@@ -739,6 +749,10 @@ impl WeeChatApp {
                     // Use raw_full_name (without prefix) for metadata extraction
                     Self::extract_metadata(obj, &mut topic, &mut modes, &mut kind, &mut server, &raw_full_name, &plugin);
 
+                    if let Some(nick) = obj.get("local_variables").and_then(|v| v.get("nick")).and_then(|v| v.as_str()) {
+                        if plugin == "irc" && !nick.is_empty() { own_nicks.push((server.clone(), nick.to_string())); }
+                    }
+
                     // Core and server buffers never have a usable nicklist regardless of
                     // what the relay reports (unwrap_or(true) above can over-report).
                     let effective_nicklist = has_nicklist
@@ -767,6 +781,12 @@ impl WeeChatApp {
                         last_markread_ts,
                     });
                 }
+            }
+        }
+
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+            for (server, nick) in own_nicks {
+                conn.server_status.entry(server).or_default().nick = nick;
             }
         }
 

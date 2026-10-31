@@ -456,6 +456,17 @@ impl Default for ConnectionProfile {
     }
 }
 
+/// Who we are on a server: see `WeeChatApp::server_standing`.
+pub(crate) struct ServerStanding {
+    /// Our nick; empty if unknown.
+    pub nick: String,
+    pub oper: bool,
+    pub ircd: crate::ui::oper::Ircd,
+    /// Where the backend can't tell whether we're an oper, the `oper_servers` key the
+    /// user's say-so is kept under.
+    pub manual_key: Option<String>,
+}
+
 /// Per-connection runtime state (NOT serialised).
 pub struct ConnectionHandle {
     pub prefix: String,
@@ -470,6 +481,8 @@ pub struct ConnectionHandle {
     pub connection_log: VecDeque<String>,
     /// The last ZNC module command sent from the Connections window, and its output.
     pub znc_reply: Option<(String, Vec<String>)>,
+    /// Our nick, oper status and server software, by the `server` of the buffers.
+    pub server_status: HashMap<String, crate::relay::backend::ServerStatus>,
     #[allow(dead_code)] // held for Drop — kills the ssh process on disconnect
     pub ssh_tunnel: Option<crate::ui::ssh_tunnel::SshTunnel>,
 }
@@ -581,6 +594,10 @@ pub struct AppSettings {
     /// When each ZNC buffer was last read, which ZNC doesn't keep (see ui::znc).
     #[serde(default)]
     pub bouncer_read_markers: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    /// Servers where the user says they're an IRC operator, by `conn_prefix|server`,
+    /// for backends that can't tell (WeeChat, Injected).
+    #[serde(default)]
+    pub oper_servers: HashSet<String>,
 }
 
 fn default_true() -> bool { true }
@@ -637,6 +654,7 @@ impl Default for AppSettings {
             collapsed_servers: HashSet::new(),
             adaptive_theme: false,
             bouncer_read_markers: HashMap::new(),
+            oper_servers: HashSet::new(),
         }
     }
 }
@@ -762,6 +780,7 @@ pub struct WeeChatApp {
     pub(crate) muted_buffer_names: HashSet<String>,
     pub(crate) hidden_buffer_keys: HashSet<String>,
     pub(crate) bouncer_read_markers: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    pub(crate) oper_servers: HashSet<String>,
     pub(crate) znc_ui: crate::ui::znc::ZncUiState,
     /// Per-buffer cooldown tracking for OS notifications. Prevents a noisy channel
     /// from spamming the OS notification center.
@@ -998,6 +1017,7 @@ impl WeeChatApp {
             muted_buffer_names: settings.muted_buffer_names,
             hidden_buffer_keys: settings.hidden_buffer_keys,
             bouncer_read_markers: settings.bouncer_read_markers,
+            oper_servers: settings.oper_servers,
             znc_ui: Default::default(),
             last_notif_at: HashMap::new(),
             request_attention: false,
@@ -1270,6 +1290,38 @@ impl WeeChatApp {
         })
     }
 
+    /// Who we are on the server of `buffer_id`, for the menus.
+    pub(crate) fn server_standing(&self, buffer_id: &str) -> Option<ServerStanding> {
+        let conn = self.connections.iter().find(|c| buffer_id.starts_with(&format!("{}/", c.prefix)))?;
+        let buffer = self.buffer_by_id(buffer_id)?;
+        let status = conn.server_status.get(&buffer.server).cloned().unwrap_or_default();
+        let manual_key = (!conn.client.detects_oper()).then(|| format!("{}|{}", conn.prefix, buffer.server));
+        let oper = match &manual_key {
+            Some(key) => self.oper_servers.contains(key),
+            None => status.oper,
+        };
+        Some(ServerStanding { nick: status.nick, oper, ircd: crate::ui::oper::Ircd::from_software(&status.software), manual_key })
+    }
+
+    /// Entries from `ui::oper`: sent, or put in the input line to finish.
+    fn oper_menu(&mut self, ui: &mut egui::Ui, entries: Vec<Option<crate::ui::oper::OperAction>>) {
+        for entry in entries {
+            let Some(action) = entry else {
+                ui.separator();
+                continue;
+            };
+            if ui.button(action.label).clicked() {
+                if action.run {
+                    self.send_command(&action.command);
+                } else {
+                    self.input_text = action.command;
+                    self.focus_input = true;
+                }
+                ui.close();
+            }
+        }
+    }
+
     pub(crate) fn log_conn_for(&mut self, conn_prefix: &str, msg: impl Into<String>) {
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         let text = format!("[{}]  {}", ts, msg.into());
@@ -1398,6 +1450,7 @@ impl WeeChatApp {
             auto_reconnect: effective_auto_reconnect,
             connection_log: VecDeque::new(),
             znc_reply: None,
+            server_status: HashMap::new(),
             ssh_tunnel,
         };
 
@@ -1472,6 +1525,7 @@ impl eframe::App for WeeChatApp {
             collapsed_servers: self.collapsed_servers.clone(),
             adaptive_theme: self.adaptive_theme,
             bouncer_read_markers: self.bouncer_read_markers.clone(),
+            oper_servers: self.oper_servers.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
     }
@@ -1806,6 +1860,10 @@ impl eframe::App for WeeChatApp {
         let mut pending_buffer_command = None;
         let mut next_drag_buffer_id: Option<String> = None;
         let mut pending_mute: Option<(String, String, bool)> = None;
+        // An oper command to finish in a buffer's input line, and a server marked as one
+        // where we're an oper (or not).
+        let mut pending_input_fill: Option<(String, String)> = None;
+        let mut pending_oper_mark: Option<(String, bool)> = None;
         let mut pending_load_more: Option<(String, usize)> = None;
 
         #[cfg(target_os = "macos")]
@@ -2132,6 +2190,9 @@ impl eframe::App for WeeChatApp {
                                 let buf_kind = buffer.kind.clone();
                                 let buf_hidden = buffer.hidden;
                                 let buf_muted = buffer.muted;
+                                let buf_name = buffer.name.clone();
+                                let standing = matches!(buf_kind.as_str(), "server" | "channel")
+                                    .then(|| self.server_standing(&buffer.id)).flatten();
                                 resp.context_menu(|ui| {
                                     if buf_muted {
                                         if ui.button(format!("{} Unmute Buffer", icons::BELL)).clicked() {
@@ -2149,6 +2210,36 @@ impl eframe::App for WeeChatApp {
                                         if ui.button("Leave Channel").clicked() {
                                             pending_buffer_command = Some((buf_id.clone(), "/part".to_string()));
                                             ui.close();
+                                        }
+                                    }
+                                    if let Some(standing) = &standing {
+                                        let entries = match buf_kind.as_str() {
+                                            _ if !standing.oper => Vec::new(),
+                                            "server" => crate::ui::oper::server_actions(&standing.nick),
+                                            _ => crate::ui::oper::channel_actions(standing.ircd, &buf_name, &standing.nick),
+                                        };
+                                        if !entries.is_empty() {
+                                            ui.menu_button("Oper", |ui| {
+                                                for entry in entries {
+                                                    let Some(action) = entry else { ui.separator(); continue };
+                                                    if ui.button(action.label).clicked() {
+                                                        if action.run {
+                                                            pending_buffer_command = Some((buf_id.clone(), action.command));
+                                                        } else {
+                                                            pending_input_fill = Some((buf_id.clone(), action.command));
+                                                        }
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        // This backend can't tell whether we're an oper there.
+                                        if let (Some(key), "server") = (&standing.manual_key, buf_kind.as_str()) {
+                                            let mut oper = standing.oper;
+                                            if ui.checkbox(&mut oper, "IRC operator here").clicked() {
+                                                pending_oper_mark = Some((key.clone(), oper));
+                                                ui.close();
+                                            }
                                         }
                                     }
                                     if buf_hidden {
@@ -2243,6 +2334,18 @@ impl eframe::App for WeeChatApp {
             }
         }
 
+        if let Some((id, command)) = pending_input_fill {
+            self.select_buffer(id);
+            self.input_text = command;
+        }
+        if let Some((key, oper)) = pending_oper_mark {
+            if oper {
+                self.oper_servers.insert(key);
+            } else {
+                self.oper_servers.remove(&key);
+            }
+        }
+
         if let Some((id, cmd)) = pending_buffer_command {
             let hide = match cmd.as_str() {
                 "/buffer hide" => Some(true),
@@ -2279,6 +2382,7 @@ impl eframe::App for WeeChatApp {
         let current_buffer_topic = current_buf.map(|b| b.topic.clone()).unwrap_or_default();
         let current_buffer_modes = current_buf.map(|b| b.modes.clone()).unwrap_or_default();
         let current_buffer_kind = current_buf.map(|b| b.kind.clone()).unwrap_or_default();
+        let current_buffer_name = current_buf.map(|b| b.name.clone()).unwrap_or_default();
 
         // Chat content (messages, nick list, input) uses the chat font stack.
         let font_id = FontId::new(self.font_size, crate::ui::fonts::chat_family());
@@ -2308,6 +2412,15 @@ impl eframe::App for WeeChatApp {
                 self.nicklist_width = 180.0;
             }
             let nicks_max_w = (ctx.content_rect().width() * 0.30).max(80.0);
+            let standing = current_buffer_id.as_deref().and_then(|id| self.server_standing(id));
+            let we_oper = standing.as_ref().is_some_and(|s| s.oper);
+            let ircd = standing.as_ref().map_or(crate::ui::oper::Ircd::Generic, |s| s.ircd);
+            // Moderation shows unless we know our nick and it's below halfop here.
+            let we_moderate = we_oper || standing.as_ref()
+                .filter(|s| !s.nick.is_empty())
+                .and_then(|s| current_buffer_nicks.as_ref()?.iter().find(|n| n.name.eq_ignore_ascii_case(&s.nick)))
+                .is_none_or(|n| crate::ui::oper::can_moderate(&n.prefix));
+            let current_channel = (current_buffer_kind == "channel").then(|| current_buffer_name.clone());
             let nicks_resp = egui::Panel::right("nicks_panel_2")
                 .resizable(true)
                 .default_size(self.nicklist_width)
@@ -2394,9 +2507,7 @@ impl eframe::App for WeeChatApp {
                                                 }
                                             }
                                         });
-                                        // Shown to everyone: we don't track our own channel modes,
-                                        // and the server refuses these without the rights.
-                                        if current_buffer_kind == "channel" {
+                                        if current_buffer_kind == "channel" && we_moderate {
                                             ui.menu_button("Moderation", |ui| {
                                                 let op = if nick.prefix.contains('@') { "deop" } else { "op" };
                                                 let voice = if nick.prefix.contains('+') { "devoice" } else { "voice" };
@@ -2416,6 +2527,12 @@ impl eframe::App for WeeChatApp {
                                                         ui.close();
                                                     }
                                                 }
+                                            });
+                                        }
+                                        if we_oper {
+                                            ui.menu_button("Oper", |ui| {
+                                                let entries = crate::ui::oper::nick_actions(ircd, name, current_channel.as_deref());
+                                                self.oper_menu(ui, entries);
                                             });
                                         }
                                     });

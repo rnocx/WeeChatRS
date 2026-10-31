@@ -7,6 +7,7 @@ pub(crate) mod wallpaper;
 mod sysinfo;
 
 mod settings;
+mod oper;
 mod input;
 mod emoji;
 pub(crate) mod secure_storage;

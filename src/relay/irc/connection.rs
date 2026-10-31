@@ -1,6 +1,6 @@
 use base64::Engine as _;
 use super::{parser::{parse_attributes, IrcMessage}, IrcConfig, Shared};
-use crate::relay::backend::{BackendEvent, ZncNetwork};
+use crate::relay::backend::{BackendEvent, ServerStatus, ZncNetwork};
 use crate::relay::models::{Buffer, BufferActivity, Line, Nick};
 use chrono::{DateTime, Utc};
 use egui::Context as EguiContext;
@@ -102,6 +102,14 @@ struct Session {
     znc_echoes: Vec<(String, String)>,
     /// A new `*status ListNetworks` result, for `Shared`.
     znc_network_list: Option<Vec<ZncNetwork>>,
+    /// We hold user mode +o or +O.
+    oper: bool,
+    /// The server software, from `004`.
+    software: String,
+    /// The `ServerStatus` last sent, so it's only sent again on a change.
+    reported_status: Option<ServerStatus>,
+    /// The `MODE <nick>` sent after registering awaits its `221`, which isn't shown.
+    umode_query_pending: bool,
 }
 
 impl Session {
@@ -138,6 +146,10 @@ impl Session {
             znc_queries: VecDeque::new(),
             znc_echoes: Vec::new(),
             znc_network_list: None,
+            oper: false,
+            software: String::new(),
+            reported_status: None,
+            umode_query_pending: false,
         }
     }
 
@@ -483,6 +495,11 @@ fn expand_irc_command(buffer_id: &str, text: &str) -> Option<String> {
             if rest.is_empty() { None } else { Some(format!("WHOIS {}", rest)) }
         }
 
+        // /quote LINE  /raw LINE  →  LINE as it is
+        "quote" | "raw" => {
+            if rest.is_empty() { None } else { Some(rest.to_string()) }
+        }
+
         // /back  →  AWAY  (clears away status)
         "back" => Some("AWAY".to_string()),
 
@@ -605,7 +622,34 @@ async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
 
 // ── IRC → BackendEvent translation ───────────────────────────────────────────
 
+/// Apply user mode changes (`+iw-o`) to our oper status.
+fn apply_user_modes(session: &mut Session, modes: &str) {
+    let mut adding = true;
+    for c in modes.chars() {
+        match c {
+            '+' => adding = true,
+            '-' => adding = false,
+            'o' | 'O' => session.oper = adding,
+            _ => {}
+        }
+    }
+}
+
+/// `translate_message`, followed by a `ServerStatus` when our nick, oper status or
+/// the server software changed. A ZNC or soju login without a network has none.
 fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, config: &IrcConfig) -> Vec<BackendEvent> {
+    let mut events = translate_message(msg, session, line_counter, config);
+    if session.registered && !session.bouncer_control {
+        let status = ServerStatus { nick: session.our_nick.clone(), oper: session.oper, software: session.software.clone() };
+        if session.reported_status.as_ref() != Some(&status) {
+            session.reported_status = Some(status.clone());
+            events.push(BackendEvent::ServerStatus { buffer_id: "status".to_string(), status });
+        }
+    }
+    events
+}
+
+fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, config: &IrcConfig) -> Vec<BackendEvent> {
     let mut events = Vec::new();
     let has_sasl_creds = !config.password.is_empty();
 
@@ -773,6 +817,12 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
             // Buffers start empty on every connect, so there is nothing to skip.
             if session.is_znc && !session.bouncer_control && session.negotiated_caps.contains("znc.in/playback") {
                 session.znc_send("*playback", "PLAY * 0");
+            }
+            // Our user modes, for whether we're an oper: a bouncer may have opered
+            // before we attached.
+            if !session.bouncer_control {
+                session.whois_lines.push(format!("MODE {}", session.our_nick));
+                session.umode_query_pending = true;
             }
             // Connected must fire FIRST so the event handler clears stale buffers from
             // any previous session before we open the fresh status buffer below.
@@ -1352,9 +1402,62 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
         // 732 — RPL_MONLIST / 733 — ERR_MONLISTFULL: ignore silently
         "732" | "733" => {}
 
+        // 221 — RPL_UMODEIS: our user modes
+        "221" => {
+            let modes = msg.param(1).unwrap_or("");
+            apply_user_modes(session, modes);
+            if !std::mem::take(&mut session.umode_query_pending) {
+                *line_counter += 1;
+                events.push(BackendEvent::LineAdded {
+                    buffer_id: "status".to_string(),
+                    line: make_line(&line_counter.to_string(), "--", &format!("Your user modes: {}", modes), timestamp_from_msg(msg), false),
+                });
+            }
+        }
+
+        // 381 — RPL_YOUREOPER
+        "381" => {
+            session.oper = true;
+            let text = msg.params.last().map(String::as_str).unwrap_or("You are now an IRC operator");
+            *line_counter += 1;
+            events.push(BackendEvent::LineAdded {
+                buffer_id: "status".to_string(),
+                line: make_line(&line_counter.to_string(), "--", text, timestamp_from_msg(msg), false),
+            });
+        }
+
+        // A change of our own user modes; channel modes come back through NAMES.
+        "MODE" => {
+            if msg.param(0).is_some_and(|t| t.eq_ignore_ascii_case(&session.our_nick)) {
+                let modes = msg.param(1).unwrap_or("").to_string();
+                apply_user_modes(session, &modes);
+                *line_counter += 1;
+                events.push(BackendEvent::LineAdded {
+                    buffer_id: "status".to_string(),
+                    line: make_line(&line_counter.to_string(), "--", &format!("User mode {} for {}", modes, session.our_nick), timestamp_from_msg(msg), false),
+                });
+            }
+        }
+
         // Server info / ISUPPORT / MOTD / stats — route to status buffer
         "002" | "003" | "004" | "005" | "251" | "252" | "253" | "254" | "255" | "265" | "266"
         | "375" | "372" | "376" | "250" | "256" | "257" | "258" | "259" => {
+            if msg.command == "004" {
+                session.software = msg.param(2).unwrap_or("").to_string();
+            }
+            let text = msg.params.iter().skip(1).map(String::as_str).collect::<Vec<_>>().join(" ");
+            if !text.is_empty() {
+                *line_counter += 1;
+                events.push(BackendEvent::LineAdded {
+                    buffer_id: "status".to_string(),
+                    line: make_line(&line_counter.to_string(), "--", &text, timestamp_from_msg(msg), false),
+                });
+            }
+        }
+
+        // Other replies to commands typed in, such as STATS (2xx) and LINKS, and errors
+        // (no such nick, permission denied): to the status buffer.
+        cmd if matches!(cmd.as_bytes(), [b'2' | b'4' | b'5', b'0'..=b'9', b'0'..=b'9']) || cmd == "364" || cmd == "365" => {
             let text = msg.params.iter().skip(1).map(String::as_str).collect::<Vec<_>>().join(" ");
             if !text.is_empty() {
                 *line_counter += 1;
@@ -1776,6 +1879,54 @@ mod tests {
     }
 
     #[test]
+    fn oper_status_follows_user_modes() {
+        let config = config(Some("1"));
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let mut statuses = Vec::new();
+        let mut shown = Vec::new();
+        let mut run = |session: &mut Session, line: &str| {
+            for event in translate(&IrcMessage::parse(line).unwrap(), session, &mut counter, &config) {
+                match event {
+                    BackendEvent::ServerStatus { buffer_id, status } => {
+                        assert_eq!(buffer_id, "status");
+                        statuses.push((status.oper, status.software));
+                    }
+                    BackendEvent::LineAdded { line, .. } => shown.push(line.message),
+                    _ => {}
+                }
+            }
+        };
+        run(&mut session, ":irc.test 001 sam :Welcome");
+        assert!(take_write_queue(&mut session).contains(&"MODE sam".to_string()));
+        run(&mut session, ":irc.test 004 sam irc.test UnrealIRCd-6.1.8 iowx biklmnopstv");
+        // The answer to our own query isn't shown; nothing changed, so nothing is sent.
+        run(&mut session, ":irc.test 221 sam +iw");
+        run(&mut session, ":irc.test 381 sam :You are now an IRC operator");
+        run(&mut session, ":sam MODE sam :+o-x");
+        run(&mut session, ":sam MODE sam :-o");
+        run(&mut session, ":irc.test 221 sam +iwO");
+        run(&mut session, ":irc.test 481 sam :Permission Denied- You're not an IRC operator");
+        assert_eq!(statuses, vec![
+            (false, String::new()),
+            (false, "UnrealIRCd-6.1.8".to_string()),
+            (true, "UnrealIRCd-6.1.8".to_string()),
+            (false, "UnrealIRCd-6.1.8".to_string()),
+            (true, "UnrealIRCd-6.1.8".to_string()),
+        ]);
+        assert!(!shown.iter().any(|m| m.contains("+iw") && !m.contains("+iwO")));
+        assert!(shown.iter().any(|m| m == "Your user modes: +iwO"));
+        assert!(shown.iter().any(|m| m.contains("Permission Denied")));
+    }
+
+    #[test]
+    fn quote_sends_the_line_as_it_is() {
+        assert_eq!(expand_irc_command("#chan", "/quote KILL bob :spam").as_deref(), Some("KILL bob :spam"));
+        assert_eq!(expand_irc_command("status", "/raw STATS p").as_deref(), Some("STATS p"));
+        assert_eq!(expand_irc_command("status", "/quote"), None);
+    }
+
+    #[test]
     fn soju_login_without_network_lists_networks() {
         let config = config(None);
         let mut session = Session::new("sam");
@@ -2013,6 +2164,7 @@ mod tests {
         ] {
             events.extend(translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config));
         }
+        events.retain(|e| !matches!(e, BackendEvent::ServerStatus { .. }));
         match &events[..] {
             [BackendEvent::BouncerReply { command, lines }] => {
                 assert_eq!(command, "*controlpanel AddNetwork test gamma");

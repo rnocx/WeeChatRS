@@ -177,6 +177,8 @@ impl BackendClient for IrcClient {
         let _ = self.cmd_tx.send(IrcCommand::ZncCommand { module: module.to_string(), text: text.to_string() });
     }
 
+    fn detects_oper(&self) -> bool { true }
+
     fn fetch_lines_before(&self, buffer_id: &str, before_ts: &str) {
         self.route(buffer_id, |id| IrcCommand::FetchBefore {
             buffer_id: id.to_string(),
@@ -438,6 +440,7 @@ fn network_event(
             error,
         },
         BackendEvent::BouncerReply { command, lines } => BackendEvent::BouncerReply { command, lines },
+        BackendEvent::ServerStatus { buffer_id, status } => BackendEvent::ServerStatus { buffer_id: id(buffer_id), status },
         BackendEvent::_WeeChat(r) => BackendEvent::_WeeChat(r),
     }]
 }

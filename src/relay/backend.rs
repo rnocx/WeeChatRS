@@ -90,6 +90,13 @@ pub enum BackendEvent {
         lines: Vec<String>,
     },
 
+    /// Our nick, oper status and the server software on the server whose buffer
+    /// `buffer_id` is, sent whenever one of them changes.
+    ServerStatus {
+        buffer_id: String,
+        status: ServerStatus,
+    },
+
     /// Temporary tunnel for WeeChat relay responses until the event handler
     /// is fully migrated to BackendEvent in Phase 3.
     #[doc(hidden)]
@@ -170,6 +177,21 @@ pub trait BackendClient: Send {
     /// showing in the chat; the reply comes back as `BouncerReply`. Changes to the
     /// networks are followed by a fresh `znc_networks` list. Default is a no-op.
     fn znc_command(&self, _module: &str, _text: &str) {}
+
+    /// True if the backend reports whether we're an IRC operator (`ServerStatus`).
+    /// Where it doesn't, the user says so per server. Default is false.
+    fn detects_oper(&self) -> bool { false }
+}
+
+/// What we are on a server, for the menus.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServerStatus {
+    /// Our nick there; empty if unknown.
+    pub nick: String,
+    /// We're an IRC operator (user mode +o or +O).
+    pub oper: bool,
+    /// The server software from `004`, e.g. `UnrealIRCd-6.1.8`; empty if unknown.
+    pub software: String,
 }
 
 /// A network of a ZNC user, from a row of `*status ListNetworks`.
