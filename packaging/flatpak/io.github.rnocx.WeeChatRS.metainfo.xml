@@ -57,11 +57,6 @@
         <p>Menus with IRC operator commands, Moderation only where you can moderate, the Injected sign-in window on Linux, and the first Flatpak.</p>
       </description>
     </release>
-    <release version="0.9.4-rc1" date="2026-10-31" type="development">
-      <description>
-        <p>IRC operator menus, the Injected sign-in window on Linux, and the first Flatpak and Microsoft Store packages.</p>
-      </description>
-    </release>
     <release version="0.9.3" date="2026-10-30">
       <description>
         <p>ZNC support, an experimental Injected backend, a hand-picked set of themes, and hiding and muting buffers on every backend.</p>

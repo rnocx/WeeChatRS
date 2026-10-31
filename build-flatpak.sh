@@ -115,7 +115,9 @@ build() {
     if [ "${LINT}" = 1 ]; then
         echo "==> Linting..."
         local failed=0
-        flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest "${manifest}" || failed=1
+        # From the state dir: the check makes a .flatpak-builder folder where it runs,
+        # and the sandboxed linter can't write into a checkout it doesn't own (CI).
+        (cd "${state}" && flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest "${OLDPWD}/${manifest}") || failed=1
         flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo "${state}/repo" || failed=1
         if [ "${failed}" = 1 ]; then
             echo "ERROR: Flathub's linter found problems (above)"

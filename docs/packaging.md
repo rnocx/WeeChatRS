@@ -45,7 +45,9 @@ AppStream metainfo that Flathub and software centres show.
   - `/np` runs `playerctl`, which isn't in the runtime, so it finds no player, and
     `/sysinfo` shows less (no `lspci`).
 - **Version:** software centres show the newest `<release>` in the metainfo, so each
-  release adds one (`type="development"` for a release candidate).
+  release adds one, newest first. A release candidate is written `0.9.5~rc1` with
+  `type="development"`: AppStream sorts `0.9.5-rc1` after `0.9.5`, and the linter
+  rejects that order.
 
 Checked in a container on ARM64: it builds with no linter findings, both from the
 checkout and from a git tag; the app starts, and the sign-in window shows Injected's
