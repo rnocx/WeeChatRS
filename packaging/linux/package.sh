@@ -3,20 +3,26 @@
 # app gets a proper launcher/dock icon (Wayland matches app_id "weechatrs").
 # Used by build-linux.sh and the GitHub release workflow; run from the repo root.
 #
-#   packaging/linux/package.sh <binary> <arch> <version> <out dir>
+#   packaging/linux/package.sh <binary> <arch> <version> <out dir> [<login helper>]
 #     -> <out dir>/WeeChatRS-<version>-linux-<arch>.zip
+# The login helper (weechat-rs-login) is the Injected sign-in window, which needs
+# WebKitGTK 4.1; without it, the zip has no sign-in window.
 set -eu
 
 bin="$1"
 arch="$2"
 version="$3"
 out_dir="$4"
+helper="${5:-}"
 
 name="WeeChatRS-${version}-linux-${arch}"
 stage="${out_dir}/${name}"
 rm -rf "${stage}" "${stage}.zip"
 mkdir -p "${stage}/icons/256x256" "${stage}/icons/512x512"
 install -m755 "${bin}" "${stage}/weechat-rs"
+if [ -n "${helper}" ]; then
+    install -m755 "${helper}" "${stage}/weechat-rs-login"
+fi
 install -m644 packaging/linux/weechatrs.desktop "${stage}/"
 install -m755 packaging/linux/install.sh "${stage}/"
 install -m644 assets/icon.iconset/icon_256x256.png "${stage}/icons/256x256/weechatrs.png"

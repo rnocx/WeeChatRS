@@ -41,8 +41,10 @@ cargo build --release
 
 The binary then needs WebKitGTK 4.1 at run time too (`webkit2gtk4.1`,
 `libwebkit2gtk-4.1-0`). To build without the sign-in window, and without WebKitGTK,
-use `cargo build --release --no-default-features`; Injected connections then sign in
-by importing the desktop app's session or with a token. Window system, D-Bus and
+use `cargo build --release --no-default-features`. That binary starts the sign-in
+window from a separate `weechat-rs-login` next to it, as the release zips do (see
+below); without one, Injected connections sign in by importing the desktop app's
+session or with a token. Window system, D-Bus and
 keyring support need no development packages either way: they are loaded at run
 time or written in Rust.
 
@@ -56,12 +58,18 @@ zips that run on any distro from 2018 on, as released, use `./build-linux.sh`:
 ```
 
 It builds with [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) against
-glibc 2.28, the same way the release workflow does, on any Linux distro or on macOS,
-without Docker. Like the releases, these zips leave out the Injected sign-in window
-(`--no-default-features`), so they don't depend on WebKitGTK. It also needs `zip`,
+glibc 2.28, the same way the release workflow does, on any Linux distro or on macOS.
+`weechat-rs` is built without the Injected sign-in window (`--no-default-features`),
+so it doesn't depend on WebKitGTK. The window is a separate `weechat-rs-login`, which
+links WebKitGTK 4.1 and is built in an Ubuntu 22.04 container
+(`docker/Dockerfile.linux-login`, with Docker or Podman), so it needs glibc 2.34 and
+WebKitGTK 4.1 at run time; `weechat-rs` starts it when you sign in, and says which
+package to install if WebKitGTK is missing. Without Docker or Podman, or with
+`--no-login-helper`, the zips leave it out. By hand, on a distro with
+`libwebkit2gtk-4.1-dev`: `cargo build --release --bin weechat-rs-login`. It also needs `zip`,
 and fetches cargo-zigbuild and zig into `~/.cache` with python3 unless both are
 installed; it says what is missing and how to install it. Each zip holds the
-binary, a `weechatrs.desktop` entry, icons and `install.sh`. To install from the
+binary, the login helper, a `weechatrs.desktop` entry, icons and `install.sh`. To install from the
 zip:
 
 ```bash

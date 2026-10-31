@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Install WeeChatRS for the current user (no root needed):
 #   ~/.local/bin/weechat-rs
+#   ~/.local/bin/weechat-rs-login (the Injected sign-in window, if in the zip)
 #   ~/.local/share/applications/weechatrs.desktop
 #   ~/.local/share/icons/hicolor/<size>/apps/weechatrs.png
 # Run with --uninstall to remove those files again.
@@ -19,13 +20,17 @@ put() {
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
-    rm -f "$BIN_DIR/weechat-rs" "$DATA_DIR/applications/weechatrs.desktop"
+    rm -f "$BIN_DIR/weechat-rs" "$BIN_DIR/weechat-rs-login" "$DATA_DIR/applications/weechatrs.desktop"
     for s in $SIZES; do rm -f "$DATA_DIR/icons/hicolor/$s/apps/weechatrs.png"; done
     echo "WeeChatRS removed."
     exit 0
 fi
 
 put 755 "$HERE/weechat-rs" "$BIN_DIR/weechat-rs"
+# weechat-rs starts it from its own folder.
+if [ -f "$HERE/weechat-rs-login" ]; then
+    put 755 "$HERE/weechat-rs-login" "$BIN_DIR/weechat-rs-login"
+fi
 # Absolute Exec path, so the menu entry works even if BIN_DIR is not on PATH.
 mkdir -p "$DATA_DIR/applications"
 sed "s|^Exec=.*|Exec=$BIN_DIR/weechat-rs|" "$HERE/weechatrs.desktop" > "$DATA_DIR/applications/weechatrs.desktop"

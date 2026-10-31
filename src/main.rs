@@ -25,7 +25,7 @@ fn load_icon() -> egui::IconData {
 async fn main() -> eframe::Result<()> {
     #[cfg(feature = "injected-web-login")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--injected-login")) {
-        if relay::injected::web_login::run().is_err() { std::process::exit(1); }
+        if relay::injected::web_window::run().is_err() { std::process::exit(1); }
         return Ok(());
     }
     env_logger::init();

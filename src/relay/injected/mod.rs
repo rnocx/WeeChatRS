@@ -1,8 +1,12 @@
 //! Native Injected cloud client. Protocol mapped from the shipped 1.1.3 client.
 //! This connects to the account's saved networks; it does not embed Electron.
 pub(crate) mod login;
-#[cfg(feature = "injected-web-login")]
+#[cfg(web_login)]
+mod bridge;
+#[cfg(web_login)]
 pub(crate) mod web_login;
+#[cfg(feature = "injected-web-login")]
+pub(crate) mod web_window;
 mod protocol;
 mod session;
 

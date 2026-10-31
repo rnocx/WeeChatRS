@@ -3,6 +3,14 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/icon.ico");
     bundle_themes();
 
+    // Web sign-in to Injected: the window itself (feature injected-web-login), or on
+    // Linux builds without it, the separate weechat-rs-login helper.
+    println!("cargo::rustc-check-cfg=cfg(web_login)");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if std::env::var_os("CARGO_FEATURE_INJECTED_WEB_LOGIN").is_some() || target_os == "linux" {
+        println!("cargo:rustc-cfg=web_login");
+    }
+
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
