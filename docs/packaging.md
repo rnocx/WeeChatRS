@@ -7,58 +7,68 @@ is published yet; this page says how to build them and what publishing takes.
 ## Flatpak
 
 ```bash
-./build-flatpak.sh            # -> dist/flatpak/WeeChatRS-<version>-<arch>.flatpak
-./build-flatpak.sh --lint     # also runs Flathub's linter
+./build-flatpak.sh --lint     # -> dist/flatpak/WeeChatRS-<version>-<arch>.flatpak, and Flathub's linter
+./build-flatpak.sh --flathub  # the same from the release's git tag, as Flathub builds it
 flatpak install --user dist/flatpak/WeeChatRS-*.flatpak
 flatpak run io.github.rnocx.WeeChatRS
 ```
 
-The script uses `flatpak-builder` where it's installed, and otherwise a privileged
-container from `docker/Dockerfile.flatpak` (Docker or Podman, so it also works on
-macOS). It builds for the machine's own architecture; the first build downloads the
-GNOME runtime and SDK, about 1.5 GB. The crates come from `Cargo.lock` through
-Flatpak's `flatpak-cargo-generator` (pinned in the script), since Flathub builds
-offline.
+The script builds with Flathub's own builder (`org.flatpak.Builder`), as Flathub
+does: offline, with the screenshots and icon mirrored. With `--lint` it fails on
+anything Flathub's linter reports. It runs where `flatpak` is installed, and
+otherwise in a privileged container from `docker/Dockerfile.flatpak` (Docker or
+Podman, so it also works on macOS). The first build downloads the GNOME runtime and
+SDK, about 1.5 GB. The crates come from `Cargo.lock` through Flatpak's
+`flatpak-cargo-generator` (pinned in the script).
+
+It builds for the machine's own architecture: Flatpak's build sandbox doesn't work
+under emulation. The release workflow builds both, x86_64 and ARM64, each on its own
+runner.
 
 The files are in `packaging/flatpak/`: the manifest, the desktop entry and the
 AppStream metainfo that Flathub and software centres show.
 
-- **App ID:** `io.github.rnocx.WeeChatRS`. In a Flatpak the window's app_id and the
-  notifications use it, and the app doesn't install its own desktop entry.
+- **App ID:** `io.github.rnocx.WeeChatRS`. In a Flatpak the window's app_id uses it,
+  and the app doesn't install its own desktop entry.
 - **Runtime:** GNOME 51. It includes WebKitGTK 4.1, so the Injected sign-in window is
   built in and needs nothing installed on the host.
-- **Permissions** (`finish-args`): network; Wayland, with X11 as a fallback; the GPU;
-  desktop notifications; the keyring (Secret Service); read access to the Injected
-  desktop app's data, for session import; and the SSH agent and `~/.ssh` (read-only),
-  for SSH tunnels. File uploads and opening links go through the desktop portals.
-- **Not in the sandbox:** `/np` runs `playerctl`, which isn't in the runtime, so it
-  finds no player. The system info for `/sysinfo` is partial (no `lspci`). SSH can't
-  add new hosts to `~/.ssh/known_hosts`, which is read-only there.
+- **Permissions** (`finish-args`), kept to what portals don't cover: network;
+  Wayland, with X11 as a fallback; the GPU; the keyring (Secret Service), for
+  connection passwords; and for SSH tunnels the SSH agent, plus a `~/.ssh` of the
+  sandbox's own for `known_hosts`. Notifications, choosing files and folders, and
+  opening links go through portals.
+- **In the sandbox:**
+  - SSH tunnels authenticate with keys from the SSH agent; keys in the real `~/.ssh`
+    aren't visible.
+  - *Import Injected session* can't find the Injected app's data by itself; use
+    *Choose data folder…* (`~/.config/injected`) or sign in with the window.
+  - `/np` runs `playerctl`, which isn't in the runtime, so it finds no player, and
+    `/sysinfo` shows less (no `lspci`).
+- **Version:** software centres show the newest `<release>` in the metainfo, so each
+  release adds one (`type="development"` for a release candidate).
 
-Checked in a container on ARM64: the app starts, and the sign-in window shows
-Injected's login page. Not yet checked on a real desktop, or on x86_64.
+Checked in a container on ARM64: it builds with no linter findings, both from the
+checkout and from a git tag; the app starts, and the sign-in window shows Injected's
+login page. Not yet checked on a real desktop, or on x86_64.
 
 ### Publishing on Flathub
 
-1. The license files (`LICENSE-MIT`, `LICENSE-APACHE`) must be in the release that
-   the manifest builds; Flathub wants the license with the source.
-2. Fork [flathub/flathub](https://github.com/flathub/flathub), branch from `new-pr`,
-   and add `io.github.rnocx.WeeChatRS.yml` and `cargo-sources.json`. The manifest
-   is this repository's, with the `dir` source replaced by the release:
-
-   ```yaml
-   - type: git
-     url: https://github.com/rnocx/WeeChatRS.git
-     tag: v0.9.3
-     commit: <the tag's commit>
-   ```
-3. Open a pull request against `new-pr`. Reviewers check the permissions; Flathub
-   builds both architectures and mirrors the screenshots (the linter's
-   `appstream-external-screenshot-url` error goes away there).
-4. Once merged, Flathub creates `flathub/io.github.rnocx.WeeChatRS`. Each release is
-   a pull request there with the new tag, commit, `cargo-sources.json` and a
-   `<release>` entry in the metainfo. Verifying the app (the checkmark) goes through
-   the GitHub account `rnocx`, which owns the ID.
+1. Release a stable version (Flathub takes no release candidates for a new app) with
+   a `<release>` entry in the metainfo, and push its tag to GitHub: the app ID
+   points to `github.com/rnocx/WeeChatRS`, and Flathub builds from there.
+2. `./build-flatpak.sh --flathub --lint` builds that tag as Flathub will, and writes
+   `dist/flatpak/flathub/`: `io.github.rnocx.WeeChatRS.yml` (building the tag and
+   its commit from GitHub) and `cargo-sources.json`.
+3. Fork [flathub/flathub](https://github.com/flathub/flathub) with *Copy the master
+   branch only* unticked, branch from `new-pr`, add those two files, and open a pull
+   request against `new-pr` titled "Add io.github.rnocx.WeeChatRS". Explain the
+   permissions in it: the keyring for passwords, and the SSH agent and `.ssh` for
+   tunnels. Comment `bot, build` for a test build on Flathub's builders.
+4. Once accepted, Flathub creates `flathub/io.github.rnocx.WeeChatRS`; accept the
+   invitation within a week (with 2FA on). Each release is then a pull request there
+   with the new tag, commit, `cargo-sources.json` and metainfo `<release>`. Verify the
+   app in Flathub's Developer Portal by logging in as `rnocx`, the owner of the GitHub
+   repository.
 
 ## MSIX (Microsoft Store)
 

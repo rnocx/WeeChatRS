@@ -128,8 +128,33 @@ jobs:
           path: dist/macos/*.dmg
           if-no-files-found: error
 
+  flatpak:
+    # build-flatpak.sh in its container, with Flathub's builder and linter. Flatpak's
+    # build sandbox doesn't work under emulation, so each architecture on its own
+    # runner.
+    needs: version
+    # Not yet tested on Flathub; a failure leaves the Flatpak out of the release
+    # instead of holding it up.
+    continue-on-error: true
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: ./build-flatpak.sh --lint
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-${{ matrix.arch }}
+          path: dist/flatpak/*.flatpak
+          if-no-files-found: error
+
   release:
-    needs: [version, linux, windows, macos]
+    needs: [version, linux, windows, macos, flatpak]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
