@@ -24,4 +24,5 @@ RUN mkdir -p .cargo && printf '[target.aarch64-pc-windows-gnullvm]\nlinker = "aa
 
 RUN cargo build --release --jobs 2 --target aarch64-pc-windows-gnullvm 2>&1
 
-RUN cp target/aarch64-pc-windows-gnullvm/release/weechat-rs.exe /weechat-rs-windows-aarch64.exe
+RUN cp target/aarch64-pc-windows-gnullvm/release/weechat-rs.exe /weechat-rs-windows-aarch64.exe \
+    && cp target/aarch64-pc-windows-gnullvm/release/build/webview2-com-sys-*/out/arm64/WebView2Loader.dll /WebView2Loader-aarch64.dll

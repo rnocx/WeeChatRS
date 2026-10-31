@@ -94,8 +94,10 @@ jobs:
       - name: Package
         run: |
           mkdir -p out
+          # A MinGW build links to WebView2Loader.dll; Windows won't start it without.
+          loader=$(ls -t target/x86_64-pc-windows-gnu/release/build/webview2-com-sys-*/out/x64/WebView2Loader.dll | head -1)
           zip -j "out/WeeChatRS-${{ needs.version.outputs.version }}-windows-x86_64.zip" \
-            target/x86_64-pc-windows-gnu/release/weechat-rs.exe
+            target/x86_64-pc-windows-gnu/release/weechat-rs.exe "$loader"
       - uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64

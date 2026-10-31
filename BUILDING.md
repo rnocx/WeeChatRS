@@ -110,7 +110,8 @@ cargo build --release
 ## Cross-compile for Windows from macOS or Linux
 
 `./build-windows.sh` builds the release zip,
-`dist/windows/WeeChatRS-<version>-windows-x86_64.zip`. It uses the MinGW
+`dist/windows/WeeChatRS-<version>-windows-x86_64.zip`, with `weechat-rs.exe` and
+`WebView2Loader.dll`. It uses the MinGW
 cross-compiler when it's installed:
 
 ```bash
@@ -131,6 +132,11 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
   cargo build --release --target x86_64-pc-windows-gnu
 # output: target/x86_64-pc-windows-gnu/release/weechat-rs.exe
 ```
+
+The .exe needs `WebView2Loader.dll` in the same folder, or Windows won't start it: the
+Injected sign-in window links to it. The build leaves it in
+`target/x86_64-pc-windows-gnu/release/build/webview2-com-sys-*/out/x64/`. A build with
+`--no-default-features` has no sign-in window and doesn't need it.
 
 ## Run in development mode
 

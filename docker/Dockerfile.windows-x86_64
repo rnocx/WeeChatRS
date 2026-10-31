@@ -15,4 +15,5 @@ RUN mkdir -p .cargo && printf '[target.x86_64-pc-windows-gnu]\nlinker = "x86_64-
 
 RUN cargo build --release --jobs 2 --target x86_64-pc-windows-gnu 2>&1
 
-RUN cp target/x86_64-pc-windows-gnu/release/weechat-rs.exe /weechat-rs-windows-x86_64.exe
+RUN cp target/x86_64-pc-windows-gnu/release/weechat-rs.exe /weechat-rs-windows-x86_64.exe \
+    && cp target/x86_64-pc-windows-gnu/release/build/webview2-com-sys-*/out/x64/WebView2Loader.dll /WebView2Loader-x86_64.dll

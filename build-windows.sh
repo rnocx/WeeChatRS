@@ -34,7 +34,10 @@ if ! command -v zip >/dev/null; then
 fi
 mkdir -p "${OUT_DIR}"
 EXE="${OUT_DIR}/weechat-rs.exe"
-rm -f "${EXE}"
+# The Injected sign-in window (WebView2) needs Microsoft's loader DLL next to the
+# .exe: a MinGW build links to it, so without it Windows won't start the program.
+DLL="${OUT_DIR}/WebView2Loader.dll"
+rm -f "${EXE}" "${DLL}"
 
 # Build in a container from docker/Dockerfile.windows-<arch> and copy the .exe out.
 build_in_container() {
@@ -51,6 +54,7 @@ build_in_container() {
     local cid
     cid=$("${engine}" create "${image}" /bin/true)
     "${engine}" cp "${cid}:/weechat-rs-windows-${ARCH}.exe" "${EXE}"
+    "${engine}" cp "${cid}:/WebView2Loader-${ARCH}.dll" "${DLL}"
     "${engine}" rm "${cid}" > /dev/null
 }
 
@@ -60,15 +64,22 @@ if [ "${ARCH}" = "x86_64" ] && command -v x86_64-w64-mingw32-gcc >/dev/null; the
     CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
         cargo build --release --target x86_64-pc-windows-gnu
     cp "${TARGET_DIR}/x86_64-pc-windows-gnu/release/weechat-rs.exe" "${EXE}"
+    # webview2-com-sys's build script leaves it in its out dir; the newest is this build's.
+    LOADER=$(ls -t "${TARGET_DIR}"/x86_64-pc-windows-gnu/release/build/webview2-com-sys-*/out/x64/WebView2Loader.dll 2>/dev/null | head -1)
+    if [ -z "${LOADER}" ]; then
+        echo "ERROR: WebView2Loader.dll not found in the build output"
+        exit 1
+    fi
+    cp "${LOADER}" "${DLL}"
 else
     build_in_container
 fi
 
-# The same zip the release workflow makes: just weechat-rs.exe.
+# The same zip the release workflow makes: weechat-rs.exe and WebView2Loader.dll.
 ZIP="${OUT_DIR}/WeeChatRS-${VERSION}-windows-${ARCH}.zip"
 rm -f "${ZIP}"
-zip -qj "${ZIP}" "${EXE}"
-rm -f "${EXE}"
+zip -qj "${ZIP}" "${EXE}" "${DLL}"
+rm -f "${EXE}" "${DLL}"
 
 echo ""
 echo "==> Done: ${ZIP}"
