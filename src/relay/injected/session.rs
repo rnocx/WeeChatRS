@@ -4,7 +4,7 @@ use super::{
 };
 use crate::relay::irc::connection::{irc_to_ansi, nick_color_ansi};
 use crate::relay::{
-    backend::BackendEvent,
+    backend::{BackendEvent, ServerStatus},
     models::{Buffer, BufferActivity, Line, Nick},
 };
 use chrono::{DateTime, Utc};
@@ -561,6 +561,11 @@ impl State {
             }
         }
     }
+    /// Our nick on `server`, for the menus. Whether we're an oper isn't known here.
+    fn report_nick(&self, server: &str) {
+        let nick = self.nicks.get(server).cloned().unwrap_or_default();
+        self.emit(BackendEvent::ServerStatus { buffer_id: buffer_id(server, "@status"), status: ServerStatus { nick, ..Default::default() } });
+    }
     fn send_chat(&mut self, server: &str, target: &str, text: &str, action: bool) {
         let id = self.open(server, target);
         let who = self.nicks.get(server).cloned().unwrap_or_default();
@@ -685,6 +690,7 @@ impl State {
                 let who=string(&v,"nickname");
                 if !who.is_empty() { self.nicks.insert(server.clone(),who.into()); }
                 let id=self.open(&server,"@status");
+                self.report_nick(&server);
                 let status=string(&v,"status");
                 let line=Line::new(format!("state-{}",self.sequence),Utc::now(),"--".into(),format!("Network {}{}",status,if v["error"].is_string() {" (server reported an error)"} else {""}),true,false);
                 self.sequence+=1;
@@ -757,7 +763,7 @@ impl State {
             }
             "irc:event:nick"=> {
                 let old=string(&v,"oldNick"); let new=string(&v,"newNick");
-                if self.nicks.get(&server).map(|n|casefold(n)==casefold(old)).unwrap_or(false) {self.nicks.insert(server.clone(),new.into());}
+                if self.nicks.get(&server).map(|n|casefold(n)==casefold(old)).unwrap_or(false) {self.nicks.insert(server.clone(),new.into()); self.report_nick(&server);}
                 let ids:Vec<_>=self.buffers.iter().filter(|(_, (s,_))| s==&server).map(|(id,_)|id.clone()).collect();
                 for id in ids {
                     let mut renamed=false;
@@ -770,6 +776,9 @@ impl State {
             "irc:event:mode"=> {
                 let channel=string(&v,"channel");
                 if !channel.is_empty() { self.names(&buffer_id(&server,channel)); }
+                // Not a channel's: perhaps our user modes. Logged until we know its shape,
+                // to tell whether we're an oper.
+                else { self.emit(BackendEvent::ConnLog(format!("Injected mode event: {}",v))); }
             }
             "irc:event:whois" => {
                 let id = self.open(&server, "@status");
