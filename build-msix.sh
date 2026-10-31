@@ -59,11 +59,13 @@ unzip -q -o "${ZIP}" -d "${STAGE}"
 for f in weechat-rs.exe WebView2Loader.dll; do
     [ -f "${STAGE}/${f}" ] || { echo "ERROR: ${f} not in ${ZIP}"; exit 1; }
 done
-# The Store wants a four-part version whose last part is 0.
+# The Store wants a four-part version whose last part is 0, without a pre-release
+# suffix: 0.9.4-rc1 packs as 0.9.4.0, like 0.9.4 itself.
+MSIX_VERSION="${VERSION%%-*}.0"
 sed -e "s|@IDENTITY_NAME@|${IDENTITY_NAME}|" \
     -e "s|@PUBLISHER@|${PUBLISHER}|" \
     -e "s|@PUBLISHER_DISPLAY_NAME@|${PUBLISHER_NAME}|" \
-    -e "s|@VERSION@|${VERSION}.0|" \
+    -e "s|@VERSION@|${MSIX_VERSION}|" \
     packaging/msix/AppxManifest.xml > "${STAGE}/AppxManifest.xml"
 cp assets/icon.iconset/icon_512x512.png "${OUT_DIR}/icon.png"
 

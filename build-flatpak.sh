@@ -4,7 +4,9 @@ set -euo pipefail
 # Builds the Flatpak from this checkout, for this machine's architecture.
 #
 #   ./build-flatpak.sh            -> dist/flatpak/WeeChatRS-<version>-<arch>.flatpak
-#   ./build-flatpak.sh --lint     also runs Flathub's linter on the manifest and build
+#   ./build-flatpak.sh --lint     also runs Flathub's linter
+#   ./build-flatpak.sh --x86_64   in the container, for another architecture (or
+#                                 --aarch64), emulated where it isn't this machine's on the manifest and build
 #
 # Install the bundle with:  flatpak install --user dist/flatpak/WeeChatRS-*.flatpak
 #
@@ -23,11 +25,14 @@ VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 TOOLS_COMMIT="41c20aa10819cdb2a4f3ca171758a96d1955c018"
 
 LINT=0
+PLATFORM=()
 for arg in "$@"; do
     case "$arg" in
         --lint) LINT=1 ;;
         --inside) ;;
-        *) echo "Usage: $0 [--lint]"; exit 1 ;;
+        --x86|--x86_64) PLATFORM=(--platform linux/amd64) ;;
+        --arm64|--aarch64) PLATFORM=(--platform linux/arm64) ;;
+        *) echo "Usage: $0 [--lint] [--x86_64|--aarch64]"; exit 1 ;;
     esac
 done
 
@@ -63,7 +68,7 @@ build() {
     ls -lh "${bundle}"
 }
 
-if [ "${1:-}" = "--inside" ] || command -v flatpak-builder >/dev/null; then
+if [ "${1:-}" = "--inside" ] || { command -v flatpak-builder >/dev/null && [ ${#PLATFORM[@]} -eq 0 ]; }; then
     if ! flatpak remotes --columns=name | grep -qx flathub; then
         flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
     fi
@@ -81,11 +86,14 @@ if [ -z "${engine}" ]; then
     exit 1
 fi
 echo "==> Building in a container with ${engine}..."
-"${engine}" build -q -f docker/Dockerfile.flatpak -t weechat-rs-flatpak-builder docker >/dev/null
-# Flatpak's runtimes and the build state live in volumes, so later builds reuse them.
-"${engine}" run --rm --privileged \
+"${engine}" build -q ${PLATFORM[@]+"${PLATFORM[@]}"} -f docker/Dockerfile.flatpak -t weechat-rs-flatpak-builder docker >/dev/null
+# Flatpak's runtimes and the build state live in volumes (one set per architecture),
+# so later builds reuse them.
+suffix=""
+[ ${#PLATFORM[@]} -gt 0 ] && suffix="-${PLATFORM[1]#linux/}"
+"${engine}" run --rm --privileged ${PLATFORM[@]+"${PLATFORM[@]}"} \
     -v "$PWD:/src" \
-    -v weechat-rs-flatpak-system:/var/lib/flatpak \
-    -v weechat-rs-flatpak-state:/state \
+    -v "weechat-rs-flatpak-system${suffix}:/var/lib/flatpak" \
+    -v "weechat-rs-flatpak-state${suffix}:/state" \
     -e FLATPAK_STATE_DIR=/state \
     weechat-rs-flatpak-builder ./build-flatpak.sh --inside "$@"
