@@ -239,19 +239,36 @@ fn nick_styles_in_chat<'a>(lines: impl Iterator<Item = &'a Line>) -> HashMap<Str
         if !is_chat_prefix(&line.plain_prefix) {
             continue;
         }
-        // The nick is the last part with a letter or digit; mode characters (@, +) and
-        // weechat.look.nick_prefix/suffix usually come in parts of their own colour.
-        let Some(part) = line.parsed_prefix.iter().rev().find(|s| s.text.chars().any(char::is_alphanumeric)) else {
-            continue;
-        };
-        let name = part.text.trim()
-            .trim_start_matches(|c: char| "~&@%+!<(".contains(c))
-            .trim_end_matches(|c: char| ">):".contains(c));
-        if !name.is_empty() {
+        if let Some((name, part)) = prefix_nick(line) {
             styles.insert(name.to_string(), part.style);
         }
     }
     styles
+}
+
+/// The nick in a chat line's prefix, and the part of the prefix it is in. The nick is
+/// the last part with a letter or digit; mode characters (@, +) and
+/// weechat.look.nick_prefix/suffix usually come in parts of their own colour.
+fn prefix_nick(line: &Line) -> Option<(&str, &crate::ui::ansi::ANSISection)> {
+    let part = line.parsed_prefix.iter().rev().find(|s| s.text.chars().any(char::is_alphanumeric))?;
+    let name = part.text.trim()
+        .trim_start_matches(|c: char| "~&@%+!<(".contains(c))
+        .trim_end_matches(|c: char| ">):".contains(c));
+    (!name.is_empty()).then_some((name, part))
+}
+
+/// The colour WeeChat gives a nick mode in chat (irc.color.nick_prefixes), as a
+/// theme colour: owner and admin, op, halfop, voice, and others.
+fn nick_mode_style(mode: char) -> crate::ui::ansi::AnsiStyle {
+    let slot = match mode {
+        '~' => 9,
+        '&' => 14,
+        '@' => 10,
+        '%' => 13,
+        '+' => 11,
+        _ => 12,
+    };
+    crate::ui::ansi::AnsiStyle { fg: crate::ui::ansi::AnsiColor::Indexed(slot), ..Default::default() }
 }
 
 /// [`nick_styles_in_chat`] for the selected buffer, rebuilt when its lines change.
@@ -538,6 +555,10 @@ pub struct AppSettings {
     /// Show the nick only once for consecutive messages from the same nick.
     #[serde(default = "default_true")]
     pub group_messages: bool,
+    /// Put the nick's channel mode (@, %, +…) before it in chat, on IRC, soju, ZNC
+    /// and Injected. WeeChat does this itself (irc.look.nick_mode).
+    #[serde(default)]
+    pub show_nick_modes: bool,
     /// Draw 256-colour and RGB colours (WeeChat nick colours, mostly) in the nearest of
     /// the theme's 16 colours. Not applied to the Default theme.
     #[serde(default = "default_true")]
@@ -635,6 +656,7 @@ impl Default for AppSettings {
             blur_background: true,
             show_hidden_buffers: false,
             group_messages: true,
+            show_nick_modes: false,
             fit_colors_to_theme: true,
             buffer_order: Vec::new(),
             cleared_buffer_ids: HashSet::new(),
@@ -721,6 +743,7 @@ pub struct WeeChatApp {
     applied_blur: Option<bool>,
     pub(crate) show_hidden_buffers: bool,
     pub(crate) group_messages: bool,
+    pub(crate) show_nick_modes: bool,
     pub(crate) fit_colors_to_theme: bool,
 
     // Image preview state
@@ -997,6 +1020,7 @@ impl WeeChatApp {
             applied_blur: None,
             show_hidden_buffers: settings.show_hidden_buffers,
             group_messages: settings.group_messages,
+            show_nick_modes: settings.show_nick_modes,
             fit_colors_to_theme: settings.fit_colors_to_theme,
             image_cache: HashMap::new(),
             image_expanded: HashSet::new(),
@@ -1521,6 +1545,7 @@ impl eframe::App for WeeChatApp {
             blur_background: self.blur_background,
             show_hidden_buffers: self.show_hidden_buffers,
             group_messages: self.group_messages,
+            show_nick_modes: self.show_nick_modes,
             fit_colors_to_theme: self.fit_colors_to_theme,
             buffer_order: self.buffer_order.clone(),
             cleared_buffer_ids: self.cleared_buffer_ids.clone(),
@@ -2402,6 +2427,16 @@ impl eframe::App for WeeChatApp {
         let current_buffer_modes = current_buf.map(|b| b.modes.clone()).unwrap_or_default();
         let current_buffer_kind = current_buf.map(|b| b.kind.clone()).unwrap_or_default();
         let current_buffer_name = current_buf.map(|b| b.name.clone()).unwrap_or_default();
+        // Each nick's highest channel mode, to show before it in chat. WeeChat puts it in
+        // the prefix itself.
+        let chat_nick_modes: Option<HashMap<String, char>> = (self.show_nick_modes && current_buffer_kind == "channel")
+            .then(|| current_buffer_id.as_deref())
+            .flatten()
+            .filter(|id| !self.saved_state_key(id).is_some_and(|(_, weechat)| weechat))
+            .and_then(|_| current_buffer_nicks.as_ref())
+            .map(|nicks| nicks.iter()
+                .filter_map(|n| Some((n.name.to_lowercase(), n.prefix.chars().find(|c| !c.is_whitespace())?)))
+                .collect());
 
         // Chat content (messages, nick list, input) uses the chat font stack.
         let font_id = FontId::new(self.font_size, crate::ui::fonts::chat_family());
@@ -3050,10 +3085,17 @@ impl eframe::App for WeeChatApp {
                                             }
                                         }
                                         let prefix_sections = &line.parsed_prefix;
+                                        let nick_mode = chat_nick_modes.as_ref()
+                                            .filter(|_| is_chat_prefix(&line.plain_prefix))
+                                            .and_then(|modes| modes.get(&prefix_nick(line)?.0.to_lowercase()).copied());
 
                                         // Measure plain-text width for stable column tracking.
                                         let measured_w = ui.fonts_mut(|f| {
-                                            f.layout_no_wrap(line.plain_prefix.clone(), font_id.clone(), Color32::WHITE).size().x
+                                            let text = match nick_mode {
+                                                Some(mode) => format!("{mode}{}", line.plain_prefix),
+                                                None => line.plain_prefix.clone(),
+                                            };
+                                            f.layout_no_wrap(text, font_id.clone(), Color32::WHITE).size().x
                                         });
                                         let cap_px = if self.prefix_align_max > 0 {
                                             ui.fonts_mut(|f| {
@@ -3072,6 +3114,9 @@ impl eframe::App for WeeChatApp {
                                             |ui| {
                                                 let mut prefix_job = LayoutJob::default();
                                                 prefix_job.halign = egui::Align::RIGHT;
+                                                if let Some(mode) = nick_mode {
+                                                    prefix_job.append(&mode.to_string(), 0.0, nick_mode_style(mode).to_format(font_id.clone(), &render_theme));
+                                                }
                                                 for s in prefix_sections {
                                                     prefix_job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &render_theme));
                                                 }

@@ -285,6 +285,8 @@ impl WeeChatApp {
         ui.checkbox(&mut self.show_timestamps, "Show timestamps");
         ui.checkbox(&mut self.group_messages, "Group consecutive messages from the same nick");
         hint(ui, "Shows the nick once for messages sent within 5 minutes of each other; hover a line for its time.");
+        ui.checkbox(&mut self.show_nick_modes, "Show nick modes (@, %, +) in chat");
+        hint(ui, "On IRC, soju, ZNC and Injected, from the nick list. WeeChat shows them by its own option, irc.look.nick_mode.");
         ui.checkbox(&mut self.show_filtered_lines, "Show filtered lines");
         ui.checkbox(&mut self.colored_nicks, "Coloured nicknames in the nick list");
         ui.checkbox(&mut self.emoji_rendering, "Colour emoji rendering");
