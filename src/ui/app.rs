@@ -2437,7 +2437,9 @@ impl eframe::App for WeeChatApp {
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
                     ui.add_space(8.0);
-                    ScrollArea::vertical().show(ui, |ui| {
+                    // As wide as the panel: shrunk to the nicks, the bar sat where the
+                    // longest nick ended instead of at the panel's edge.
+                    ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
                             if let Some(nicks) = &current_buffer_nicks {
                                 for nick in nicks.iter() {
                                     let text = format!("{}{}", nick.prefix, nick.name);
