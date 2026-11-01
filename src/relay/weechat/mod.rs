@@ -294,6 +294,14 @@ impl BackendClient for WeeChatClient {
                                         send!(BackendEvent::Disconnected);
                                         break;
                                     }
+                                    // A quiet relay sends nothing; its pong keeps a live
+                                    // connection from looking dead above.
+                                    if last_received.elapsed() >= Duration::from_secs(55) {
+                                        if let Err(e) = ws_tx.send(Message::Ping(Vec::new().into())).await {
+                                            send!(BackendEvent::Error(format!("Send error: {}", e)));
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }
