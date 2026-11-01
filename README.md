@@ -16,7 +16,7 @@
 
 - **One client for WeeChat and IRC**: a WeeChat Relay (API v2 over WebSocket), any IRC server, or a soju or ZNC bouncer, side by side.
 - **Every bouncer network from one login**: each network in its own group; history, unread counts and ZNC network management included.
-- **Themes**: a hand-picked set bundled (Darkweb, Catppuccin, Dracula, Gruvbox, Nord, TokyoNight and more), any Ghostty theme of your own, or colours taken from your wallpaper.
+- **Themes**: a hand-picked set bundled (Darkweb, Catppuccin, Dracula, Gruvbox, Nord, TokyoNight and more), any Ghostty theme of your own, or colours taken from your wallpaper. Pick a dark and a light theme to follow the system's appearance.
 - **Inline images and link previews**, file sharing with `/share`, and `/np` for what's playing.
 - **WeeChat's options as a real settings table** with `/fset`.
 - **Native on macOS, Linux and Windows**, with desktop notifications and an SSH tunnel built in.

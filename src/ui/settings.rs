@@ -171,6 +171,10 @@ impl WeeChatApp {
     /// Settings as its own native window (an in-app window where the platform can't open
     /// more windows). Call once per frame from the main viewport.
     pub(crate) fn show_settings_window(&mut self, ctx: &egui::Context, accent_color: Color32, is_light: bool) {
+        if !self.show_settings || self.settings_section != SettingsSection::Theme {
+            // Back to the theme in use the next time the Theme page opens.
+            self.editing_light_theme = None;
+        }
         if !self.show_settings {
             self.settings_window_pos = None;
             return;
@@ -479,8 +483,79 @@ impl WeeChatApp {
         }
     }
 
+    /// Whether the app is drawn in the light theme: following the system and it asks
+    /// for light, or the Theme page is open on the light theme.
+    pub(crate) fn shows_light_theme(&self) -> bool {
+        if !self.follow_system_theme {
+            return false;
+        }
+        match self.editing_light_theme {
+            Some(light) if self.show_settings && self.settings_section == SettingsSection::Theme => light,
+            _ => self.system_light,
+        }
+    }
+
     fn theme_section(&mut self, ui: &mut egui::Ui, p: &Palette) {
         section_heading(ui, "Colour scheme");
+        ui.add_enabled_ui(!self.adaptive_theme, |ui| self.follow_system_controls(ui));
+        // The controls below change `theme`, so the light theme takes its place while
+        // they're drawn.
+        let light = self.follow_system_theme && self.editing_light_theme.unwrap_or(self.system_light);
+        if light {
+            std::mem::swap(&mut self.theme, &mut self.light_theme);
+        }
+        self.theme_controls(ui, p, light);
+        if light {
+            std::mem::swap(&mut self.theme, &mut self.light_theme);
+        }
+    }
+
+    fn follow_system_controls(&mut self, ui: &mut egui::Ui) {
+        let mut follow = self.follow_system_theme;
+        ui.checkbox(&mut follow, "Follow the system's light or dark appearance");
+        if follow != self.follow_system_theme {
+            self.follow_system_theme = follow;
+            self.editing_light_theme = None;
+            if let Some(theme) = self.theme_before_preview.take() {
+                self.theme = theme;
+            }
+            if follow {
+                // A light theme picked before is the light one from now on.
+                if self.theme.is_light() {
+                    self.light_theme = std::mem::replace(&mut self.theme, crate::ui::theme::default_theme());
+                }
+            } else if self.system_light {
+                // Keep the theme that was showing.
+                self.theme = self.light_theme.clone();
+            }
+        }
+        if !self.follow_system_theme {
+            return;
+        }
+        let editing_light = self.editing_light_theme.unwrap_or(self.system_light);
+        let mut light = editing_light;
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut light, false, format!("Dark: {}", self.theme.name));
+            ui.selectable_value(&mut light, true, format!("Light: {}", self.light_theme.name));
+        });
+        if light != editing_light {
+            // Undo an arrow-key preview in the theme being left.
+            if let Some(theme) = self.theme_before_preview.take() {
+                if editing_light { self.light_theme = theme } else { self.theme = theme }
+            }
+            self.editing_light_theme = Some(light);
+        }
+        if ui.ctx().system_theme().is_none() {
+            hint(ui, "The system doesn't say whether it's light or dark, so the dark theme is used.");
+        } else {
+            hint(ui, "The settings below change the selected theme, and the app shows it while this page is open.");
+        }
+        ui.add_space(4.0);
+    }
+
+    /// The theme picker, quick themes and colours, all changing `theme`; `light` when
+    /// that is the light theme for now (Reset then picks the default light theme).
+    fn theme_controls(&mut self, ui: &mut egui::Ui, p: &Palette, light: bool) {
         ui.add_enabled_ui(!self.adaptive_theme, |ui| {
             ui.horizontal(|ui| {
                 self.theme_picker(ui);
@@ -490,7 +565,7 @@ impl WeeChatApp {
                             .fill(p.danger)
                             .min_size(Vec2::new(70.0, 24.0))
                     ).clicked() {
-                        self.theme = crate::ui::theme::default_theme();
+                        self.theme = if light { crate::ui::theme::default_light_theme() } else { crate::ui::theme::default_theme() };
                     }
                     if ui.add(
                         egui::Button::new(RichText::new("Import Ghostty theme…").color(p.accent))

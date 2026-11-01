@@ -69,6 +69,12 @@ impl AppTheme {
         }
     }
 
+    /// A light background, on which the app draws dark text and light chrome.
+    pub fn is_light(&self) -> bool {
+        let bg = self.background.map(Color32::from).unwrap_or(Color32::from_rgb(18, 18, 18));
+        0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32 > 140.0
+    }
+
     /// A Ghostty theme file: `palette = N=#rrggbb`, `background = #rrggbb`,
     /// `foreground = #rrggbb`. Other keys (cursor, selection) are ignored. None when
     /// the text sets none of these.
@@ -134,6 +140,13 @@ pub fn default_theme() -> AppTheme {
     find_theme(DEFAULT_THEME).cloned().unwrap_or_else(AppTheme::default)
 }
 
+/// The light theme of a new install, used while following the system's appearance.
+pub const DEFAULT_LIGHT_THEME: &str = "Catppuccin Latte";
+
+pub fn default_light_theme() -> AppTheme {
+    find_theme(DEFAULT_LIGHT_THEME).cloned().unwrap_or_else(AppTheme::default)
+}
+
 /// Themes with a quick button on the Theme page, after the default one.
 pub const QUICK_THEMES: [&str; 8] = [
     "Catppuccin Mocha", "Catppuccin Latte", "Dracula", "Gruvbox Dark",
@@ -191,6 +204,13 @@ fn user_theme_dirs() -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_themes_are_dark_and_light() {
+        assert!(!default_theme().is_light());
+        assert!(default_light_theme().is_light());
+        assert_eq!(default_light_theme().name, DEFAULT_LIGHT_THEME);
+    }
 
     #[test]
     fn parses_ghostty_theme() {

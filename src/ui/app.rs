@@ -591,6 +591,11 @@ pub struct AppSettings {
     /// Derive theme colours from the current desktop wallpaper.
     #[serde(default)]
     pub adaptive_theme: bool,
+    /// Switch between `theme` (dark) and `light_theme` with the system's appearance.
+    #[serde(default)]
+    pub follow_system_theme: bool,
+    #[serde(default = "crate::ui::theme::default_light_theme")]
+    pub light_theme: AppTheme,
     /// When each ZNC buffer was last read, which ZNC doesn't keep (see ui::znc).
     #[serde(default)]
     pub bouncer_read_markers: HashMap<String, chrono::DateTime<chrono::Utc>>,
@@ -653,6 +658,8 @@ impl Default for AppSettings {
             keybinds: KeybindsMap::default(),
             collapsed_servers: HashSet::new(),
             adaptive_theme: false,
+            follow_system_theme: false,
+            light_theme: crate::ui::theme::default_light_theme(),
             bouncer_read_markers: HashMap::new(),
             oper_servers: HashSet::new(),
         }
@@ -834,6 +841,15 @@ pub struct WeeChatApp {
     pub(crate) adaptive_theme_result: Option<crate::ui::theme::AppTheme>,
     /// Channel from the wallpaper-watcher background thread.
     pub(crate) wallpaper_rx: Option<std::sync::mpsc::Receiver<crate::ui::theme::AppTheme>>,
+
+    // Following the system's light/dark appearance: `theme` is the dark theme then.
+    pub(crate) follow_system_theme: bool,
+    pub(crate) light_theme: AppTheme,
+    /// The system asks for light colours (from the last frame).
+    pub(crate) system_light: bool,
+    /// Which of the two the Theme page edits, once picked there; None edits the one
+    /// in use. While the page shows, the app is drawn in the theme it edits.
+    pub(crate) editing_light_theme: Option<bool>,
 
     // /np (now-playing) channel: tokio task → main loop; Ok = message to send, Err = why not
     pub(crate) np_tx: mpsc::UnboundedSender<Result<(String, String), String>>,
@@ -1055,6 +1071,10 @@ impl WeeChatApp {
             adaptive_theme,
             adaptive_theme_result: None,
             wallpaper_rx,
+            follow_system_theme: settings.follow_system_theme,
+            light_theme: settings.light_theme,
+            system_light: cc.egui_ctx.system_theme() == Some(egui::Theme::Light),
+            editing_light_theme: None,
             fset_state: crate::ui::fset::FsetState::default(),
         };
 
@@ -1520,6 +1540,8 @@ impl eframe::App for WeeChatApp {
             keybinds: self.keybinds.clone(),
             collapsed_servers: self.collapsed_servers.clone(),
             adaptive_theme: self.adaptive_theme,
+            follow_system_theme: self.follow_system_theme,
+            light_theme: self.light_theme.clone(),
             bouncer_read_markers: self.bouncer_read_markers.clone(),
             oper_servers: self.oper_servers.clone(),
         };
@@ -1778,10 +1800,12 @@ impl eframe::App for WeeChatApp {
         style.visuals.widgets.active.corner_radius = CornerRadius::same(8);
         ctx.all_styles_mut(|s| *s = style.clone());
 
-        // Effective theme: adaptive override when enabled and loaded, else user's theme.
+        // Effective theme: adaptive override when enabled and loaded, else user's theme
+        // (the light or dark one when following the system).
+        self.system_light = ctx.system_theme() == Some(egui::Theme::Light);
         let mut render_theme: crate::ui::theme::AppTheme = self.adaptive_theme_result
             .clone()
-            .unwrap_or_else(|| self.theme.clone());
+            .unwrap_or_else(|| if self.shows_light_theme() { self.light_theme.clone() } else { self.theme.clone() });
         render_theme.fit_extended = self.fit_colors_to_theme && render_theme.name != "Default";
 
         let accent_color = if render_theme.name == "Default" {
@@ -1793,8 +1817,7 @@ impl eframe::App for WeeChatApp {
         let alpha = (self.opacity * 255.0) as u8;
         let bg_color = Color32::from_rgba_unmultiplied(base_bg.r(), base_bg.g(), base_bg.b(), alpha);
 
-        let luma = 0.299 * base_bg.r() as f32 + 0.587 * base_bg.g() as f32 + 0.114 * base_bg.b() as f32;
-        let is_light = luma > 140.0;
+        let is_light = render_theme.is_light();
 
         let surface_color = if is_light {
             Color32::from_rgba_unmultiplied(
