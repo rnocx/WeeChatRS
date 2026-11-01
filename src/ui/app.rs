@@ -863,9 +863,6 @@ pub struct WeeChatApp {
 
     // fset buffer panel state (search filter + inline edit)
     pub(crate) fset_state: crate::ui::fset::FsetState,
-
-    // How many connection attempts have been made since the last explicit Connect click.
-    pub(crate) connection_attempts: u32,
 }
 
 pub(crate) struct CompletionState {
@@ -1059,7 +1056,6 @@ impl WeeChatApp {
             adaptive_theme_result: None,
             wallpaper_rx,
             fset_state: crate::ui::fset::FsetState::default(),
-            connection_attempts: 0,
         };
 
         // Trigger autoconnect for profiles that have the flag set and a saved password.
