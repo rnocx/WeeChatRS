@@ -83,7 +83,11 @@ pub struct Line {
     pub prefix: String,
     pub message: String,
     pub displayed: bool,
+    /// The line mentions us: tinted, and it notifies.
     pub highlight: bool,
+    /// It notifies and marks the buffer like a highlight without being one: a
+    /// private message, as WeeChat's `notify_private`.
+    pub notify: bool,
     // Cached: parsed once at insertion. Theme/font-independent — resolved at render.
     pub parsed_prefix: Vec<ANSISection>,
     pub parsed_message: Vec<ANSISection>,
@@ -116,6 +120,7 @@ impl Line {
             message,
             displayed,
             highlight,
+            notify: highlight,
             parsed_prefix,
             parsed_message,
             plain_prefix,
@@ -123,6 +128,12 @@ impl Line {
             plain_prefix_lower,
             plain_message_lower,
         }
+    }
+
+    /// The same line, notifying when `notify` is set even if it isn't a highlight.
+    pub fn notifying(mut self, notify: bool) -> Self {
+        self.notify = self.highlight || notify;
+        self
     }
 }
 

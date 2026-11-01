@@ -234,10 +234,10 @@ impl WeeChatApp {
             BackendEvent::LineAdded { buffer_id, line } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
-                if line.highlight {
+                if line.notify {
                     log::info!(
-                        "LineAdded highlight=true buffer={} selected={} displayed={}",
-                        full_id, is_selected, line.displayed
+                        "LineAdded highlight={} buffer={} selected={} displayed={}",
+                        line.highlight, full_id, is_selected, line.displayed
                     );
                 }
                 let mut should_notify = false;
@@ -246,7 +246,7 @@ impl WeeChatApp {
                 let mut notify_message = String::new();
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     if !is_selected && !buf.muted && line.displayed {
-                        if line.highlight {
+                        if line.notify {
                             buf.activity = crate::relay::models::BufferActivity::Highlight;
                             should_notify = true;
                             buf_name = buf.name.clone();
@@ -342,7 +342,7 @@ impl WeeChatApp {
                             if let Some(cutoff) = read_cutoff {
                                 if line.timestamp <= cutoff { continue; }
                             }
-                            if line.highlight {
+                            if line.notify {
                                 buf.activity = crate::relay::models::BufferActivity::Highlight;
                                 buf.unread_count = buf.unread_count.saturating_add(1);
                             } else if buf.activity != crate::relay::models::BufferActivity::Highlight {
@@ -1170,7 +1170,7 @@ impl WeeChatApp {
                             // Free-content buffers (fset) rewrite a line in place.
                             if let Some((prefix, message)) = new_text {
                                 if line.message != message || line.prefix != prefix {
-                                    *line = Line::new(line.id.clone(), line.timestamp, prefix, message, displayed, line.highlight);
+                                    *line = Line::new(line.id.clone(), line.timestamp, prefix, message, displayed, line.highlight).notifying(line.notify);
                                 }
                             }
                         } else if displayed {

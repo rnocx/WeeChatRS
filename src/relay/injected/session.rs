@@ -408,7 +408,7 @@ impl State {
             self.pending.remove(&ack);
         }
         let records = self.read_lines.entry(id.into()).or_default();
-        records.push_back((ts, line.highlight));
+        records.push_back((ts, line.notify));
         while records.len() > 2000 {
             records.pop_front();
         }
@@ -715,11 +715,13 @@ impl State {
                 let target=string(&v,if notice {"target"} else {"channel"});
                 let who=string(&v,"nick");
                 let own=self.nicks.get(&server).cloned().unwrap_or_default();
+                // Sent to us by someone else: a private message, which notifies.
+                let private=!own.is_empty() && casefold(target)==casefold(&own) && casefold(who)!=casefold(&own);
                 let target=if !own.is_empty() && casefold(target)==casefold(&own) {who} else {target};
                 let target=if target.is_empty() {"@status"} else {target};
                 let id=self.open(&server,target);
-                let mut line=self.line(&id,&v,false);
-                if notice { line = Line::new(line.id, line.timestamp, format!("-{}-", line.prefix), line.message, line.displayed, line.highlight); }
+                let mut line=self.line(&id,&v,false).notifying(private);
+                if notice { line = Line::new(line.id, line.timestamp, format!("-{}-", line.prefix), line.message, line.displayed, line.highlight).notifying(line.notify); }
                 if self.remember(&id,&line) { self.emit(BackendEvent::LineAdded {buffer_id:id,line}); }
             }
             "irc:event:user-list"=> {

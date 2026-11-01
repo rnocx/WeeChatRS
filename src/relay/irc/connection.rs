@@ -417,8 +417,9 @@ fn message_line(msg: &IrcMessage, session: &Session, line_counter: &mut u64) -> 
     };
     if buffer_id.is_empty() { return None; }
 
-    let highlight = text.to_lowercase().contains(&session.our_nick.to_lowercase())
-        || target.eq_ignore_ascii_case(&session.our_nick);
+    // A private message notifies but isn't tinted, as in WeeChat: only mentions are.
+    let highlight = text.to_lowercase().contains(&session.our_nick.to_lowercase());
+    let private = target.eq_ignore_ascii_case(&session.our_nick) && !is_server_source;
 
     let prefix = if msg.command == "NOTICE" {
         format!("-{}-", nick)
@@ -431,7 +432,8 @@ fn message_line(msg: &IrcMessage, session: &Session, line_counter: &mut u64) -> 
     } else { irc_to_ansi(text) };
 
     *line_counter += 1;
-    Some((buffer_id, make_line(&line_counter.to_string(), &prefix, &display_text, timestamp_from_msg(msg), highlight)))
+    let line = make_line(&line_counter.to_string(), &prefix, &display_text, timestamp_from_msg(msg), highlight);
+    Some((buffer_id, line.notifying(private)))
 }
 
 /// The rows of ZNC's `ListNetworks` table:
@@ -1924,6 +1926,22 @@ mod tests {
         assert_eq!(expand_irc_command("#chan", "/quote KILL bob :spam").as_deref(), Some("KILL bob :spam"));
         assert_eq!(expand_irc_command("status", "/raw STATS p").as_deref(), Some("STATS p"));
         assert_eq!(expand_irc_command("status", "/quote"), None);
+    }
+
+    #[test]
+    fn private_messages_notify_without_being_highlights() {
+        let session = Session::new("sam");
+        let mut counter = 0;
+        let line = |raw: &str, counter: &mut u64| message_line(&IrcMessage::parse(raw).unwrap(), &session, counter).unwrap();
+        let (buffer, pm) = line(":bob!b@host PRIVMSG sam :hi there", &mut counter);
+        assert_eq!(buffer, "bob");
+        assert!(!pm.highlight && pm.notify);
+        let (_, mention) = line(":bob!b@host PRIVMSG sam :hi sam", &mut counter);
+        assert!(mention.highlight && mention.notify);
+        let (_, chan) = line(":bob!b@host PRIVMSG #alpha :hello", &mut counter);
+        assert!(!chan.highlight && !chan.notify);
+        let (_, server) = line(":irc.test NOTICE sam :Welcome", &mut counter);
+        assert!(!server.notify);
     }
 
     #[test]
