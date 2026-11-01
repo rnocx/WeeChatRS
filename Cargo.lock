@@ -6218,7 +6218,7 @@ dependencies = [
 
 [[package]]
 name = "weechat-rs"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
