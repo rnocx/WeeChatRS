@@ -536,7 +536,9 @@ impl WeeChatApp {
         hint(ui, "Draws colours outside the theme's 16 (such as WeeChat nick colours set by number) in the nearest theme colour. The Default theme keeps them as they are.");
 
         let mut adaptive_theme = self.adaptive_theme;
-        ui.checkbox(&mut adaptive_theme, "Adaptive theme (from wallpaper)");
+        if crate::ui::wallpaper::supported() {
+            ui.checkbox(&mut adaptive_theme, "Adaptive theme (from wallpaper)");
+        }
         if adaptive_theme {
             hint(ui, "Colours are derived from the desktop wallpaper. Manual editing is disabled while active.");
         }

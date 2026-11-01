@@ -167,6 +167,12 @@ fn load_image_rgb(path: &str) -> Option<Vec<(u8, u8, u8)>> {
 
 // ── Wallpaper path detection ──────────────────────────────────────────────────
 
+/// Whether the wallpaper can be found here. A Flatpak sandbox sees neither the
+/// desktop's settings nor the image, and no portal gives an app the wallpaper.
+pub fn supported() -> bool {
+    std::env::var_os("FLATPAK_ID").is_none()
+}
+
 /// Returns the path of the current desktop wallpaper on the primary display.
 pub fn get_wallpaper_path() -> Option<String> {
     platform_wallpaper_path()

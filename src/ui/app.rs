@@ -928,7 +928,7 @@ impl WeeChatApp {
         crate::ui::fonts::apply(&cc.egui_ctx, &settings.font_path);
         let available_fonts = crate::ui::fonts::scan_system_fonts();
 
-        let adaptive_theme = settings.adaptive_theme;
+        let adaptive_theme = settings.adaptive_theme && crate::ui::wallpaper::supported();
         let wallpaper_rx = if adaptive_theme {
             Some(crate::ui::wallpaper::start_wallpaper_thread(cc.egui_ctx.clone()))
         } else {

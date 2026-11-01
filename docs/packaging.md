@@ -44,6 +44,8 @@ AppStream metainfo that Flathub and software centres show.
     *Choose data folder…* (`~/.config/injected`) or sign in with the window.
   - `/np` runs `playerctl`, which isn't in the runtime, so it finds no player, and
     `/sysinfo` shows less (no `lspci`).
+  - The adaptive theme isn't offered: the sandbox can't see the wallpaper, and no
+    portal gives it to apps.
 - **Version:** software centres show the newest `<release>` in the metainfo, so each
   release adds one, newest first. A release candidate is written `0.9.5~rc1` with
   `type="development"`: AppStream sorts `0.9.5-rc1` after `0.9.5`, and the linter
