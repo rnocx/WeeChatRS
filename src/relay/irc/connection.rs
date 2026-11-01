@@ -110,6 +110,16 @@ struct Session {
     reported_status: Option<ServerStatus>,
     /// The `MODE <nick>` sent after registering awaits its `221`, which isn't shown.
     umode_query_pending: bool,
+    /// Each joined channel's modes, by lowercase name; only the letters are kept.
+    channel_modes: HashMap<String, String>,
+    /// The server's channel modes that take an argument (lists, always, only when
+    /// set), from ISUPPORT CHANMODES, and its nick modes (PREFIX), which aren't
+    /// the channel's.
+    chanmodes: [String; 3],
+    prefix_modes: String,
+    /// Channels whose topic we asked for with a bare /topic: its replies are printed
+    /// there, as WeeChat does, instead of only updating the topic bar.
+    topic_queries: HashSet<String>,
 }
 
 impl Session {
@@ -150,6 +160,10 @@ impl Session {
             software: String::new(),
             reported_status: None,
             umode_query_pending: false,
+            channel_modes: HashMap::new(),
+            chanmodes: ["beI".into(), "k".into(), "l".into()],
+            prefix_modes: "qaohv".into(),
+            topic_queries: HashSet::new(),
         }
     }
 
@@ -266,6 +280,7 @@ impl Session {
             modes: String::new(),
             hidden: false,
             muted: false,
+            notify: Default::default(),
             has_nicklist: kind == "channel",
             visit_start_marker_id: None,
         }
@@ -624,6 +639,52 @@ async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
 
 // ── IRC → BackendEvent translation ───────────────────────────────────────────
 
+/// "Topic set by nick (user@host) on <date>" from a 333 reply's setter and time.
+pub(crate) fn topic_set_by(setter: &str, time: &str) -> Option<String> {
+    if setter.is_empty() {
+        return None;
+    }
+    let who = match setter.split_once('!') {
+        Some((nick, host)) => format!("{} ({})", nick, host),
+        None => setter.to_string(),
+    };
+    let when = time.trim().parse::<i64>().ok()
+        .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
+        .map(|t| format!(" on {}", t.with_timezone(&chrono::Local).format("%a, %d %b %Y %H:%M:%S")))
+        .unwrap_or_default();
+    Some(format!("Topic set by {}{}", who, when))
+}
+
+/// Apply a channel's mode changes (`+nt`, `-k key`, `+o nick`) to the letters kept for
+/// it, and return them as `+nt` when they changed. Modes with an argument use it up,
+/// and lists (bans) and nick modes (op, voice) aren't the channel's own.
+fn apply_channel_modes(session: &mut Session, channel: &str, changes: &[&str]) -> Option<String> {
+    let [lists, always, when_set] = &session.chanmodes;
+    let mut letters: Vec<char> = session.channel_modes.get(channel)?.chars().collect();
+    let before = letters.clone();
+    let mut args = changes.iter().skip(1);
+    let mut adding = true;
+    for c in changes.first()?.chars() {
+        match c {
+            '+' => adding = true,
+            '-' => adding = false,
+            c if lists.contains(c) || session.prefix_modes.contains(c) => { args.next(); }
+            c => {
+                if always.contains(c) || (adding && when_set.contains(c)) {
+                    args.next();
+                }
+                letters.retain(|&l| l != c);
+                if adding {
+                    letters.push(c);
+                }
+            }
+        }
+    }
+    letters.sort_unstable();
+    session.channel_modes.insert(channel.to_string(), letters.iter().collect());
+    (letters != before || before.is_empty()).then(|| if letters.is_empty() { String::new() } else { format!("+{}", letters.iter().collect::<String>()) })
+}
+
 /// Apply user mode changes (`+iw-o`) to our oper status.
 fn apply_user_modes(session: &mut Session, modes: &str) {
     let mut adding = true;
@@ -969,6 +1030,7 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                 events.push(BackendEvent::BufferOpened(buf));
                 session.whois_lines.push(format!("NAMES {}", channel));
                 session.whois_lines.push(format!("WHO {}", channel));
+                session.whois_lines.push(format!("MODE {}", channel));
                 if session.has_chathistory() {
                     // Query the read marker before chathistory. Soju processes
                     // commands in order and replies to MARKREAD before the next
@@ -1155,7 +1217,32 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
         "332" => {
             let channel = msg.param(1).unwrap_or("").to_lowercase();
             let topic = irc_to_ansi(msg.param(2).unwrap_or(""));
+            if session.topic_queries.contains(&channel) {
+                *line_counter += 1;
+                let text = format!("Topic for {} is \"{}\x1B[0m\"", msg.param(1).unwrap_or(""), topic);
+                events.push(BackendEvent::LineAdded { buffer_id: channel.clone(), line: make_line(&line_counter.to_string(), "--", &text, timestamp_from_msg(msg), false) });
+            }
             events.push(BackendEvent::TopicChanged { buffer_id: channel, topic });
+        }
+
+        // Who set the topic and when: printed after a bare /topic, quiet on join.
+        "333" => {
+            let channel = msg.param(1).unwrap_or("").to_lowercase();
+            if session.topic_queries.remove(&channel) {
+                if let Some(text) = topic_set_by(msg.param(2).unwrap_or(""), msg.param(3).unwrap_or("")) {
+                    *line_counter += 1;
+                    events.push(BackendEvent::LineAdded { buffer_id: channel, line: make_line(&line_counter.to_string(), "--", &text, timestamp_from_msg(msg), false) });
+                }
+            }
+        }
+
+        "331" => {
+            let channel = msg.param(1).unwrap_or("").to_lowercase();
+            if session.topic_queries.remove(&channel) {
+                *line_counter += 1;
+                let text = format!("No topic set for {}", msg.param(1).unwrap_or(""));
+                events.push(BackendEvent::LineAdded { buffer_id: channel, line: make_line(&line_counter.to_string(), "--", &text, timestamp_from_msg(msg), false) });
+            }
         }
 
         "TOPIC" => {
@@ -1428,7 +1515,26 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             });
         }
 
-        // A change of our own user modes; channel modes come back through NAMES.
+        // A channel's modes, asked for on join.
+        "324" => {
+            let channel = msg.param(1).unwrap_or("").to_lowercase();
+            if session.joined.contains(&channel) {
+                session.channel_modes.insert(channel.clone(), String::new());
+                let changes: Vec<&str> = msg.params.iter().skip(2).map(String::as_str).collect();
+                if let Some(modes) = apply_channel_modes(session, &channel, &changes) {
+                    events.push(BackendEvent::ModesChanged { buffer_id: channel, modes });
+                }
+            }
+        }
+
+        // A change of our own user modes, or a channel's; nick modes come back through NAMES.
+        "MODE" if msg.param(0).is_some_and(is_channel) => {
+            let channel = msg.param(0).unwrap_or("").to_lowercase();
+            let changes: Vec<&str> = msg.params.iter().skip(1).map(String::as_str).collect();
+            if let Some(modes) = apply_channel_modes(session, &channel, &changes) {
+                events.push(BackendEvent::ModesChanged { buffer_id: channel, modes });
+            }
+        }
         "MODE" => {
             if msg.param(0).is_some_and(|t| t.eq_ignore_ascii_case(&session.our_nick)) {
                 let modes = msg.param(1).unwrap_or("").to_string();
@@ -1446,6 +1552,16 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
         | "375" | "372" | "376" | "250" | "256" | "257" | "258" | "259" => {
             if msg.command == "004" {
                 session.software = msg.param(2).unwrap_or("").to_string();
+            }
+            if msg.command == "005" {
+                for token in msg.params.iter().skip(1) {
+                    if let Some(value) = token.strip_prefix("CHANMODES=") {
+                        let mut types = value.split(',').map(str::to_string);
+                        session.chanmodes = [(); 3].map(|_| types.next().unwrap_or_default());
+                    } else if let Some(modes) = token.strip_prefix("PREFIX=(").and_then(|v| v.split(')').next()) {
+                        session.prefix_modes = modes.to_string();
+                    }
+                }
             }
             let text = msg.params.iter().skip(1).map(String::as_str).collect::<Vec<_>>().join(" ");
             if !text.is_empty() {
@@ -1738,6 +1854,9 @@ pub fn spawn(
                                                 }
                                             }
                                         } else if let Some(wire) = expand_irc_command(&buffer_id, &text) {
+                                            if let Some(channel) = wire.strip_prefix("TOPIC ").filter(|rest| !rest.contains(' ')) {
+                                                session.topic_queries.insert(channel.to_lowercase());
+                                            }
                                             let _ = write_half.write_all(format!("{}\r\n", wire).as_bytes()).await;
                                         } else if let Some(cmd_text) = text.strip_prefix('/') {
                                             let _ = write_half.write_all(format!("{}\r\n", cmd_text).as_bytes()).await;
@@ -1926,6 +2045,54 @@ mod tests {
         assert_eq!(expand_irc_command("#chan", "/quote KILL bob :spam").as_deref(), Some("KILL bob :spam"));
         assert_eq!(expand_irc_command("status", "/raw STATS p").as_deref(), Some("STATS p"));
         assert_eq!(expand_irc_command("status", "/quote"), None);
+    }
+
+    #[test]
+    fn topic_replies_print_only_after_a_bare_topic() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let mut lines = |session: &mut Session, raw: &[&str]| -> Vec<String> {
+            raw.iter().flat_map(|l| translate(&IrcMessage::parse(l).unwrap(), session, &mut counter, &config))
+                .filter_map(|e| match e { BackendEvent::LineAdded { buffer_id, line } if buffer_id == "#alpha" => Some(line.message), _ => None })
+                .collect()
+        };
+        let replies = [":irc.test 332 sam #alpha :Welcome", ":irc.test 333 sam #alpha bob!b@host 1787280656"];
+        assert!(lines(&mut session, &replies).is_empty(), "quiet on join");
+        session.topic_queries.insert("#alpha".into());
+        let shown = lines(&mut session, &replies);
+        assert_eq!(shown[0], "Topic for #alpha is \"Welcome\x1B[0m\"");
+        assert!(shown[1].starts_with("Topic set by bob (b@host) on "));
+        assert!(session.topic_queries.is_empty());
+        session.topic_queries.insert("#alpha".into());
+        assert_eq!(lines(&mut session, &[":irc.test 331 sam #alpha :No topic is set"]), ["No topic set for #alpha"]);
+    }
+
+    #[test]
+    fn channel_modes_follow_324_and_mode_changes() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let mut modes = Vec::new();
+        for line in [
+            ":irc.test 005 sam CHANMODES=beI,k,l,imnpst PREFIX=(ov)@+ :are supported",
+            ":sam!s@host JOIN #alpha",
+            ":irc.test 324 sam #alpha +ntk secret",
+            ":bob!b@host MODE #alpha +o-k+lb sam secret 50 *!*@spam",
+            ":bob!b@host MODE #alpha +v bob",
+            ":bob!b@host MODE #alpha -l+m",
+            ":irc.test 324 sam #elsewhere +s",
+        ] {
+            for event in translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config) {
+                if let BackendEvent::ModesChanged { buffer_id, modes: m } = event {
+                    modes.push((buffer_id, m));
+                }
+            }
+        }
+        assert!(session.whois_lines.contains(&"MODE #alpha".to_string()));
+        let shown: Vec<&str> = modes.iter().map(|(_, m)| m.as_str()).collect();
+        assert_eq!(shown, ["+knt", "+lnt", "+mnt"]);
+        assert!(modes.iter().all(|(b, _)| b == "#alpha"));
     }
 
     #[test]

@@ -57,6 +57,11 @@ pub enum BackendEvent {
         buffer_id: String,
         topic: String,
     },
+    /// A channel's modes changed (`+nt`), for the topic bar.
+    ModesChanged {
+        buffer_id: String,
+        modes: String,
+    },
     /// A buffer's hidden flag changed.
     BufferHidden {
         buffer_id: String,

@@ -210,6 +210,36 @@ impl WeeChatApp {
         }
     }
 
+    /// `/ignore` lists the ignored nicks, `/ignore <nick>` ignores one on this
+    /// buffer's network, `/unignore <nick>` stops ignoring it.
+    fn ignore_command(&mut self, buffer_id: &str, network: (String, String), command: &str) {
+        let mut words = command.split_whitespace();
+        let verb = words.next().unwrap_or_default();
+        let nick = words.next().map(str::to_string);
+        let text = match (verb, nick) {
+            ("/ignore", Some(nick)) => {
+                let text = format!("Ignoring {} on {}", nick, network.1);
+                self.add_ignore(nick, Some(network));
+                text
+            }
+            ("/unignore", Some(nick)) => {
+                let before = self.ignores.len();
+                self.ignores.retain(|r| !(r.nick.eq_ignore_ascii_case(&nick) && r.network.as_ref().is_none_or(|n| *n == network.0)));
+                self.reapply_ignores();
+                if self.ignores.len() < before { format!("No longer ignoring {}", nick) } else { format!("{} isn't ignored here", nick) }
+            }
+            ("/unignore", None) => "Usage: /unignore <nick>".to_string(),
+            _ if self.ignores.is_empty() => "No ignored nicks. /ignore <nick> ignores one on this network.".to_string(),
+            _ => {
+                let list: Vec<String> = self.ignores.iter()
+                    .map(|r| if r.network.is_some() { format!("{} (on {})", r.nick, r.network_label) } else { r.nick.clone() })
+                    .collect();
+                format!("Ignored: {}", list.join(", "))
+            }
+        };
+        self.local_info(buffer_id, &text);
+    }
+
     pub(crate) fn send_current_message(&mut self) {
         if self.input_text.is_empty() { return; }
         let msg = self.input_text.clone();
@@ -223,6 +253,16 @@ impl WeeChatApp {
             } else if msg.starts_with("/join ") || msg.starts_with("/j ") {
                 let after = if msg.starts_with("/j ") { &msg[3..] } else { &msg[6..] };
                 self.pending_buffer_switch = after.split_whitespace().next().map(|s| s.to_string());
+            } else if let Some((id, network)) = (msg.trim() == "/ignore" || msg.starts_with("/ignore ") || msg.starts_with("/unignore "))
+                .then(|| self.selected_buffer_id.clone()).flatten()
+                .and_then(|id| Some((id.clone(), self.ignore_network(&id)?)))
+            {
+                // IRC, soju, ZNC and Injected; WeeChat's own /ignore gets the others.
+                self.ignore_command(&id, network, msg.trim());
+                self.input_text.clear();
+                self.completion = None;
+                self.history_index = None;
+                return;
             } else if msg.trim() == "/sysinfo" || msg.trim() == "/systeminfo" {
                 if let Some(buffer_id) = self.selected_buffer_id.clone() {
                     let tx = self.sysinfo_tx.clone();

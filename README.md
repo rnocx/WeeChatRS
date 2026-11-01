@@ -93,8 +93,10 @@ The details of both, from soju's read markers and search to ZNC's playback modul
 - **Link previews**: a `🔗 preview` button on other links shows the page's title, description and image.
 - **Search**: `⌘/Ctrl + F` filters the buffer; on soju it also searches the server's history.
 - **Tab completion**: nicks and emoji (`:fire` + Tab → 🔥); on WeeChat also commands, options and their values, completed by WeeChat itself.
-- **Context menus**: on messages (copy message or link), on nicks (query, whois, mention, copy, CTCP, and op, voice, kick and ban in channels) and on buffers (mute, hide, leave, close).
+- **Context menus**: on messages (copy message or link), on nicks (query, whois, mention, copy, CTCP, and op, voice, kick and ban in channels) and on buffers (notify level, edit topic, hide, leave, close). Double-click a channel's topic to edit it in place.
 - **Buffer list**: grouped by network, drag and drop to reorder (the order is kept), and a quick switcher (`⌘/Ctrl + P`).
+- **Ignore and highlight words**: hide a nick's messages on one network or all of them (`/ignore`, `/unignore`, the nick menu or Settings → Chat), and pick words besides your nick that highlight. On IRC, soju, ZNC and Injected; WeeChat has its own.
+- **Spell check**: misspelled words are underlined in the input line, in one or more languages, with the system's Hunspell dictionaries or ones downloaded from Settings → Chat.
 - **`/fset`**: WeeChat's options as a table, with the default and inherited values, ranges and descriptions, switches for booleans, menus for enums, and filters. Your own fset format is put back when you leave it.
 
 ### Commands
@@ -106,7 +108,7 @@ The details of both, from soju's read markers and search to ZNC's playback modul
 - **Themes**: 14 bundled themes (Darkweb by default, Catppuccin Mocha and Latte, Dracula, Gruvbox Dark and Light, Nord, TokyoNight, Solarized Dark, One Half Dark, Batman, Doom One, Glacier, Monokai Pro Light) with search and quick buttons, your own Ghostty themes from `~/.config/ghostty/themes`, or an imported theme file; all 16 colours editable, and 256-colour and RGB colours fitted to the theme.
 - **Adaptive theme**: colours derived from your desktop wallpaper, following it when it changes.
 - **Window**: opacity, with native background blur on macOS; font, font size, timestamps and nick column alignment.
-- **Notifications**: desktop notifications for highlights and private messages on macOS, Windows and Linux.
+- **Notifications**: desktop notifications for highlights and private messages on macOS, Windows and Linux; per buffer, every message, only mentions, or muted.
 - **Keyboard**: every shortcut can be rebound in Settings → Keybinds.
 
 <details>

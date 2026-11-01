@@ -2,7 +2,7 @@ use super::{
     protocol::{self, Packet},
     Command, InjectedConfig,
 };
-use crate::relay::irc::connection::{irc_to_ansi, nick_color_ansi};
+use crate::relay::irc::connection::{irc_to_ansi, nick_color_ansi, topic_set_by};
 use crate::relay::{
     backend::{BackendEvent, ServerStatus},
     models::{Buffer, BufferActivity, Line, Nick},
@@ -103,6 +103,23 @@ fn event_line(v: &Value, kind: &str, channel: &str) -> Option<Line> {
     let id = json!([kind, ts.timestamp_millis(), casefold(who)]).to_string();
     Some(Line::new(id, ts, prefix.into(), text, false, false))
 }
+/// A channel's modes from a channel-info event (the server's 324 reply), as `+nt`.
+/// Injected sends `"modes": "+pmtnl 71"`; only the letters are kept, never a key or
+/// other argument. The channel-info of its creation time (329) has empty modes and
+/// says nothing about them.
+fn channel_info_modes(v: &Value) -> Option<String> {
+    let raw = match (&v["raw_modes"], &v["modes"]) {
+        (Value::String(raw), _) => raw.clone(),
+        (_, Value::Array(list)) => list.iter().filter_map(|m| m["mode"].as_str().or(m.as_str())).collect(),
+        (_, Value::String(raw)) => raw.split_whitespace().next()?.to_string(),
+        _ => return None,
+    };
+    let mut letters: Vec<char> = raw.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    letters.sort_unstable();
+    letters.dedup();
+    Some(if letters.is_empty() { String::new() } else { format!("+{}", letters.into_iter().collect::<String>()) })
+}
+
 fn nick(v: &Value) -> Nick {
     Nick {
         name: string(v, "nick").into(),
@@ -130,6 +147,9 @@ struct State {
     nicks: HashMap<String, String>,
     buffers: HashMap<String, (String, String)>,
     members: HashMap<String, Vec<Nick>>,
+    /// Channel buffers whose topic we asked for with a bare /topic; the replies come
+    /// as raw events and are printed there.
+    topic_queries: HashSet<String>,
     seen: HashSet<(String, String)>,
     seen_order: VecDeque<(String, String)>,
     local_echoes: VecDeque<(String, String, String, i64)>,
@@ -158,6 +178,7 @@ impl State {
             nicks: HashMap::new(),
             buffers: HashMap::new(),
             members: HashMap::new(),
+            topic_queries: HashSet::new(),
             seen: HashSet::new(),
             seen_order: VecDeque::new(),
             local_echoes: VecDeque::new(),
@@ -261,6 +282,7 @@ impl State {
             modes: String::new(),
             hidden: false,
             muted: false,
+            notify: Default::default(),
             has_nicklist: kind == "channel",
             visit_start_marker_id: None,
         };
@@ -631,6 +653,10 @@ impl State {
             "disconnect" | "quit" => self.request("irc:disconnect",json!(server),Request::Action),
             "nick" if !args.is_empty() => self.request("irc:change-nick",json!({"serverId":server,"newNick":first}),Request::Action),
             "topic" if !args.is_empty() && target!="@status" => self.request("irc:set-topic",json!({"serverId":server,"channel":target,"topic":args}),Request::Action),
+            "topic" if target.starts_with(['#','&','!','+']) => {
+                self.topic_queries.insert(id.to_string());
+                self.send_raw_to_channel(id, "TOPIC");
+            }
             "whois" if !first.is_empty() => self.request("irc:whois",json!({"serverId":server,"nick":first}),Request::Action),
             "away" => self.request("irc:set-away",json!({"serverId":server,"message":args}),Request::Action),
             "raw" | "quote" if !args.is_empty() => self.request("irc:send-raw",json!({"serverId":server,"raw":args}),Request::Action),
@@ -696,6 +722,23 @@ impl State {
                 self.sequence+=1;
                 self.emit(BackendEvent::LineAdded {buffer_id:id,line});
             }
+            // The server's own lines; only the replies to a bare /topic are used.
+            "irc:event:raw"=> {
+                let params: Vec<&str> = v["params"].as_array().map(|p| p.iter().filter_map(Value::as_str).map(str::trim_end).collect()).unwrap_or_default();
+                let Some(channel) = params.get(1) else { return };
+                let id = buffer_id(&server, channel);
+                if !self.topic_queries.contains(&id) { return; }
+                let text = match string(&v, "command") {
+                    "332" => Some(format!("Topic for {} is \"{}\x1B[0m\"", channel, irc_to_ansi(params.get(2).unwrap_or(&"")))),
+                    "333" => { self.topic_queries.remove(&id); topic_set_by(params.get(2).unwrap_or(&""), params.get(3).unwrap_or(&"")) }
+                    "331" => { self.topic_queries.remove(&id); Some(format!("No topic set for {}", channel)) }
+                    _ => None,
+                };
+                if let Some(text) = text {
+                    self.sequence += 1;
+                    self.emit(BackendEvent::LineAdded {buffer_id:id,line:Line::new(format!("topic-{}",self.sequence),Utc::now(),"--".into(),text,true,false)});
+                }
+            }
             "irc:event:channels-sync"=> {
                 if let Some(channels)=v["channels"].as_array() {
                     let mut current=HashSet::new();
@@ -704,6 +747,8 @@ impl State {
                         let lower=channel.to_lowercase();
                         if let Some(users)=v["users"][&lower].as_array() { self.users(&id,users); }
                         if let Some(topic)=v["topics"][&lower]["topic"].as_str() { self.emit(BackendEvent::TopicChanged {buffer_id:id.clone(),topic:irc_to_ansi(topic)}); }
+                        // The sync has no modes; they come back as channel-info.
+                        self.request_modes(&id);
                         self.history(&id,100,None);
                     }
                     let stale:Vec<_>=self.buffers.iter().filter(|(id,(s,t))| s==&server && t.starts_with(['#','&','!','+']) && !current.contains(*id)).map(|(id,_)|id.clone()).collect();
@@ -733,7 +778,11 @@ impl State {
             }
             "irc:event:channel-info" | "irc:event:topic"=> {
                 let channel=string(&v,"channel");
-                if !channel.is_empty() { let id=self.open(&server,channel); if let Some(topic)=v["topic"].as_str() { self.emit(BackendEvent::TopicChanged {buffer_id:id,topic:irc_to_ansi(topic)}); } }
+                if !channel.is_empty() {
+                    let id=self.open(&server,channel);
+                    if let Some(topic)=v["topic"].as_str() { self.emit(BackendEvent::TopicChanged {buffer_id:id.clone(),topic:irc_to_ansi(topic)}); }
+                    if let Some(modes)=channel_info_modes(&v) { self.emit(BackendEvent::ModesChanged {buffer_id:id,modes}); }
+                }
             }
             "irc:event:join"=> {
                 let channel=string(&v,"channel");
@@ -776,7 +825,10 @@ impl State {
                 }
             }
             "irc:event:mode"=> {
-                let channel=string(&v,"channel");
+                // Injected names the channel `target` (a nick for our user modes).
+                let channel=Some(string(&v,"channel")).filter(|c| !c.is_empty())
+                    .or_else(|| Some(string(&v,"target")).filter(|t| t.starts_with(['#','&','!','+'])))
+                    .unwrap_or_default();
                 if !channel.is_empty() { self.names(&buffer_id(&server,channel)); }
                 // Not a channel's: perhaps our user modes. Logged until we know its shape,
                 // to tell whether we're an oper.
@@ -823,15 +875,20 @@ impl State {
             nick_name: who.into(),
         });
     }
-    /// Ask the server for a channel's nick list (NAMES).
+    /// Ask the server for a channel's nick list (NAMES) and its modes (MODE), which
+    /// come back as user-list and channel-info events.
     fn names(&mut self, id: &str) {
+        self.send_raw_to_channel(id, "NAMES");
+        self.request_modes(id);
+    }
+    fn request_modes(&mut self, id: &str) {
+        self.send_raw_to_channel(id, "MODE");
+    }
+    /// `<command> <channel>` for a channel buffer.
+    fn send_raw_to_channel(&mut self, id: &str, command: &str) {
         if let Some((server, target)) = self.buffers.get(id).cloned() {
             if target.starts_with(['#', '&', '!', '+']) {
-                self.request(
-                    "irc:send-raw",
-                    json!({"serverId":server,"raw":format!("NAMES {}",target)}),
-                    Request::Action,
-                );
+                self.request("irc:send-raw", json!({"serverId":server,"raw":format!("{} {}",command,target)}), Request::Action);
             }
         }
     }
@@ -1561,4 +1618,38 @@ mod tests {
             .is_none());
         server.await.unwrap();
     }
+    #[test]
+    fn channel_info_gives_the_mode_letters() {
+        assert_eq!(channel_info_modes(&json!({"channel":"#a","raw_modes":"+ntk","raw_params":["key"]})).as_deref(), Some("+knt"));
+        assert_eq!(channel_info_modes(&json!({"channel":"#a","modes":[{"mode":"+t","param":null},{"mode":"+n"}]})).as_deref(), Some("+nt"));
+        assert_eq!(channel_info_modes(&json!({"channel":"#a","modes":"+s"})).as_deref(), Some("+s"));
+        assert_eq!(channel_info_modes(&json!({"channel":"#a","topic":"hi"})), None);
+        // As Injected sends them: the modes reply, then the creation time with no modes.
+        assert_eq!(channel_info_modes(&json!({"channel":"#DNSK","modes":"+pmtnl 71\r\n"})).as_deref(), Some("+lmnpt"));
+        assert_eq!(channel_info_modes(&json!({"channel":"#DNSK","modes":""})), None);
+    }
+
+    #[test]
+    fn bare_topic_prints_the_topic_and_who_set_it() {
+        let (mut s, mut rx) = state();
+        s.event("irc:event:channels-sync",json!({"serverId":"net","channels":["#DNSK"]}));
+        drain(&mut rx);
+        let id = buffer_id("net", "#dnsk");
+        s.command(Command::Send(id.clone(), "/topic".into()));
+        for (command, params) in [
+            ("332", json!(["rnocx", "#DNSK", "Hello world\r\n"])),
+            ("333", json!(["rnocx", "#DNSK", "dnsk!dnsk@dnsk.dj", "1787280656\r\n"])),
+            ("333", json!(["rnocx", "#DNSK", "again!a@b", "1"])),
+        ] {
+            s.event("irc:event:raw", json!({"serverId":"net","command":command,"params":params}));
+        }
+        let printed: Vec<String> = drain(&mut rx).into_iter().filter_map(|e| match e {
+            BackendEvent::LineAdded { buffer_id, line } if buffer_id == id => Some(line.message),
+            _ => None,
+        }).collect();
+        assert_eq!(printed.len(), 2, "{printed:?}");
+        assert_eq!(printed[0], "Topic for #DNSK is \"Hello world\x1B[0m\"");
+        assert!(printed[1].starts_with("Topic set by dnsk (dnsk@dnsk.dj) on "));
+    }
+
 }

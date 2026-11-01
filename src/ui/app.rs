@@ -227,7 +227,7 @@ fn is_highmon_buffer(full_name: &str) -> bool {
 
 /// Whether a line's prefix is a nick (a chat message) rather than a WeeChat system
 /// prefix such as `-->`, `<--`, `--`, `=!=`, or the ` *` of a `/me` action.
-fn is_chat_prefix(plain_prefix: &str) -> bool {
+pub(crate) fn is_chat_prefix(plain_prefix: &str) -> bool {
     plain_prefix.chars().any(char::is_alphanumeric)
 }
 
@@ -249,7 +249,7 @@ fn nick_styles_in_chat<'a>(lines: impl Iterator<Item = &'a Line>) -> HashMap<Str
 /// The nick in a chat line's prefix, and the part of the prefix it is in. The nick is
 /// the last part with a letter or digit; mode characters (@, +) and
 /// weechat.look.nick_prefix/suffix usually come in parts of their own colour.
-fn prefix_nick(line: &Line) -> Option<(&str, &crate::ui::ansi::ANSISection)> {
+pub(crate) fn prefix_nick(line: &Line) -> Option<(&str, &crate::ui::ansi::ANSISection)> {
     let part = line.parsed_prefix.iter().rev().find(|s| s.text.chars().any(char::is_alphanumeric))?;
     let name = part.text.trim()
         .trim_start_matches(|c: char| "~&@%+!<(".contains(c))
@@ -386,6 +386,12 @@ fn apply_drag_reorder(buffers: &mut Vec<Buffer>, drag_id: &str, drop_before_id: 
 /// The key under which the app keeps a buffer's state that the server doesn't (hidden,
 /// muted, ZNC read markers): connection, network group and buffer name, which tell a
 /// bouncer's networks apart and stay the same from one session to the next.
+/// A dictionary parsed or downloaded in the background, for the spell check.
+pub(crate) enum SpellEvent {
+    Loaded(String, Result<crate::ui::spellcheck::SpellChecker, String>),
+    Downloaded(String, Result<(), String>),
+}
+
 pub(crate) fn local_buffer_key(conn_prefix: &str, buffer: &Buffer) -> String {
     format!("{}|{}|{}", conn_prefix, buffer.server, buffer.name.to_lowercase())
 }
@@ -559,6 +565,9 @@ pub struct AppSettings {
     /// and Injected. WeeChat does this itself (irc.look.nick_mode).
     #[serde(default)]
     pub show_nick_modes: bool,
+    /// The channel's modes (`[+nt]`) before the topic.
+    #[serde(default)]
+    pub show_channel_modes: bool,
     /// Draw 256-colour and RGB colours (WeeChat nick colours, mostly) in the nearest of
     /// the theme's 16 colours. Not applied to the Default theme.
     #[serde(default = "default_true")]
@@ -575,6 +584,22 @@ pub struct AppSettings {
     pub font_path: String,
     #[serde(default)]
     pub muted_buffer_names: HashSet<String>,
+    /// Buffers whose notify level isn't the default, by the same key as muted ones.
+    #[serde(default)]
+    pub buffer_notify: HashMap<String, NotifyLevel>,
+    /// Words besides our nick that highlight a line, on IRC, soju, ZNC and Injected
+    /// (WeeChat has weechat.look.highlight).
+    #[serde(default)]
+    pub highlight_words: Vec<String>,
+    /// Nicks whose messages are hidden, on IRC, soju, ZNC and Injected (WeeChat has
+    /// its own /ignore).
+    #[serde(default)]
+    pub ignores: Vec<crate::ui::ignore::IgnoreRule>,
+    /// Underline misspelled words in the input line, in these languages (`en_US`).
+    #[serde(default)]
+    pub spell_check: bool,
+    #[serde(default)]
+    pub spell_languages: Vec<String>,
     /// Hidden buffers of connections other than WeeChat (which keeps its own), by
     /// `local_buffer_key`.
     #[serde(default)]
@@ -657,6 +682,7 @@ impl Default for AppSettings {
             show_hidden_buffers: false,
             group_messages: true,
             show_nick_modes: false,
+            show_channel_modes: false,
             fit_colors_to_theme: true,
             buffer_order: Vec::new(),
             cleared_buffer_ids: HashSet::new(),
@@ -664,6 +690,11 @@ impl Default for AppSettings {
             font_name: String::new(),
             font_path: String::new(),
             muted_buffer_names: HashSet::new(),
+            buffer_notify: HashMap::new(),
+            highlight_words: Vec::new(),
+            ignores: Vec::new(),
+            spell_check: false,
+            spell_languages: Vec::new(),
             hidden_buffer_keys: HashSet::new(),
             show_toolbar: true,
             nicklist_width: 0.0,
@@ -744,6 +775,7 @@ pub struct WeeChatApp {
     pub(crate) show_hidden_buffers: bool,
     pub(crate) group_messages: bool,
     pub(crate) show_nick_modes: bool,
+    pub(crate) show_channel_modes: bool,
     pub(crate) fit_colors_to_theme: bool,
 
     // Image preview state
@@ -808,6 +840,23 @@ pub struct WeeChatApp {
 
     // Muted buffers (stored by full_name, stable across WeeChat restarts).
     pub(crate) muted_buffer_names: HashSet<String>,
+    pub(crate) buffer_notify: HashMap<String, NotifyLevel>,
+    pub(crate) highlight_words: Vec<String>,
+    /// The highlight words as typed in Settings → Chat, comma-separated.
+    pub(crate) highlight_words_text: String,
+    pub(crate) ignores: Vec<crate::ui::ignore::IgnoreRule>,
+    /// The nick typed into Settings → Chat's ignore list.
+    pub(crate) ignore_input: String,
+
+    // Spell check of the input line: the languages' dictionaries, loaded off the UI thread.
+    pub(crate) spell_check: bool,
+    pub(crate) spell_languages: Vec<String>,
+    pub(crate) spell_checkers: HashMap<String, std::sync::Arc<crate::ui::spellcheck::SpellChecker>>,
+    pub(crate) spell_tx: mpsc::UnboundedSender<SpellEvent>,
+    pub(crate) spell_rx: mpsc::UnboundedReceiver<SpellEvent>,
+    /// The language being downloaded, and the last load or download error.
+    pub(crate) spell_downloading: Option<String>,
+    pub(crate) spell_error: Option<String>,
     pub(crate) hidden_buffer_keys: HashSet<String>,
     pub(crate) bouncer_read_markers: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub(crate) oper_servers: HashSet<String>,
@@ -902,6 +951,8 @@ pub struct WeeChatApp {
 
     // fset buffer panel state (search filter + inline edit)
     pub(crate) fset_state: crate::ui::fset::FsetState,
+    /// The topic being edited, while its dialog is open.
+    pub(crate) topic_editor: Option<crate::ui::topic_editor::TopicEditor>,
 }
 
 pub(crate) struct CompletionState {
@@ -926,6 +977,7 @@ impl WeeChatApp {
         let (image_tx, image_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
         let (np_tx, np_rx) = mpsc::unbounded_channel::<Result<(String, String), String>>();
+        let (spell_tx, spell_rx) = mpsc::unbounded_channel::<SpellEvent>();
         let (sysinfo_tx, sysinfo_rx) = mpsc::unbounded_channel::<(String, String)>();
         let (file_share_tx, file_share_rx) = mpsc::unbounded_channel::<Result<(String, String), String>>();
 
@@ -1021,6 +1073,7 @@ impl WeeChatApp {
             show_hidden_buffers: settings.show_hidden_buffers,
             group_messages: settings.group_messages,
             show_nick_modes: settings.show_nick_modes,
+            show_channel_modes: settings.show_channel_modes,
             fit_colors_to_theme: settings.fit_colors_to_theme,
             image_cache: HashMap::new(),
             image_expanded: HashSet::new(),
@@ -1052,6 +1105,18 @@ impl WeeChatApp {
             available_fonts,
             selected_view_since: None,
             muted_buffer_names: settings.muted_buffer_names,
+            buffer_notify: settings.buffer_notify,
+            highlight_words_text: settings.highlight_words.join(", "),
+            highlight_words: settings.highlight_words,
+            ignores: settings.ignores,
+            ignore_input: String::new(),
+            spell_check: settings.spell_check,
+            spell_languages: settings.spell_languages,
+            spell_checkers: HashMap::new(),
+            spell_tx,
+            spell_rx,
+            spell_downloading: None,
+            spell_error: None,
             hidden_buffer_keys: settings.hidden_buffer_keys,
             bouncer_read_markers: settings.bouncer_read_markers,
             oper_servers: settings.oper_servers,
@@ -1100,7 +1165,14 @@ impl WeeChatApp {
             system_light: cc.egui_ctx.system_theme() == Some(egui::Theme::Light),
             editing_light_theme: None,
             fset_state: crate::ui::fset::FsetState::default(),
+            topic_editor: None,
         };
+
+        if app.spell_check {
+            for lang in app.spell_languages.clone() {
+                app.load_spell_language(&cc.egui_ctx, &lang);
+            }
+        }
 
         // Trigger autoconnect for profiles that have the flag set and a saved password.
         let auto_profiles: Vec<ConnectionProfile> = app.profiles.iter()
@@ -1343,6 +1415,58 @@ impl WeeChatApp {
         Some(ServerStanding { nick: status.nick, oper, ircd: crate::ui::oper::Ircd::from_software(&status.software), manual_key })
     }
 
+    /// The network a buffer's ignore rules apply to, as (key, name), for the
+    /// connections other than WeeChat, which has /ignore itself.
+    pub(crate) fn ignore_network(&self, buffer_id: &str) -> Option<(String, String)> {
+        let conn = self.connections.iter().find(|c| buffer_id.starts_with(&format!("{}/", c.prefix)))?;
+        if conn.backend_type == BackendType::WeeChat {
+            return None;
+        }
+        let server = self.buffer_by_id(buffer_id)?.server.clone();
+        Some((format!("{}|{}", conn.prefix, server), server))
+    }
+
+    /// Ignore `nick` on a network, or on all of them.
+    pub(crate) fn add_ignore(&mut self, nick: String, network: Option<(String, String)>) {
+        let (network, network_label) = network.map_or((None, String::new()), |(key, label)| (Some(key), label));
+        let rule = crate::ui::ignore::IgnoreRule { nick, network, network_label };
+        if !self.ignores.iter().any(|r| r.nick.eq_ignore_ascii_case(&rule.nick) && r.network == rule.network) {
+            self.ignores.push(rule);
+        }
+        self.reapply_ignores();
+    }
+
+    /// Parse a language's dictionary in the background; it arrives as SpellEvent::Loaded.
+    pub(crate) fn load_spell_language(&self, ctx: &egui::Context, lang: &str) {
+        let (tx, ctx, lang) = (self.spell_tx.clone(), ctx.clone(), lang.to_string());
+        tokio::task::spawn_blocking(move || {
+            let result = crate::ui::spellcheck::SpellChecker::load(&lang);
+            let _ = tx.send(SpellEvent::Loaded(lang, result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Download a language's dictionary; it arrives as SpellEvent::Downloaded.
+    pub(crate) fn download_spell_language(&mut self, ctx: &egui::Context, lang: &str) {
+        self.spell_downloading = Some(lang.to_string());
+        let (tx, ctx, lang) = (self.spell_tx.clone(), ctx.clone(), lang.to_string());
+        tokio::spawn(async move {
+            let result = crate::ui::spellcheck::download(&lang).await;
+            let _ = tx.send(SpellEvent::Downloaded(lang, result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// A line only this app shows, in `buffer_id`: the answer to a local command.
+    pub(crate) fn local_info(&mut self, buffer_id: &str, text: &str) {
+        let now = chrono::Utc::now();
+        let id = format!("local-{}", now.timestamp_nanos_opt().unwrap_or_default());
+        let line = Line::new(id, now, "--".into(), text.into(), true, false);
+        if let Some(b) = self.buffer_by_id_mut(buffer_id) {
+            std::sync::Arc::make_mut(&mut b.messages).push_back(line);
+        }
+    }
+
     /// Entries from `ui::oper`: sent, or put in the input line to finish.
     fn oper_menu(&mut self, ui: &mut egui::Ui, entries: Vec<Option<crate::ui::oper::OperAction>>) {
         for entry in entries {
@@ -1546,6 +1670,7 @@ impl eframe::App for WeeChatApp {
             show_hidden_buffers: self.show_hidden_buffers,
             group_messages: self.group_messages,
             show_nick_modes: self.show_nick_modes,
+            show_channel_modes: self.show_channel_modes,
             fit_colors_to_theme: self.fit_colors_to_theme,
             buffer_order: self.buffer_order.clone(),
             cleared_buffer_ids: self.cleared_buffer_ids.clone(),
@@ -1553,6 +1678,11 @@ impl eframe::App for WeeChatApp {
             font_name: self.font_name.clone(),
             font_path: self.font_path.clone(),
             muted_buffer_names: self.muted_buffer_names.clone(),
+            buffer_notify: self.buffer_notify.clone(),
+            highlight_words: self.highlight_words.clone(),
+            ignores: self.ignores.clone(),
+            spell_check: self.spell_check,
+            spell_languages: self.spell_languages.clone(),
             hidden_buffer_keys: self.hidden_buffer_keys.clone(),
             accept_invalid_certs: false,
             irc_nick: String::new(),
@@ -1681,6 +1811,31 @@ impl eframe::App for WeeChatApp {
             got_preview = true;
         }
         if got_preview { ctx.request_repaint(); }
+
+        while let Ok(event) = self.spell_rx.try_recv() {
+            match event {
+                SpellEvent::Loaded(lang, Ok(checker)) => {
+                    if self.spell_languages.contains(&lang) {
+                        self.spell_checkers.insert(lang, std::sync::Arc::new(checker));
+                    }
+                }
+                SpellEvent::Loaded(_, Err(e)) => self.spell_error = Some(e),
+                SpellEvent::Downloaded(lang, result) => {
+                    self.spell_downloading = None;
+                    match result {
+                        Ok(()) => {
+                            self.spell_error = None;
+                            if !self.spell_languages.contains(&lang) {
+                                self.spell_languages.push(lang.clone());
+                            }
+                            self.load_spell_language(ctx, &lang);
+                        }
+                        Err(e) => self.spell_error = Some(e),
+                    }
+                }
+            }
+            ctx.request_repaint();
+        }
 
         // /np drain: send the formatted now-playing message, or show why there is none.
         while let Ok(result) = self.np_rx.try_recv() {
@@ -1903,7 +2058,9 @@ impl eframe::App for WeeChatApp {
         let mut pending_collapse_toggle: Option<String> = None;
         let mut pending_buffer_command = None;
         let mut next_drag_buffer_id: Option<String> = None;
-        let mut pending_mute: Option<(String, String, bool)> = None;
+        // (buffer, full name, level): None mutes.
+        let mut pending_mute: Option<(String, String, Option<NotifyLevel>)> = None;
+        let mut pending_topic_edit: Option<String> = None;
         // An oper command to finish in a buffer's input line, and a server marked as one
         // where we're an oper (or not).
         let mut pending_input_fill: Option<(String, String)> = None;
@@ -2234,23 +2391,32 @@ impl eframe::App for WeeChatApp {
                                 let buf_kind = buffer.kind.clone();
                                 let buf_hidden = buffer.hidden;
                                 let buf_muted = buffer.muted;
+                                let buf_notify = buffer.notify;
                                 let buf_name = buffer.name.clone();
                                 let standing = matches!(buf_kind.as_str(), "server" | "channel")
                                     .then(|| self.server_standing(&buffer.id)).flatten();
                                 resp.context_menu(|ui| {
-                                    if buf_muted {
-                                        if ui.button(format!("{} Unmute Buffer", icons::BELL)).clicked() {
-                                            pending_mute = Some((buf_id.clone(), buf_full_name.clone(), false));
-                                            ui.close();
+                                    let icon = if buf_muted { icons::BELL_SLASH } else { icons::BELL };
+                                    ui.menu_button(format!("{icon} Notify"), |ui| {
+                                        let current = (!buf_muted).then_some(buf_notify);
+                                        for (level, label, tip) in [
+                                            (Some(NotifyLevel::All), "Every message", "A notification for every message"),
+                                            (Some(NotifyLevel::Default), "Mentions (default)", "Messages count as unread; mentions and private messages notify"),
+                                            (Some(NotifyLevel::Mentions), "Only mentions", "Only mentions and private messages count as unread, and notify"),
+                                            (None, "Muted", "Nothing counts as unread or notifies"),
+                                        ] {
+                                            if ui.radio(current == level, label).on_hover_text(tip).clicked() {
+                                                pending_mute = Some((buf_id.clone(), buf_full_name.clone(), level));
+                                                ui.close();
+                                            }
                                         }
-                                    } else {
-                                        if ui.button(format!("{} Mute Buffer", icons::BELL_SLASH)).clicked() {
-                                            pending_mute = Some((buf_id.clone(), buf_full_name.clone(), true));
-                                            ui.close();
-                                        }
-                                    }
+                                    });
                                     ui.separator();
                                     if buf_kind == "channel" {
+                                        if ui.button("Edit Topic…").clicked() {
+                                            pending_topic_edit = Some(buf_id.clone());
+                                            ui.close();
+                                        }
                                         if ui.button("Leave Channel").clicked() {
                                             pending_buffer_command = Some((buf_id.clone(), "/part".to_string()));
                                             ui.close();
@@ -2362,15 +2528,28 @@ impl eframe::App for WeeChatApp {
             }
         }
 
-        if let Some((buf_id, full_name, mute)) = pending_mute {
+        if let Some(buf_id) = pending_topic_edit {
+            self.open_topic_editor(&buf_id);
+        }
+        if let Some((buf_id, full_name, level)) = pending_mute {
             let key = self.saved_state_key(&buf_id).map(|(key, _)| key).unwrap_or(full_name);
+            let mute = level.is_none();
             if mute {
-                self.muted_buffer_names.insert(key);
+                self.muted_buffer_names.insert(key.clone());
             } else {
                 self.muted_buffer_names.remove(&key);
             }
+            // A muted buffer keeps the level it had, for when it's unmuted.
+            match level {
+                Some(NotifyLevel::Default) => { self.buffer_notify.remove(&key); }
+                Some(level) => { self.buffer_notify.insert(key, level); }
+                None => {}
+            }
             if let Some(b) = self.buffer_by_id_mut(&buf_id) {
                 b.muted = mute;
+                if let Some(level) = level {
+                    b.notify = level;
+                }
                 if mute {
                     b.activity = BufferActivity::None;
                     b.unread_count = 0;
@@ -2424,7 +2603,7 @@ impl eframe::App for WeeChatApp {
         let _current_buffer_last_read_id = current_buf.and_then(|b| b.last_read_id.clone());
         let current_buffer_visit_marker_id = current_buf.and_then(|b| b.visit_start_marker_id.clone());
         let current_buffer_topic = current_buf.map(|b| b.topic.clone()).unwrap_or_default();
-        let current_buffer_modes = current_buf.map(|b| b.modes.clone()).unwrap_or_default();
+        let current_buffer_modes = current_buf.filter(|_| self.show_channel_modes).map(|b| b.modes.clone()).unwrap_or_default();
         let current_buffer_kind = current_buf.map(|b| b.kind.clone()).unwrap_or_default();
         let current_buffer_name = current_buf.map(|b| b.name.clone()).unwrap_or_default();
         // Each nick's highest channel mode, to show before it in chat. WeeChat puts it in
@@ -2554,6 +2733,13 @@ impl eframe::App for WeeChatApp {
                                             ui.ctx().copy_text(name.clone());
                                             ui.close();
                                         }
+                                        if let Some(id) = current_buffer_id.as_deref().filter(|id| self.ignore_network(id).is_some()) {
+                                            if ui.button(format!("Ignore {}", name)).on_hover_text("Hide their messages on this network").clicked() {
+                                                let network = self.ignore_network(id);
+                                                self.add_ignore(name.clone(), network);
+                                                ui.close();
+                                            }
+                                        }
                                         ui.separator();
                                         ui.menu_button("CTCP", |ui| {
                                             for (label, ctcp) in [("Version", "VERSION"), ("Ping", "PING"), ("Time", "TIME")] {
@@ -2682,12 +2868,42 @@ impl eframe::App for WeeChatApp {
                         }
 
                         ui.add_enabled_ui(selected_buffer_connected, |ui| {
-                            let text_edit = egui::TextEdit::singleline(&mut self.input_text)
+                            // Misspelled words underlined, skipping the nicks of the buffer.
+                            let checkers: Vec<std::sync::Arc<crate::ui::spellcheck::SpellChecker>> = if self.spell_check {
+                                self.spell_languages.iter().filter_map(|l| self.spell_checkers.get(l).cloned()).collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let spell_nicks: Vec<String> = current_buffer_nicks.as_ref()
+                                .map(|n| n.iter().map(|n| n.name.clone()).collect())
+                                .unwrap_or_default();
+                            let input_font = font_id.clone();
+                            let mut spell_layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                                let text = buf.as_str();
+                                let refs: Vec<&crate::ui::spellcheck::SpellChecker> = checkers.iter().map(|c| c.as_ref()).collect();
+                                let errors = crate::ui::spellcheck::misspelled(&refs, text, &spell_nicks);
+                                let normal = egui::TextFormat::simple(input_font.clone(), ui.visuals().text_color());
+                                let wrong = egui::TextFormat { underline: egui::Stroke::new(1.5, Color32::from_rgb(220, 60, 60)), ..normal.clone() };
+                                let mut job = LayoutJob::default();
+                                let mut at = 0;
+                                for (start, end) in errors {
+                                    job.append(&text[at..start], 0.0, normal.clone());
+                                    job.append(&text[start..end], 0.0, wrong.clone());
+                                    at = end;
+                                }
+                                job.append(&text[at..], 0.0, normal);
+                                job.wrap.max_width = wrap_width;
+                                ui.fonts_mut(|f| f.layout_job(job))
+                            };
+                            let mut text_edit = egui::TextEdit::singleline(&mut self.input_text)
                                 .hint_text(hint)
                                 .font(font_id.clone())
                                 .margin(Margin::symmetric(8, 4))
                                 .lock_focus(true)
                                 .desired_width(ui.available_width() - 80.0);
+                            if !checkers.is_empty() {
+                                text_edit = text_edit.layouter(&mut spell_layouter);
+                            }
 
                             let res = ui.add(text_edit);
                             self.apply_remote_completion(ctx);
@@ -2894,7 +3110,25 @@ impl eframe::App for WeeChatApp {
                                         let sections = ANSIParser::parse(&current_buffer_topic);
                                         let mut job = LayoutJob::default();
                                         for s in sections { job.append(&s.text, 0.0, s.style.to_format(topic_font.clone(), &render_theme)); }
-                                        ui.add(Label::new(job).wrap());
+                                        let topic_resp = ui.add(Label::new(job).wrap().sense(egui::Sense::click()));
+                                        if current_buffer_kind == "channel" {
+                                            if let Some(id) = current_buffer_id.as_deref() {
+                                                if topic_resp.double_clicked() {
+                                                    self.open_topic_editor(id);
+                                                }
+                                                topic_resp.on_hover_text("Double-click to edit the topic").context_menu(|ui| {
+                                                    if ui.button("Edit Topic…").clicked() {
+                                                        self.open_topic_editor(id);
+                                                        ui.close();
+                                                    }
+                                                    if ui.button("Copy Topic").clicked() {
+                                                        let plain: String = ANSIParser::parse(&current_buffer_topic).iter().map(|s| s.text.as_str()).collect();
+                                                        ui.ctx().copy_text(plain);
+                                                        ui.close();
+                                                    }
+                                                });
+                                            }
+                                        }
                                     }
                                 });
                             });
@@ -3438,6 +3672,7 @@ impl eframe::App for WeeChatApp {
         }
 
         self.show_quick_switcher(ctx, accent_color, text_muted);
+        self.show_topic_editor(ctx);
         self.show_settings_window(ctx, accent_color, is_light);
         self.show_connections_window(ctx, accent_color, is_light);
 
@@ -3501,7 +3736,7 @@ mod tests {
             messages: Default::default(), nicks: Default::default(),
             activity: crate::relay::models::BufferActivity::None, unread_count: 0,
             last_read_id: None, last_markread_ts: None, topic: String::new(), modes: String::new(),
-            hidden: false, muted: false, has_nicklist: true, visit_start_marker_id: None,
+            hidden: false, muted: false, notify: Default::default(), has_nicklist: true, visit_start_marker_id: None,
         };
         // The same channel on two networks of one bouncer login: same full name, two keys.
         let libera = buffer("home/net1/#rust", "znc.example/znc/libera", "#Rust");

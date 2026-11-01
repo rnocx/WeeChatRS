@@ -40,6 +40,18 @@ pub struct CompletionReply {
     pub list: Vec<String>,
 }
 
+/// What a buffer's messages do, besides muting it: chosen per buffer in its menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NotifyLevel {
+    /// Every message from someone else notifies.
+    All,
+    /// Messages count as unread; mentions and private messages notify.
+    #[default]
+    Default,
+    /// Only mentions and private messages count as unread, and notify.
+    Mentions,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum BufferActivity {
     None = 0,
@@ -69,6 +81,7 @@ pub struct Buffer {
     pub modes: String,
     pub hidden: bool,
     pub muted: bool,
+    pub notify: NotifyLevel,
     pub has_nicklist: bool,
     /// Snapshot of last_read_id taken when the buffer was first entered this session.
     /// Used to anchor the unread divider while the user views the buffer.

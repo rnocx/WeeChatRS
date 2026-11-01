@@ -432,6 +432,7 @@ fn network_event(
         BackendEvent::NickAwayChanged { buffer_id, nick_name, away } => BackendEvent::NickAwayChanged { buffer_id: id(buffer_id), nick_name, away },
         BackendEvent::ActivityChanged { buffer_id, activity, unread_count, markread_ts } => BackendEvent::ActivityChanged { buffer_id: id(buffer_id), activity, unread_count, markread_ts },
         BackendEvent::TopicChanged { buffer_id, topic } => BackendEvent::TopicChanged { buffer_id: id(buffer_id), topic },
+        BackendEvent::ModesChanged { buffer_id, modes } => BackendEvent::ModesChanged { buffer_id: id(buffer_id), modes },
         BackendEvent::BufferHidden { buffer_id, hidden } => BackendEvent::BufferHidden { buffer_id: id(buffer_id), hidden },
         BackendEvent::LinesLoaded { buffer_id, lines, is_prepend } => BackendEvent::LinesLoaded { buffer_id: id(buffer_id), lines, is_prepend },
         BackendEvent::HistoryResults { request, lines, error } => BackendEvent::HistoryResults {
@@ -457,7 +458,7 @@ mod tests {
             messages: Default::default(), nicks: Default::default(),
             activity: crate::relay::models::BufferActivity::None, unread_count: 0,
             last_read_id: None, last_markread_ts: None, topic: String::new(), modes: String::new(),
-            hidden: false, muted: false, has_nicklist: true, visit_start_marker_id: None,
+            hidden: false, muted: false, notify: Default::default(), has_nicklist: true, visit_start_marker_id: None,
         }
     }
 

@@ -4,6 +4,9 @@ pub mod theme;
 pub mod keybinds;
 pub mod fset;
 pub(crate) mod wallpaper;
+pub(crate) mod ignore;
+pub(crate) mod spellcheck;
+pub(crate) mod topic_editor;
 mod sysinfo;
 
 mod settings;

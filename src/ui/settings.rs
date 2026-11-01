@@ -287,10 +287,54 @@ impl WeeChatApp {
         hint(ui, "Shows the nick once for messages sent within 5 minutes of each other; hover a line for its time.");
         ui.checkbox(&mut self.show_nick_modes, "Show nick modes (@, %, +) in chat");
         hint(ui, "On IRC, soju, ZNC and Injected, from the nick list. WeeChat shows them by its own option, irc.look.nick_mode.");
+        ui.checkbox(&mut self.show_channel_modes, "Show channel modes (such as [+nt]) before the topic");
         ui.checkbox(&mut self.show_filtered_lines, "Show filtered lines");
         ui.checkbox(&mut self.colored_nicks, "Coloured nicknames in the nick list");
         ui.checkbox(&mut self.emoji_rendering, "Colour emoji rendering");
         hint(ui, "Requires the emojinize script on the WeeChat server.");
+
+        section_heading(ui, "Highlights");
+        ui.horizontal(|ui| {
+            ui.label("Highlight words:");
+            let edit = egui::TextEdit::singleline(&mut self.highlight_words_text)
+                .hint_text("your name, a project")
+                .desired_width(300.0);
+            if ui.add(edit).changed() {
+                self.highlight_words = crate::ui::ignore::parse_words(&self.highlight_words_text);
+            }
+        });
+        hint(ui, "Besides your nick, separated by commas; whole words, any case. On IRC, soju, ZNC and Injected; WeeChat uses its own weechat.look.highlight.");
+
+        section_heading(ui, "Ignored nicks");
+        hint(ui, "Their messages are hidden, and shown again with Show filtered lines. A nick or a pattern with * and ?; right-click a nick to ignore it on one network. On IRC, soju, ZNC and Injected; WeeChat has its own /ignore.");
+        let mut remove = None;
+        for (i, rule) in self.ignores.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&rule.nick).strong());
+                let scope = if rule.network.is_some() { format!("on {}", rule.network_label) } else { "on all networks".to_string() };
+                ui.label(RichText::new(scope).color(ui.visuals().weak_text_color()));
+                if ui.small_button("Remove").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        let mut add = false;
+        ui.horizontal(|ui| {
+            let resp = ui.add(egui::TextEdit::singleline(&mut self.ignore_input).hint_text("nick or pattern").desired_width(200.0));
+            add = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            add |= ui.add_enabled(!self.ignore_input.trim().is_empty(), egui::Button::new("Ignore on all networks")).clicked();
+        });
+        if let Some(i) = remove {
+            self.ignores.remove(i);
+            self.reapply_ignores();
+        }
+        let nick = self.ignore_input.trim().to_string();
+        if add && !nick.is_empty() {
+            self.add_ignore(nick, None);
+            self.ignore_input.clear();
+        }
+
+        self.spell_check_settings(ui);
 
         section_heading(ui, "Nick column");
         egui::Grid::new("chat_nick_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -666,6 +710,58 @@ impl WeeChatApp {
                 ui.add_space(2.0);
             }
         });
+    }
+
+    fn spell_check_settings(&mut self, ui: &mut egui::Ui) {
+        section_heading(ui, "Spell check");
+        let was_on = self.spell_check;
+        ui.checkbox(&mut self.spell_check, "Underline misspelled words in the input line");
+        if self.spell_check && !was_on {
+            for lang in self.spell_languages.clone() {
+                if !self.spell_checkers.contains_key(&lang) {
+                    self.load_spell_language(ui.ctx(), &lang);
+                }
+            }
+        }
+        if !self.spell_check {
+            return;
+        }
+        hint(ui, "A word is right when any ticked language knows it. Commands, links, channels and the buffer's nicks aren't checked.");
+        let installed = crate::ui::spellcheck::available_languages();
+        let mut codes: Vec<&str> = installed.iter().map(String::as_str).collect();
+        codes.extend(crate::ui::spellcheck::CATALOGUE.iter().map(|d| d.code).filter(|c| !installed.iter().any(|i| i == c)));
+        egui::Grid::new("spell_languages").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+            for code in codes {
+                let name = format!("{} ({})", crate::ui::spellcheck::language_name(code), code);
+                if installed.iter().any(|i| i == code) {
+                    let mut on = self.spell_languages.iter().any(|l| l == code);
+                    if ui.checkbox(&mut on, name).changed() {
+                        if on {
+                            self.spell_languages.push(code.to_string());
+                            self.load_spell_language(ui.ctx(), code);
+                        } else {
+                            self.spell_languages.retain(|l| l != code);
+                            self.spell_checkers.remove(code);
+                        }
+                    }
+                    ui.label("");
+                } else {
+                    ui.label(RichText::new(name).color(ui.visuals().weak_text_color()));
+                    if self.spell_downloading.as_deref() == Some(code) {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Downloading…");
+                        });
+                    } else if ui.add_enabled(self.spell_downloading.is_none(), egui::Button::new("Download")).clicked() {
+                        self.download_spell_language(ui.ctx(), code);
+                    }
+                }
+                ui.end_row();
+            }
+        });
+        if let Some(err) = &self.spell_error {
+            ui.label(RichText::new(err).small().color(Color32::from_rgb(220, 60, 60)));
+        }
     }
 
     fn file_sharing_section(&mut self, ui: &mut egui::Ui) {

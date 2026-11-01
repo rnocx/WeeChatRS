@@ -174,6 +174,7 @@ impl WeeChatApp {
                     let key = crate::ui::app::local_buffer_key(conn_prefix, &buf);
                     buf.hidden = self.hidden_buffer_keys.contains(&key);
                     buf.muted = self.muted_buffer_names.contains(&key);
+                    buf.notify = self.buffer_notify.get(&key).copied().unwrap_or_default();
                 }
                 if !self.buffer_idx_of(&full_id).is_some() {
                     // Keep a network's buffers together: after the last buffer of its group,
@@ -231,8 +232,9 @@ impl WeeChatApp {
                 }
                 self.rebuild_buffer_idx();
             }
-            BackendEvent::LineAdded { buffer_id, line } => {
+            BackendEvent::LineAdded { buffer_id, mut line } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                let from_us = self.apply_line_rules(conn_prefix, &full_id, &mut line);
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 if line.notify {
                     log::info!(
@@ -245,8 +247,9 @@ impl WeeChatApp {
                 let mut notify_prefix = String::new();
                 let mut notify_message = String::new();
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                    if !is_selected && !buf.muted && line.displayed {
-                        if line.notify {
+                    let notifies = line.notify || (buf.notify == NotifyLevel::All && !from_us && crate::ui::app::is_chat_prefix(&line.plain_prefix));
+                    if !is_selected && !buf.muted && line.displayed && (notifies || buf.notify != NotifyLevel::Mentions) {
+                        if notifies {
                             buf.activity = crate::relay::models::BufferActivity::Highlight;
                             should_notify = true;
                             buf_name = buf.name.clone();
@@ -312,6 +315,12 @@ impl WeeChatApp {
                     buf.topic = topic;
                 }
             }
+            BackendEvent::ModesChanged { buffer_id, modes } => {
+                let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                if let Some(buf) = self.buffer_by_id_mut(&full_id) {
+                    buf.modes = modes;
+                }
+            }
             BackendEvent::ActivityChanged { buffer_id, activity, unread_count, markread_ts } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 // The buffer on screen is being read, whatever the server's read position
@@ -327,8 +336,11 @@ impl WeeChatApp {
                     }
                 }
             }
-            BackendEvent::LinesLoaded { buffer_id, lines, is_prepend } => {
+            BackendEvent::LinesLoaded { buffer_id, mut lines, is_prepend } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                for line in lines.iter_mut() {
+                    self.apply_line_rules(conn_prefix, &full_id, line);
+                }
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 let is_load_more = self.loading_more_buffer_id.as_deref() == Some(full_id.as_str());
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
@@ -345,6 +357,8 @@ impl WeeChatApp {
                             if line.notify {
                                 buf.activity = crate::relay::models::BufferActivity::Highlight;
                                 buf.unread_count = buf.unread_count.saturating_add(1);
+                            } else if buf.notify == NotifyLevel::Mentions {
+                                continue;
                             } else if buf.activity != crate::relay::models::BufferActivity::Highlight {
                                 buf.activity = crate::relay::models::BufferActivity::Message;
                                 buf.unread_count = buf.unread_count.saturating_add(1);
@@ -458,6 +472,17 @@ impl WeeChatApp {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
                             conn.client.refresh_buffer(&raw_id);
+                        }
+                    }
+                }
+                // The body is the buffer, with its new modes.
+                "buffer_modes_changed" => {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let full_id = format!("{}/{}", conn_prefix, raw_id);
+                        if let Some(modes) = resp.body.as_ref().and_then(|b| b.get("modes")).and_then(|v| v.as_str()) {
+                            if let Some(buf) = self.buffer_by_id_mut(&full_id) {
+                                buf.modes = modes.to_string();
+                            }
                         }
                     }
                 }
@@ -634,10 +659,12 @@ impl WeeChatApp {
 
         if let Some(vars) = obj.get("local_variables").and_then(|v| v.as_object()) {
             if let Some(t) = vars.get("topic").and_then(|v| v.as_str()) { *topic = t.to_string(); }
-            if let Some(m) = vars.get("modes").and_then(|v| v.as_str()) { *modes = m.to_string(); }
             if let Some(k) = vars.get("type").and_then(|v| v.as_str()) { *kind = k.to_string(); }
             if let Some(s) = vars.get("server").and_then(|v| v.as_str()) { *server = s.to_string().to_lowercase(); }
         }
+
+        // A channel's modes are the buffer's own property (WeeChat 4.3 and later).
+        if let Some(m) = obj.get("modes").and_then(|v| v.as_str()) { *modes = m.to_string(); }
 
         if topic.is_empty() {
             if let Some(t) = obj.get("title").and_then(|v| v.as_str()) { *topic = t.to_string(); }
@@ -742,6 +769,7 @@ impl WeeChatApp {
                         last_markread_ts = existing.last_markread_ts;
                     }
                     let muted = self.muted_buffer_names.contains(&full_full_name);
+                    let full_name_key = full_full_name.clone();
                     if relay_last_read_id.is_some() {
                         last_read_id = relay_last_read_id.clone();
                     }
@@ -776,6 +804,7 @@ impl WeeChatApp {
                         modes,
                         hidden,
                         muted,
+                        notify: self.buffer_notify.get(&full_name_key).copied().unwrap_or_default(),
                         has_nicklist: effective_nicklist,
                         visit_start_marker_id,
                         last_markread_ts,
@@ -1012,6 +1041,51 @@ impl WeeChatApp {
         }
     }
 
+    /// The app's own rules for a line from IRC, soju, ZNC or Injected: an ignored
+    /// nick's line is filtered (shown only with Show filtered lines), and a highlight
+    /// word makes it a highlight. True when we sent it.
+    pub(crate) fn apply_line_rules(&self, conn_prefix: &str, buffer_id: &str, line: &mut Line) -> bool {
+        if !crate::ui::app::is_chat_prefix(&line.plain_prefix) {
+            return false;
+        }
+        let Some(server) = self.buffer_by_id(buffer_id).map(|b| b.server.clone()) else { return false };
+        let Some(nick) = crate::ui::app::prefix_nick(line).map(|(n, _)| n.to_string()) else { return false };
+        let ours = self.connections.iter().find(|c| c.prefix == conn_prefix)
+            .and_then(|c| c.server_status.get(&server))
+            .is_some_and(|s| s.nick.eq_ignore_ascii_case(&nick));
+        if ours {
+            return true;
+        }
+        if crate::ui::ignore::is_ignored(&self.ignores, &format!("{}|{}", conn_prefix, server), &nick) {
+            line.displayed = false;
+        } else if !line.highlight && crate::ui::ignore::mentions_any(&line.plain_message_lower, &self.highlight_words) {
+            line.highlight = true;
+            line.notify = true;
+        }
+        false
+    }
+
+    /// Hide or show the loaded lines of IRC, soju, ZNC and Injected buffers after the
+    /// ignore list changed. Those backends' lines are otherwise always displayed.
+    pub(crate) fn reapply_ignores(&mut self) {
+        let prefixes: Vec<String> = self.connections.iter()
+            .filter(|c| c.backend_type != crate::ui::app::BackendType::WeeChat)
+            .map(|c| c.prefix.clone())
+            .collect();
+        let ignores = self.ignores.clone();
+        for buf in self.buffers.iter_mut() {
+            let Some(prefix) = prefixes.iter().find(|p| buf.id.starts_with(&format!("{}/", p))) else { continue };
+            let network = format!("{}|{}", prefix, buf.server);
+            let hide = |line: &Line| crate::ui::app::is_chat_prefix(&line.plain_prefix)
+                && crate::ui::app::prefix_nick(line).is_some_and(|(nick, _)| crate::ui::ignore::is_ignored(&ignores, &network, nick));
+            if buf.messages.iter().any(|l| l.displayed == hide(l)) {
+                for line in Arc::make_mut(&mut buf.messages).iter_mut() {
+                    line.displayed = !hide(line);
+                }
+            }
+        }
+    }
+
     /// Fire a highlight notification for `buffer_id` (full prefixed id) with a
     /// per-buffer 3-second cooldown. Also requests user-attention so the dock
     /// bounces / taskbar flashes. Used by both the WeeChat and IRC backends.
@@ -1112,8 +1186,14 @@ impl WeeChatApp {
 
                             if is_selected {
                                 buffer.last_read_id = Some(line.id.clone());
-                            } else if displayed && !buffer.muted && !is_notify_none && !is_self_msg {
-                                let activity = if is_highlight || notify_level == 3 {
+                            } else if displayed && !buffer.muted && !is_notify_none && !is_self_msg
+                                && (buffer.notify != NotifyLevel::Mentions || is_highlight || notify_level == 3)
+                            {
+                                // Every message notifies at the All level; WeeChat's own
+                                // notify levels say what is a message (2) or private (3).
+                                let notifies = is_highlight || notify_level == 3
+                                    || (buffer.notify == NotifyLevel::All && notify_level >= 2);
+                                let activity = if notifies {
                                     BufferActivity::Highlight
                                 } else if notify_level == 2 {
                                     BufferActivity::Message
@@ -1132,7 +1212,7 @@ impl WeeChatApp {
                                     self.cleared_buffer_ids.remove(&buffer_id);
                                 }
 
-                                if (is_highlight || notify_level == 3) && !buffer.muted {
+                                if notifies {
                                     notify_data = Some((
                                         buffer.name.clone(),
                                         prefix.to_string(),
@@ -1292,7 +1372,7 @@ mod tests {
             id: id.into(), number, name: id.into(), full_name: id.into(), plugin: String::new(),
             kind: kind.into(), server: server.into(), messages: Default::default(), nicks: Default::default(),
             activity: BufferActivity::None, unread_count: 0, last_read_id: None, last_markread_ts: None,
-            topic: String::new(), modes: String::new(), hidden: false, muted: false, has_nicklist: false,
+            topic: String::new(), modes: String::new(), hidden: false, muted: false, notify: Default::default(), has_nicklist: false,
             visit_start_marker_id: None,
         }
     }
