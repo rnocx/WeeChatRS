@@ -73,6 +73,25 @@ Local mock-service tests cover authentication, heartbeat, history, sends, and cl
 close; a real-account compatibility check is still required.
 
 
+### Sharing text as a paste
+
+When a multiline paste is reviewed on an Injected connection, **Share as Injected
+paste** uploads the original text to that connection's `/api/paste` endpoint using
+its session token. Only the returned link is sent to the original conversation.
+`/paste <text>` opens the same review dialog, including for a single line.
+
+The upload preserves indentation, blank lines, and line endings. Nothing is
+uploaded until you choose the share action. You can still send the lines as
+messages, join them into one input line, or cancel. Failed uploads retain the
+text for retry. If the upload succeeds but the conversation disconnects, the link
+stays available to copy or send after reconnecting; retrying the link does not
+upload the text again.
+
+This paste service is offered only for Injected connections. WeeChat and direct
+IRC keep their existing paste/file-sharing options. Expiry, size limits, and rate
+limits are controlled by the Injected server; the client does not promise a fixed
+retention period.
+
 ### Development checks
 
 `cargo test --bin weechat-rs` covers the protocol and native bridge validation.

@@ -108,6 +108,9 @@ pub enum BackendEvent {
     _WeeChat(crate::relay::models::WeeChatResponse),
 }
 
+/// An optional backend-owned paste upload; only Injected implements it.
+pub type PasteUpload = std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>;
+
 /// Contract every backend must satisfy.
 /// The UI instantiates one of these and interacts only through this trait.
 #[allow(dead_code)]
@@ -120,6 +123,15 @@ pub trait BackendClient: Send {
 
     /// Send a chat message to a buffer.
     fn send_message(&self, buffer_id: &str, text: &str);
+
+    /// Whether this backend offers its own authenticated paste-link service.
+    fn supports_paste_upload(&self) -> bool { false }
+
+    /// Create a paste without posting it to chat. The UI asks first and sends the
+    /// returned link to the original buffer only after a successful upload.
+    fn create_paste(&self, _content: String) -> PasteUpload {
+        Box::pin(async { Err("This backend does not offer a paste service.".into()) })
+    }
 
     /// Request historical lines for a buffer (most recent `count` lines).
     fn fetch_lines(&self, buffer_id: &str, count: usize);

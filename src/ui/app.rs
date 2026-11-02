@@ -914,6 +914,7 @@ pub struct WeeChatApp {
     pub(crate) mentions: crate::ui::mentions::MentionsState,
     /// A paste of several lines, waiting for the user to say what to do with it.
     pub(crate) pending_paste: Option<crate::ui::paste::PendingPaste>,
+    pub(crate) injected_paste_upload: Option<crate::ui::paste::InjectedPasteUpload>,
     pub(crate) paste_queue: Option<crate::ui::paste::PasteQueue>,
     pub(crate) paste_error: Option<String>,
     /// The file of a paste being uploaded, removed when the upload is over.
@@ -1175,6 +1176,7 @@ impl WeeChatApp {
             quick_switcher: Default::default(),
             mentions: Default::default(),
             pending_paste: None,
+            injected_paste_upload: None,
             paste_queue: None,
             paste_error: None,
             paste_upload_dir: None,

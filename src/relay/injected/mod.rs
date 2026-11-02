@@ -8,6 +8,7 @@ pub(crate) mod web_login;
 #[cfg(feature = "injected-web-login")]
 pub(crate) mod web_window;
 mod protocol;
+mod paste;
 mod session;
 
 use crate::relay::backend::{BackendClient, BackendEvent};
@@ -86,6 +87,11 @@ impl BackendClient for InjectedClient {
     }
     fn send_message(&self, buffer_id: &str, text: &str) {
         self.command(Command::Send(buffer_id.into(), text.into()));
+    }
+    fn supports_paste_upload(&self) -> bool { true }
+    fn create_paste(&self, content: String) -> crate::relay::backend::PasteUpload {
+        let config = self.config.clone();
+        Box::pin(async move { paste::create(&config, content).await })
     }
     fn fetch_lines(&self, buffer_id: &str, count: usize) {
         self.command(Command::History(buffer_id.into(), count, None));
