@@ -426,12 +426,20 @@ pub struct ConnectionProfile {
     // SSH tunnel
     #[serde(default)]
     pub ssh_enabled: bool,
+    /// The SSH server: `[user@]host[:port]` or a `~/.ssh/config` alias.
     #[serde(default)]
     pub ssh_host: String,
-    #[serde(default)]
+    /// Older settings kept the port and user apart; `migrate_ssh_server` joins them in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_port: Option<u16>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ssh_user: String,
+    /// How ssh logs in; None in settings from before there was a choice.
+    #[serde(default)]
+    pub ssh_auth: Option<crate::ui::ssh_tunnel::SshAuth>,
+    #[serde(default)]
+    pub ssh_key_file: String,
+    /// Keep the SSH password or key passphrase in the keychain.
     #[serde(default)]
     pub ssh_save_password: bool,
     #[serde(default = "default_true")]
@@ -450,8 +458,54 @@ impl ConnectionProfile {
     }
     /// Keyring key for this profile's relay password.
     pub fn keyring_host_key(&self) -> String { format!("{}@{}", self.label, self.host) }
-    /// Keyring key for this profile's SSH tunnel password.
+    /// Keyring key for this profile's SSH password or key passphrase.
     pub fn ssh_keyring_key(&self) -> String { format!("ssh:{}@{}", self.label, self.ssh_host) }
+
+    /// Joins the SSH user and port of older settings into the server field, and
+    /// moves a saved password to the server's new keychain entry. Settings from
+    /// before the login choice used a saved password, else the agent and keys.
+    pub fn migrate_ssh_server(&mut self) {
+        if self.ssh_auth.is_none() {
+            self.ssh_auth = Some(if self.ssh_save_password {
+                crate::ui::ssh_tunnel::SshAuth::Password
+            } else {
+                crate::ui::ssh_tunnel::SshAuth::Auto
+            });
+        }
+        if self.ssh_user.is_empty() && self.ssh_port.is_none() {
+            return;
+        }
+        let old_key = self.ssh_keyring_key();
+        self.ssh_host = crate::ui::ssh_tunnel::join_server(&self.ssh_host, &self.ssh_user, self.ssh_port);
+        self.ssh_user.clear();
+        self.ssh_port = None;
+        if self.ssh_save_password {
+            let new_key = self.ssh_keyring_key();
+            if new_key != old_key {
+                if let Some(secret) = crate::ui::secure_storage::load_by_key(&old_key) {
+                    if crate::ui::secure_storage::save_by_key(&new_key, &secret).is_ok() {
+                        let _ = crate::ui::secure_storage::delete_by_key(&old_key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The SSH secret this profile needs before connecting: the password, or the key
+    /// file's passphrase when it has one. None when it logs in another way.
+    pub fn ssh_secret_needed(&self) -> Option<&'static str> {
+        if !self.ssh_enabled || self.backend_type == BackendType::Injected {
+            return None;
+        }
+        match self.ssh_auth.unwrap_or_default() {
+            crate::ui::ssh_tunnel::SshAuth::Auto => None,
+            crate::ui::ssh_tunnel::SshAuth::Password => Some("SSH password"),
+            crate::ui::ssh_tunnel::SshAuth::KeyFile => {
+                let path = crate::ui::ssh_tunnel::expand_home(&self.ssh_key_file);
+                crate::ui::ssh_tunnel::key_has_passphrase(&path).unwrap_or(false).then_some("Key passphrase")
+            }
+        }
+    }
 }
 
 impl Default for ConnectionProfile {
@@ -473,6 +527,8 @@ impl Default for ConnectionProfile {
             ssh_host: String::new(),
             ssh_port: None,
             ssh_user: String::new(),
+            ssh_auth: Some(Default::default()),
+            ssh_key_file: String::new(),
             ssh_save_password: false,
             auto_reconnect: true,
         }
@@ -979,6 +1035,8 @@ pub struct WeeChatApp {
     pub(crate) jirafeau_pw_loaded_for: Option<String>,
     /// Result of Settings → File sharing → Test server (written by the async check).
     pub(crate) jirafeau_test: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+    /// The connection form's Test tunnel result.
+    pub(crate) ssh_test: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
 
     // fset buffer panel state (search filter + inline edit)
     pub(crate) fset_state: crate::ui::fset::FsetState,
@@ -1035,13 +1093,11 @@ impl WeeChatApp {
                 auto_connect: false,
                 save_password: settings.save_password,
                 channel: String::new(),
-                ssh_enabled: false,
-                ssh_host: String::new(),
-                ssh_port: None,
-                ssh_user: String::new(),
-                ssh_save_password: false,
-                auto_reconnect: true,
+                ..Default::default()
             });
+        }
+        for profile in &mut profiles {
+            profile.migrate_ssh_server();
         }
 
         crate::ui::fonts::apply(&cc.egui_ctx, &settings.font_path);
@@ -1189,6 +1245,7 @@ impl WeeChatApp {
             jirafeau_download_pw: String::new(),
             jirafeau_pw_loaded_for: None,
             jirafeau_test: Default::default(),
+            ssh_test: Default::default(),
             keybinds: settings.keybinds.with_missing_defaults(),
             editing_keybind: None,
             quick_switcher: Default::default(),
@@ -1559,32 +1616,44 @@ impl WeeChatApp {
             self.session_passwords.insert(prefix.clone(), password.clone());
         }
 
-        // Start SSH tunnel if configured. Capture a log message for both success and failure.
-        let ssh_password = self.session_ssh_passwords.get(&prefix).cloned()
+        // Start the SSH tunnel if configured. If it can't start, the connection waits
+        // with an error instead of going straight to the relay, which the tunnel was
+        // there to avoid.
+        let ssh_secret = self.session_ssh_passwords.get(&prefix).cloned()
             .or_else(|| if profile.ssh_save_password {
                 crate::ui::secure_storage::load_by_key(&profile.ssh_keyring_key())
             } else { None });
 
         let mut ssh_tunnel_log: Option<String> = None;
-        let (effective_host, effective_port, ssh_tunnel) = if profile.backend_type != BackendType::Injected && profile.ssh_enabled && !profile.ssh_host.is_empty() {
-            match crate::ui::ssh_tunnel::SshTunnel::spawn(
-                &profile.ssh_host,
-                profile.ssh_port,
-                &profile.ssh_user,
-                ssh_password.as_deref(),
-                &profile.host,
+        let mut ssh_tunnel_error: Option<String> = None;
+        let (effective_host, effective_port, ssh_tunnel) = if profile.backend_type != BackendType::Injected && profile.ssh_enabled {
+            let spec = crate::ui::ssh_tunnel::TunnelSpec {
+                server: profile.ssh_host.clone(),
+                auth: profile.ssh_auth.unwrap_or_default(),
+                key_file: profile.ssh_key_file.clone(),
+                secret: ssh_secret,
+                relay_host: profile.host.clone(),
                 relay_port,
-            ) {
+            };
+            let (tx, repaint) = (per_conn_tx.clone(), ctx.clone());
+            let report = move |event: crate::ui::ssh_tunnel::TunnelEvent| {
+                let _ = tx.send(match event {
+                    crate::ui::ssh_tunnel::TunnelEvent::Log(text) => BackendEvent::ConnLog(text),
+                    crate::ui::ssh_tunnel::TunnelEvent::Failed(text) => BackendEvent::TunnelFailed(text),
+                });
+                repaint.request_repaint();
+            };
+            match crate::ui::ssh_tunnel::SshTunnel::spawn(spec, report) {
                 Ok(t) => {
                     let lp = t.local_port;
                     ssh_tunnel_log = Some(format!(
-                        "SSH tunnel started: 127.0.0.1:{} → {}:{}",
-                        lp, profile.host, relay_port
+                        "SSH tunnel through {}: 127.0.0.1:{} → {}:{}",
+                        profile.ssh_host, lp, profile.host, relay_port
                     ));
                     ("127.0.0.1".to_string(), lp, Some(t))
                 }
                 Err(e) => {
-                    ssh_tunnel_log = Some(format!("SSH tunnel failed to start: {} — connecting directly", e));
+                    ssh_tunnel_error = Some(format!("SSH tunnel failed: {e}"));
                     (profile.host.clone(), relay_port, None)
                 }
             }
@@ -1645,7 +1714,9 @@ impl WeeChatApp {
                 Box::new(WeeChatClient::new(config, per_conn_tx.clone(), ctx.clone()))
             }
         };
-        client.connect();
+        if ssh_tunnel_error.is_none() {
+            client.connect();
+        }
 
         spawn_event_forwarder(prefix.clone(), per_conn_rx, self.shared_event_tx.clone());
 
@@ -1668,6 +1739,16 @@ impl WeeChatApp {
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         if let Some(msg) = ssh_tunnel_log {
             conn.connection_log.push_back(format!("[{}]  {}", ts, msg));
+        }
+        if let Some(err) = ssh_tunnel_error {
+            conn.connection_log.push_back(format!("[{}]  {}", ts, err));
+            conn.status = "SSH tunnel failed".to_string();
+            conn.is_connecting = false;
+            conn.connecting_pending = false;
+            conn.auth_error = Some(err);
+            self.connections.push(conn);
+            self.connection_log_unread = !self.show_connection_log;
+            return;
         }
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         conn.connection_log.push_back(format!("[{}]  Connecting to {}://{}:{}{}", ts, proto, profile.host, relay_port, path));

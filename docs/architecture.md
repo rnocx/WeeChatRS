@@ -41,7 +41,8 @@ src/
     np.rs                    — /np now-playing (macOS Now Playing, Linux MPRIS,
                                Windows media controls)
     sysinfo.rs               — /sysinfo
-    ssh_tunnel.rs            — SSH port-forward tunnel via an ssh subprocess
+    ssh_tunnel.rs            — SSH port-forward tunnel via an ssh subprocess, kept up by a
+                               supervisor thread; the app's own binary is ssh's askpass
     secure_storage.rs        — passwords in the OS keychain
     url_safety.rs            — keeps link and image previews off private addresses
     vibrancy.rs              — macOS background blur

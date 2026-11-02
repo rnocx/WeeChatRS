@@ -16,6 +16,9 @@ pub enum BackendEvent {
     AuthError(String),
     /// Informational message for the connection log only (not shown as an error).
     ConnLog(String),
+    /// The SSH tunnel stopped for good (bad login, changed host key…): the
+    /// connection stops too, with this message.
+    TunnelFailed(String),
     /// Full initial buffer list received on connect.
     BuffersLoaded(Vec<Buffer>),
     /// A single new message arrived in a buffer.

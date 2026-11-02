@@ -108,6 +108,16 @@ impl WeeChatApp {
                     self.connection_log_unread = true;
                 }
             }
+            BackendEvent::TunnelFailed(e) => {
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.client.disconnect();
+                    conn.is_connecting = false;
+                    conn.connecting_pending = false;
+                    conn.status = "SSH tunnel failed".into();
+                    conn.auth_error = Some(e.clone());
+                }
+                self.log_conn_for(conn_prefix, e);
+            }
             BackendEvent::AuthError(e) if self.connections.iter().any(|c| c.prefix == conn_prefix && c.backend_type == crate::ui::app::BackendType::Injected) => {
                 if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
                     conn.is_connecting = false;

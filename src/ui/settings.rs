@@ -930,6 +930,114 @@ impl WeeChatApp {
         }
     }
 
+    /// The SSH part of the connection form: the server, how to log in, and a test.
+    fn ssh_tunnel_form(&mut self, ui: &mut egui::Ui) {
+        use crate::ui::ssh_tunnel::SshAuth;
+        let red = Color32::from_rgb(220, 80, 80);
+        ui.add_space(4.0);
+        egui::Grid::new("ssh_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("SSH server:");
+            ui.vertical(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_host)
+                    .desired_width(240.0)
+                    .hint_text("user@host:port or an ssh alias"));
+                if !self.editing_profile.ssh_host.trim().is_empty() {
+                    if let Err(e) = crate::ui::ssh_tunnel::parse_server(&self.editing_profile.ssh_host) {
+                        ui.label(RichText::new(e).small().color(red));
+                    }
+                }
+            });
+            ui.end_row();
+
+            ui.label("Log in with:");
+            let auth = self.editing_profile.ssh_auth.get_or_insert_default();
+            ui.horizontal(|ui| {
+                ui.selectable_value(auth, SshAuth::Auto, "Agent and keys").on_hover_text("The SSH agent, your ~/.ssh keys and ~/.ssh/config");
+                ui.selectable_value(auth, SshAuth::KeyFile, "Key file");
+                ui.selectable_value(auth, SshAuth::Password, "Password");
+            });
+            ui.end_row();
+
+            let auth = *auth;
+            if auth == SshAuth::KeyFile {
+                ui.label("Key file:");
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_key_file)
+                            .desired_width(240.0)
+                            .hint_text("~/.ssh/id_ed25519"));
+                        if ui.button("Choose…").clicked() {
+                            let mut dialog = rfd::FileDialog::new();
+                            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+                                dialog = dialog.set_directory(std::path::PathBuf::from(home).join(".ssh"));
+                            }
+                            if let Some(path) = dialog.pick_file() {
+                                self.editing_profile.ssh_key_file = path.display().to_string();
+                            }
+                        }
+                    });
+                    let path = crate::ui::ssh_tunnel::expand_home(&self.editing_profile.ssh_key_file);
+                    if !self.editing_profile.ssh_key_file.trim().is_empty() {
+                        match crate::ui::ssh_tunnel::key_has_passphrase(&path) {
+                            Ok(true) => hint(ui, "This key has a passphrase."),
+                            Ok(false) => hint(ui, "This key has no passphrase."),
+                            Err(e) => { ui.label(RichText::new(e).small().color(red)); }
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+            if auth != SshAuth::Auto {
+                ui.label(if auth == SshAuth::Password { "Password:" } else { "Passphrase:" });
+                ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password)
+                    .password(true)
+                    .desired_width(240.0)
+                    .hint_text(if self.editing_profile.ssh_save_password { "saved; type to change" } else { "asked when connecting" }));
+                ui.end_row();
+            }
+        });
+        let auth = self.editing_profile.ssh_auth.unwrap_or_default();
+        match auth {
+            SshAuth::Auto => hint(ui, "A key with a passphrase must be in the SSH agent: on macOS, ssh-add --apple-use-keychain ~/.ssh/<key> once. Or choose Key file and give the passphrase."),
+            SshAuth::KeyFile => { ui.checkbox(&mut self.editing_profile.ssh_save_password, "Save passphrase in keychain"); }
+            SshAuth::Password => { ui.checkbox(&mut self.editing_profile.ssh_save_password, "Save SSH password in keychain"); }
+        }
+        hint(ui, "Host and port above are the relay as the SSH server reaches it, often localhost.");
+
+        ui.horizontal(|ui| {
+            let ready = crate::ui::ssh_tunnel::parse_server(&self.editing_profile.ssh_host).is_ok();
+            let testing = matches!(self.ssh_test.lock().ok().and_then(|t| t.clone()), Some(Ok(ref s)) if s == "Testing…");
+            if ui.add_enabled(ready && !testing, egui::Button::new("Test tunnel")).clicked() {
+                let profile = &self.editing_profile;
+                let secret = Some(self.editing_ssh_password.clone()).filter(|s| !s.is_empty())
+                    .or_else(|| profile.ssh_save_password.then(|| crate::ui::secure_storage::load_by_key(&profile.ssh_keyring_key())).flatten());
+                let default_port = if profile.backend_type == BackendType::Soju { 6697 } else { 9001 };
+                let spec = crate::ui::ssh_tunnel::TunnelSpec {
+                    server: profile.ssh_host.clone(),
+                    auth,
+                    key_file: profile.ssh_key_file.clone(),
+                    secret,
+                    relay_host: profile.host.clone(),
+                    relay_port: profile.port.parse().unwrap_or(default_port),
+                };
+                let (result, ctx) = (self.ssh_test.clone(), ui.ctx().clone());
+                if let Ok(mut t) = result.lock() { *t = Some(Ok("Testing…".to_string())); }
+                std::thread::spawn(move || {
+                    let outcome = crate::ui::ssh_tunnel::test(&spec);
+                    if let Ok(mut t) = result.lock() { *t = Some(outcome); }
+                    ctx.request_repaint();
+                });
+            }
+            match self.ssh_test.lock().ok().and_then(|t| t.clone()) {
+                Some(Ok(text)) if text == "Testing…" => { ui.spinner(); ui.label(RichText::new(text).small()); }
+                Some(Ok(text)) => { ui.label(RichText::new(text).small().color(Color32::from_rgb(80, 190, 110))); }
+                Some(Err(err)) => { ui.label(RichText::new(err).small().color(red)); }
+                None => {}
+            }
+        });
+        ui.add_space(4.0);
+    }
+
     fn privatebin_section(&mut self, ui: &mut egui::Ui) {
         section_heading(ui, "Text pastes (PrivateBin)");
         hint(ui, "When you paste several lines, Share as PrivateBin paste sends a link instead, on IRC, soju, ZNC and WeeChat (Injected has its own pastes). The text is encrypted on this computer and the key is only in the link, so the server can't read it. No account is used; the server sees only your IP address.");
@@ -1226,35 +1334,7 @@ impl WeeChatApp {
                             if self.editing_profile.backend_type != BackendType::Injected { ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel"); }
                         });
                         if self.editing_profile.backend_type != BackendType::Injected && self.editing_profile.ssh_enabled {
-                            ui.add_space(4.0);
-                            egui::Grid::new("ssh_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                                ui.label("SSH Host:");
-                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_host)
-                                    .desired_width(240.0)
-                                    .hint_text("user@host or host"));
-                                ui.end_row();
-                                ui.label("SSH Port:");
-                                let mut ssh_port_str = self.editing_profile.ssh_port.map(|p| p.to_string()).unwrap_or_default();
-                                if ui.add(egui::TextEdit::singleline(&mut ssh_port_str).desired_width(80.0).hint_text("22")).changed() {
-                                    self.editing_profile.ssh_port = if ssh_port_str.is_empty() { None } else { ssh_port_str.parse::<u16>().ok() };
-                                }
-                                ui.end_row();
-                                ui.label("SSH User:");
-                                ui.add(egui::TextEdit::singleline(&mut self.editing_profile.ssh_user)
-                                    .desired_width(240.0)
-                                    .hint_text("leave blank to use SSH config / system user"));
-                                ui.end_row();
-                                ui.label("SSH Password:");
-                                ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password)
-                                    .password(true)
-                                    .desired_width(240.0)
-                                    .hint_text("leave blank to use SSH agent / keys"));
-                                ui.end_row();
-                            });
-                            ui.checkbox(&mut self.editing_profile.ssh_save_password, "Save SSH password");
-                            ui.add_space(2.0);
-                            hint(ui, "Connects via an ssh -L tunnel using your SSH agent / ~/.ssh keys.\nThe relay host/port above is where the tunnel forwards to.");
-                            ui.add_space(4.0);
+                            self.ssh_tunnel_form(ui);
                         }
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut self.editing_profile.auto_connect, "Auto-connect");
@@ -1295,6 +1375,7 @@ impl WeeChatApp {
                                 self.editing_password.clear();
                                 self.editing_ssh_password.clear();
                                 self.editing_profile_idx = None;
+                                if let Ok(mut t) = self.ssh_test.lock() { *t = None; }
                             }
                             if ui.button("Cancel").clicked() {
                                 self.injected_import = Default::default();
@@ -1303,6 +1384,7 @@ impl WeeChatApp {
                                 self.editing_password.clear();
                                 self.editing_ssh_password.clear();
                                 self.editing_profile_idx = None;
+                                if let Ok(mut t) = self.ssh_test.lock() { *t = None; }
                             }
                         });
                     });
@@ -1355,8 +1437,8 @@ impl WeeChatApp {
                                     } else if self.conn_connect_idx == Some(idx) {
                                         // Inline password prompt — shown only when passwords aren't cached/stored.
                                         ui.add(egui::TextEdit::singleline(&mut self.editing_password).password(true).hint_text(if profile.backend_type == BackendType::Injected { "Session token…" } else { "Password…" }).desired_width(110.0));
-                                        if profile.ssh_enabled {
-                                            ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password).password(true).hint_text("SSH password…").desired_width(110.0));
+                                        if let Some(what) = profile.ssh_secret_needed() {
+                                            ui.add(egui::TextEdit::singleline(&mut self.editing_ssh_password).password(true).hint_text(format!("{what}…")).desired_width(110.0));
                                         }
                                         if ui.button("OK").clicked() {
                                             if !self.editing_ssh_password.is_empty() {
@@ -1373,7 +1455,7 @@ impl WeeChatApp {
                                         // Check session cache, then keyring — skip prompt if password found.
                                         let relay_pw = self.session_passwords.get(&prefix).cloned()
                                             .or_else(|| crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()));
-                                        let ssh_pw_known = !profile.ssh_enabled
+                                        let ssh_pw_known = profile.ssh_secret_needed().is_none()
                                             || self.session_ssh_passwords.contains_key(&prefix)
                                             || profile.ssh_save_password;
                                         if relay_pw.is_some() && ssh_pw_known {

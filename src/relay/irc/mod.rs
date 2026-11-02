@@ -404,7 +404,7 @@ fn network_event(
             events.push(BackendEvent::ConnLog(format!("{}: disconnected", name)));
             return events;
         }
-        BackendEvent::Error(e) | BackendEvent::AuthError(e) => BackendEvent::ConnLog(format!("{}: {}", name, e)),
+        BackendEvent::Error(e) | BackendEvent::AuthError(e) | BackendEvent::TunnelFailed(e) => BackendEvent::ConnLog(format!("{}: {}", name, e)),
         BackendEvent::ConnLog(m) => BackendEvent::ConnLog(format!("{}: {}", name, m)),
         BackendEvent::BufferOpened(mut buffer) => {
             buffers.lock().unwrap().insert(buffer.id.clone());

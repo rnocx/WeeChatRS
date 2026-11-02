@@ -38,8 +38,9 @@ AppStream metainfo that Flathub and software centres show.
   sandbox's own for `known_hosts`. Notifications, choosing files and folders, and
   opening links go through portals.
 - **In the sandbox:**
-  - SSH tunnels authenticate with keys from the SSH agent; keys in the real `~/.ssh`
-    aren't visible.
+  - SSH tunnels authenticate with keys from the SSH agent, a password, or a key file
+    chosen with *Choose…* in the connection form (through the file portal); keys in
+    the real `~/.ssh` aren't visible otherwise.
   - *Import Injected session* can't find the Injected app's data by itself; use
     *Choose data folder…* (`~/.config/injected`) or sign in with the window.
   - `/np` runs `playerctl`, which isn't in the runtime, so it finds no player, and
