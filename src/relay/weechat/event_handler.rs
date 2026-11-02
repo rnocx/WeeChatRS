@@ -246,7 +246,9 @@ impl WeeChatApp {
                 let mut buf_name = String::new();
                 let mut notify_prefix = String::new();
                 let mut notify_message = String::new();
+                let mut new_mention = false;
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
+                    new_mention = line.highlight && line.displayed && !from_us && !is_selected && !buf.muted;
                     let notifies = line.notify || (buf.notify == NotifyLevel::All && !from_us && crate::ui::app::is_chat_prefix(&line.plain_prefix));
                     if !is_selected && !buf.muted && line.displayed && (notifies || buf.notify != NotifyLevel::Mentions) {
                         if notifies {
@@ -264,6 +266,9 @@ impl WeeChatApp {
                     if buf.messages.len() > MAX_STORED_LINES {
                         Arc::make_mut(&mut buf.messages).pop_front();
                     }
+                }
+                if new_mention {
+                    self.count_mention();
                 }
                 if should_notify {
                     self.notify_highlight(&full_id, &buf_name, &notify_prefix, &notify_message);
@@ -1136,6 +1141,13 @@ impl WeeChatApp {
         });
     }
 
+    /// A mention for the toolbar's count, unless the mentions view shows it already.
+    fn count_mention(&mut self) {
+        if !self.mentions.open {
+            self.mentions.unseen += 1;
+        }
+    }
+
     pub(crate) fn strip_ansi(text: &str) -> String {
         ansi_re().replace_all(text, "").to_string()
     }
@@ -1170,6 +1182,7 @@ impl WeeChatApp {
 
                     let is_selected = self.selected_buffer_id.as_deref() == Some(&buffer_id);
                     let mut notify_data: Option<(String, String, String)> = None;
+                    let mut new_mention = false;
                     if let Some(idx) = self.buffer_idx_of(&buffer_id) {
                         let buffer = &mut self.buffers[idx];
                         if let Some(pos) = buffer.messages.iter().rposition(|m| m.id == line.id) {
@@ -1183,6 +1196,8 @@ impl WeeChatApp {
                             if buffer.messages.len() > MAX_STORED_LINES {
                                 Arc::make_mut(&mut buffer.messages).pop_front();
                             }
+                            new_mention = is_highlight && displayed && !is_self_msg && !is_selected
+                                && !buffer.muted && buffer.name != "highmon";
 
                             if is_selected {
                                 buffer.last_read_id = Some(line.id.clone());
@@ -1221,6 +1236,9 @@ impl WeeChatApp {
                                 }
                             }
                         }
+                    }
+                    if new_mention {
+                        self.count_mention();
                     }
                     if let Some((name, p, m)) = notify_data {
                         self.notify_highlight(&buffer_id, &name, &p, &m);

@@ -17,6 +17,9 @@ pub(crate) mod secure_storage;
 pub(crate) mod fonts;
 pub(crate) mod icons;
 pub(crate) mod quick_switcher;
+pub(crate) mod mentions;
+pub(crate) mod alias;
+pub(crate) mod paste;
 #[cfg(target_os = "macos")]
 mod vibrancy;
 mod url_safety;

@@ -1787,10 +1787,17 @@ pub fn spawn(
                                         break 'conn;
                                     }
                                     Some(IrcCommand::SendMessage { buffer_id, text }) => {
+                                        // `//text` sends "/text" as a message, as in WeeChat.
+                                        let (text, literal) = match text.strip_prefix("//") {
+                                            Some(rest) => (format!("/{rest}"), true),
+                                            None => (text, false),
+                                        };
                                         let cmd_lower = text.trim().to_lowercase();
 
                                         // /me <text>  →  CTCP ACTION to current buffer (needs self-echo)
-                                        let text = if let Some(action) = text.trim_start()
+                                        let text = if literal {
+                                            text
+                                        } else if let Some(action) = text.trim_start()
                                             .strip_prefix("/me ")
                                             .or_else(|| text.trim_start().strip_prefix("/ME "))
                                         {
@@ -1818,8 +1825,8 @@ pub fn spawn(
 
                                         // /part and /close — leave channel or close DM buffer
                                         let cmd_lower = text.trim().to_ascii_lowercase();
-                                        let is_part = cmd_lower == "/part" || cmd_lower.starts_with("/part ");
-                                        let is_close = cmd_lower == "/close";
+                                        let is_part = !literal && (cmd_lower == "/part" || cmd_lower.starts_with("/part "));
+                                        let is_close = !literal && cmd_lower == "/close";
                                         if is_part || is_close {
                                             if is_channel(&buffer_id) {
                                                 // Send PART with optional message from /part <msg>
@@ -1840,7 +1847,7 @@ pub fn spawn(
                                                 send!(BackendEvent::BufferClosed { buffer_id });
                                             }
                                         // /query <nick> — client-side command: open a DM buffer, nothing to send
-                                        } else if let Some(rest) = text.strip_prefix("/query ").or_else(|| text.strip_prefix("/QUERY ")) {
+                                        } else if let Some(rest) = text.strip_prefix("/query ").or_else(|| text.strip_prefix("/QUERY ")).filter(|_| !literal) {
                                             let target_nick = rest.trim().split_whitespace().next().unwrap_or("").to_string();
                                             if !target_nick.is_empty() {
                                                 let buf_id = target_nick.to_lowercase();
@@ -1853,12 +1860,12 @@ pub fn spawn(
                                                     let _ = write_half.write_all(format!("MONITOR + {}\r\n", target_nick).as_bytes()).await;
                                                 }
                                             }
-                                        } else if let Some(wire) = expand_irc_command(&buffer_id, &text) {
+                                        } else if let Some(wire) = expand_irc_command(&buffer_id, &text).filter(|_| !literal) {
                                             if let Some(channel) = wire.strip_prefix("TOPIC ").filter(|rest| !rest.contains(' ')) {
                                                 session.topic_queries.insert(channel.to_lowercase());
                                             }
                                             let _ = write_half.write_all(format!("{}\r\n", wire).as_bytes()).await;
-                                        } else if let Some(cmd_text) = text.strip_prefix('/') {
+                                        } else if let Some(cmd_text) = text.strip_prefix('/').filter(|_| !literal) {
                                             let _ = write_half.write_all(format!("{}\r\n", cmd_text).as_bytes()).await;
                                         } else {
                                             let _ = write_half.write_all(format!("PRIVMSG {} :{}\r\n", buffer_id, text).as_bytes()).await;

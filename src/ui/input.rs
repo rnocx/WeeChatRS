@@ -26,6 +26,18 @@ impl WeeChatApp {
 
             let matches: Vec<String> = if word.starts_with(':') && word.len() >= 2 {
                 emoji::find_matches(&word[1..])
+            } else if let Some(typed) = word.strip_prefix('/').filter(|_| word_start == 0) {
+                // On IRC, soju, ZNC and Injected: this client's commands and the aliases.
+                let typed = typed.to_lowercase();
+                let mut names: Vec<String> = LOCAL_COMMANDS.iter().copied().chain(["alias", "unalias"])
+                    .map(str::to_string)
+                    .chain(self.aliases.keys().cloned())
+                    .filter(|n| n.starts_with(&typed))
+                    .map(|n| format!("/{n}"))
+                    .collect();
+                names.sort();
+                names.dedup();
+                names
             } else {
                 match self.selected_buffer_id.as_ref()
                     .and_then(|bid| self.buffers.iter().find(|b| &b.id == bid))
@@ -40,7 +52,7 @@ impl WeeChatApp {
 
             if !matches.is_empty() {
                 // Nick at line start gets ": ", emoji and mid-line nicks get " "
-                let suffix = if !word.starts_with(':') && word_start == 0 { ": " } else { " " };
+                let suffix = if !word.starts_with([':', '/']) && word_start == 0 { ": " } else { " " };
                 let mut new_text = self.input_text[..word_start].to_string();
                 new_text.push_str(&matches[0]);
                 new_text.push_str(suffix);
@@ -240,10 +252,82 @@ impl WeeChatApp {
         self.local_info(buffer_id, &text);
     }
 
+    /// `/alias`, `/unalias` and the aliases themselves, on IRC, soju, ZNC and Injected:
+    /// the commands to send instead of `msg`, none when it was answered here, or
+    /// `None` when `msg` isn't one of them.
+    fn alias_commands(&mut self, msg: &str) -> Option<Vec<String>> {
+        let buffer_id = self.selected_buffer_id.clone()?;
+        self.ignore_network(&buffer_id)?;
+        let (verb, rest) = msg.trim().split_once(' ').unwrap_or((msg.trim(), ""));
+        let rest = rest.trim();
+        let (first, args) = rest.split_once(' ').map_or((rest, ""), |(f, a)| (f, a.trim()));
+        let text = match verb.to_lowercase().as_str() {
+            "/alias" if rest.is_empty() && self.aliases.is_empty() => {
+                "No aliases. /alias <name> <command> adds one, such as /alias ns /msg NickServ".to_string()
+            }
+            "/alias" if rest.is_empty() => {
+                let list: Vec<String> = self.aliases.iter().map(|(name, command)| format!("/{name} → {command}")).collect();
+                format!("Aliases: {}", list.join(", "))
+            }
+            "/alias" => match crate::ui::alias::normalize_name(first) {
+                None => format!("Can't name an alias {first}"),
+                Some(name) if args.is_empty() => match self.aliases.get(&name) {
+                    Some(command) => format!("/{name} → {command}"),
+                    None => format!("No alias /{name}"),
+                },
+                Some(name) => {
+                    let command = if args.starts_with('/') { args.to_string() } else { format!("/{args}") };
+                    let text = format!("Alias /{name} → {command}");
+                    self.aliases.insert(name, command);
+                    text
+                }
+            },
+            "/unalias" => match crate::ui::alias::normalize_name(first).and_then(|name| self.aliases.remove(&name).map(|_| name)) {
+                Some(name) => format!("Removed the alias /{name}"),
+                None if first.is_empty() => "Usage: /unalias <name>".to_string(),
+                None => format!("No alias {first}"),
+            },
+            _ => {
+                let name = verb.strip_prefix('/').filter(|n| !n.starts_with('/'))?.to_lowercase();
+                let template = self.aliases.get(&name)?.clone();
+                let nick = self.server_standing(&buffer_id).map(|s| s.nick).unwrap_or_default();
+                let channel = self.buffer_by_id(&buffer_id).map(|b| b.name.clone()).unwrap_or_default();
+                return Some(crate::ui::alias::expand(&template, rest, &nick, &channel));
+            }
+        };
+        self.local_info(&buffer_id, &text);
+        Some(Vec::new())
+    }
+
     pub(crate) fn send_current_message(&mut self) {
         if self.input_text.is_empty() { return; }
         let msg = self.input_text.clone();
+        if let Some(commands) = self.alias_commands(&msg) {
+            for command in commands {
+                self.send_input(command, false);
+            }
+        } else {
+            self.send_input(msg, true);
+            return;
+        }
+        self.record_history(msg);
+        self.input_text.clear();
+        self.completion = None;
+        self.history_index = None;
+    }
 
+    fn record_history(&mut self, msg: String) {
+        if self.command_history.back().map(|s| s.as_str()) != Some(&msg) {
+            self.command_history.push_back(msg);
+            if self.command_history.len() > 100 {
+                self.command_history.pop_front();
+            }
+        }
+    }
+
+    /// Sends `msg` from the input line, or runs it when this client handles it.
+    /// `record` puts it in the input history.
+    fn send_input(&mut self, msg: String, record: bool) {
         let is_command = msg.starts_with('/');
 
         // Determine pending_buffer_switch before the borrow via client_for_buffer
@@ -259,6 +343,12 @@ impl WeeChatApp {
             {
                 // IRC, soju, ZNC and Injected; WeeChat's own /ignore gets the others.
                 self.ignore_command(&id, network, msg.trim());
+                self.input_text.clear();
+                self.completion = None;
+                self.history_index = None;
+                return;
+            } else if msg.trim() == "/mentions" {
+                self.mentions.toggle();
                 self.input_text.clear();
                 self.completion = None;
                 self.history_index = None;
@@ -347,11 +437,8 @@ impl WeeChatApp {
             }
         }
 
-        if self.command_history.back().map(|s| s.as_str()) != Some(&msg) {
-            self.command_history.push_back(msg);
-            if self.command_history.len() > 100 {
-                self.command_history.pop_front();
-            }
+        if record {
+            self.record_history(msg);
         }
 
         self.input_text.clear();
@@ -393,9 +480,14 @@ fn opens_fset(command: &str) -> bool {
 }
 
 /// Commands this client handles itself (see `send_current_message`).
-const LOCAL_COMMANDS: &[&str] = &["np", "share", "sysinfo"];
+const LOCAL_COMMANDS: &[&str] = &["mentions", "np", "share", "sysinfo"];
 
-fn set_cursor(ctx: &egui::Context, id: egui::Id, char_index: usize) {
+/// The input line's id, so its focus and cursor can be found.
+pub(crate) fn input_id() -> egui::Id {
+    egui::Id::unique("chat_input")
+}
+
+pub(crate) fn set_cursor(ctx: &egui::Context, id: egui::Id, char_index: usize) {
     if let Some(mut state) = TextEditState::load(ctx, id) {
         state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(char_index))));
         state.store(ctx, id);

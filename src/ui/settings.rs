@@ -334,6 +334,37 @@ impl WeeChatApp {
             self.ignore_input.clear();
         }
 
+        section_heading(ui, "Aliases");
+        hint(ui, "Your own commands: with ns → /msg NickServ, typing /ns identify pw sends /msg NickServ identify pw. In the command, $1, $2… are single words, $1- the words from the first on, $* all of them, $nick your nick and $channel the buffer; ; separates commands. Also /alias and /unalias. On IRC, soju, ZNC and Injected; WeeChat has its own /alias.");
+        let mut remove = None;
+        egui::Grid::new("aliases_grid").num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
+            for (name, command) in &self.aliases {
+                ui.label(RichText::new(format!("/{name}")).strong());
+                ui.label(RichText::new(command).monospace());
+                if ui.small_button("Remove").clicked() {
+                    remove = Some(name.clone());
+                }
+                ui.end_row();
+            }
+        });
+        if let Some(name) = remove {
+            self.aliases.remove(&name);
+        }
+        let mut add = false;
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.alias_input.0).hint_text("name").desired_width(90.0));
+            let resp = ui.add(egui::TextEdit::singleline(&mut self.alias_input.1).hint_text("/msg NickServ").desired_width(260.0));
+            add = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let name = crate::ui::alias::normalize_name(&self.alias_input.0);
+            add |= ui.add_enabled(name.is_some() && !self.alias_input.1.trim().is_empty(), egui::Button::new("Add alias")).clicked();
+        });
+        let command = self.alias_input.1.trim();
+        if let (true, Some(name), false) = (add, crate::ui::alias::normalize_name(&self.alias_input.0), command.is_empty()) {
+            let command = if command.starts_with('/') { command.to_string() } else { format!("/{command}") };
+            self.aliases.insert(name, command);
+            self.alias_input = Default::default();
+        }
+
         self.spell_check_settings(ui);
 
         section_heading(ui, "Nick column");

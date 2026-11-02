@@ -52,15 +52,16 @@ pub enum NotifyLevel {
     Mentions,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum BufferActivity {
+    #[default]
     None = 0,
     Metadata = 1,
     Message = 2,
     Highlight = 3,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Buffer {
     pub id: String,
     pub number: i32,

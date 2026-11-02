@@ -10,6 +10,7 @@ const FONT_NAME: &str = "phosphor";
 pub const ARROW_COUNTER_CLOCKWISE: &str = "\u{E038}";
 pub const ARROW_U_UP_LEFT: &str = "\u{E08A}";
 pub const ARROW_UP: &str = "\u{E08E}";
+pub const AT: &str = "\u{E0AC}";
 pub const BELL: &str = "\u{E0CE}";
 pub const BELL_SLASH: &str = "\u{E0D4}";
 pub const CARET_DOWN: &str = "\u{E136}";

@@ -595,6 +595,10 @@ pub struct AppSettings {
     /// its own /ignore).
     #[serde(default)]
     pub ignores: Vec<crate::ui::ignore::IgnoreRule>,
+    /// Command aliases by name, without the slash, on IRC, soju, ZNC and Injected
+    /// (WeeChat has its own /alias).
+    #[serde(default)]
+    pub aliases: std::collections::BTreeMap<String, String>,
     /// Underline misspelled words in the input line, in these languages (`en_US`).
     #[serde(default)]
     pub spell_check: bool,
@@ -693,6 +697,7 @@ impl Default for AppSettings {
             buffer_notify: HashMap::new(),
             highlight_words: Vec::new(),
             ignores: Vec::new(),
+            aliases: Default::default(),
             spell_check: false,
             spell_languages: Vec::new(),
             hidden_buffer_keys: HashSet::new(),
@@ -847,6 +852,9 @@ pub struct WeeChatApp {
     pub(crate) ignores: Vec<crate::ui::ignore::IgnoreRule>,
     /// The nick typed into Settings → Chat's ignore list.
     pub(crate) ignore_input: String,
+    pub(crate) aliases: std::collections::BTreeMap<String, String>,
+    /// The alias being added in Settings → Chat: its name and command.
+    pub(crate) alias_input: (String, String),
 
     // Spell check of the input line: the languages' dictionaries, loaded off the UI thread.
     pub(crate) spell_check: bool,
@@ -903,6 +911,13 @@ pub struct WeeChatApp {
     /// Action currently being rebound (capture mode).
     pub(crate) editing_keybind: Option<crate::ui::keybinds::KeybindAction>,
     pub(crate) quick_switcher: crate::ui::quick_switcher::QuickSwitcherState,
+    pub(crate) mentions: crate::ui::mentions::MentionsState,
+    /// A paste of several lines, waiting for the user to say what to do with it.
+    pub(crate) pending_paste: Option<crate::ui::paste::PendingPaste>,
+    pub(crate) paste_queue: Option<crate::ui::paste::PasteQueue>,
+    pub(crate) paste_error: Option<String>,
+    /// The file of a paste being uploaded, removed when the upload is over.
+    pub(crate) paste_upload_dir: Option<std::path::PathBuf>,
 
     // Collapsed server groups in the buffer list (stored by buffer.server key).
     pub(crate) collapsed_servers: HashSet<String>,
@@ -1110,6 +1125,8 @@ impl WeeChatApp {
             highlight_words: settings.highlight_words,
             ignores: settings.ignores,
             ignore_input: String::new(),
+            aliases: settings.aliases,
+            alias_input: Default::default(),
             spell_check: settings.spell_check,
             spell_languages: settings.spell_languages,
             spell_checkers: HashMap::new(),
@@ -1156,6 +1173,11 @@ impl WeeChatApp {
             keybinds: settings.keybinds.with_missing_defaults(),
             editing_keybind: None,
             quick_switcher: Default::default(),
+            mentions: Default::default(),
+            pending_paste: None,
+            paste_queue: None,
+            paste_error: None,
+            paste_upload_dir: None,
             collapsed_servers: settings.collapsed_servers,
             adaptive_theme,
             adaptive_theme_result: None,
@@ -1681,6 +1703,7 @@ impl eframe::App for WeeChatApp {
             buffer_notify: self.buffer_notify.clone(),
             highlight_words: self.highlight_words.clone(),
             ignores: self.ignores.clone(),
+            aliases: self.aliases.clone(),
             spell_check: self.spell_check,
             spell_languages: self.spell_languages.clone(),
             hidden_buffer_keys: self.hidden_buffer_keys.clone(),
@@ -1860,6 +1883,7 @@ impl eframe::App for WeeChatApp {
         while let Ok(result) = self.file_share_rx.try_recv() {
             self.file_share_uploading = false;
             self.file_share_progress = None;
+            self.remove_paste_upload();
             match result {
                 Ok((buf_id, url)) => {
                     if let Some((client, raw_id)) = self.client_for_buffer(&buf_id) {
@@ -1892,6 +1916,7 @@ impl eframe::App for WeeChatApp {
         let mut jump_next_unread = false;
         let mut jump_buffer_n: Option<usize> = None;
         let mut quick_switcher_shortcut = false;
+        let mut mentions_shortcut = false;
         let mut open_settings_shortcut = false;
         let mut open_connections_shortcut = false;
         let quick_switcher_open = self.quick_switcher.open;
@@ -1926,6 +1951,9 @@ impl eframe::App for WeeChatApp {
             if kb.consume(i, crate::ui::keybinds::KeybindAction::QuickSwitcher) {
                 quick_switcher_shortcut = true;
             }
+            if kb.consume(i, crate::ui::keybinds::KeybindAction::Mentions) {
+                mentions_shortcut = true;
+            }
             if kb.consume(i, crate::ui::keybinds::KeybindAction::OpenSettings) {
                 open_settings_shortcut = true;
             }
@@ -1938,7 +1966,7 @@ impl eframe::App for WeeChatApp {
 
             let any_mod = i.modifiers.command || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.ctrl;
             // While the quick switcher is open it owns the arrow keys.
-            if !any_mod && !quick_switcher_open {
+            if !any_mod && !quick_switcher_open && !self.mentions.open {
                 if i.consume_key(Modifiers::NONE, Key::ArrowUp) { history_up = true; }
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) { history_down = true; }
             }
@@ -1952,6 +1980,8 @@ impl eframe::App for WeeChatApp {
         }
         if jump_next_unread { self.jump_next_unread(); }
         if quick_switcher_shortcut { self.quick_switcher.toggle(); }
+        if mentions_shortcut { self.mentions.toggle(); }
+        self.send_paste_queue(ctx);
         if open_settings_shortcut { self.open_settings(ctx); }
         if open_connections_shortcut { self.open_connections(ctx); }
         if let Some(n) = jump_buffer_n { self.jump_buffer_by_number(n); }
@@ -2096,6 +2126,20 @@ impl eframe::App for WeeChatApp {
 
                         if ui.button(egui::RichText::new(icons::GEAR).size(16.0)).on_hover_text("Settings").clicked() {
                             self.open_settings(ui.ctx());
+                        }
+                        let unseen = self.mentions.unseen;
+                        let mentions_label = if unseen > 0 {
+                            egui::RichText::new(format!("{} {}", icons::AT, unseen)).size(15.0).color(Color32::from_rgb(220, 70, 70))
+                        } else {
+                            egui::RichText::new(icons::AT).size(16.0)
+                        };
+                        let mentions_tip = match unseen {
+                            0 => "Mentions".to_string(),
+                            1 => "Mentions — 1 new".to_string(),
+                            n => format!("Mentions — {n} new"),
+                        };
+                        if ui.button(mentions_label).on_hover_text(mentions_tip).clicked() {
+                            self.mentions.toggle();
                         }
                         if ui.button(egui::RichText::new(icons::PLUGS).size(14.0)).on_hover_text("Connections").clicked() {
                             self.open_connections(ui.ctx());
@@ -2833,6 +2877,7 @@ impl eframe::App for WeeChatApp {
                             }
                         });
                     }
+                    self.paste_progress(ui, text_muted);
                     if let Some(err) = self.np_error.clone() {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(format!("/np: {}", err))
@@ -2895,7 +2940,15 @@ impl eframe::App for WeeChatApp {
                                 job.wrap.max_width = wrap_width;
                                 ui.fonts_mut(|f| f.layout_job(job))
                             };
+                            // A paste of several lines asks first, instead of being joined into one.
+                            let input_id = crate::ui::input::input_id();
+                            if ctx.memory(|m| m.has_focus(input_id)) && self.pending_paste.is_none() {
+                                if let (Some(text), Some(buffer_id)) = (crate::ui::paste::take_multiline_paste(ctx), self.selected_buffer_id.clone()) {
+                                    self.ask_about_paste(buffer_id, text);
+                                }
+                            }
                             let mut text_edit = egui::TextEdit::singleline(&mut self.input_text)
+                                .id(input_id)
                                 .hint_text(hint)
                                 .font(font_id.clone())
                                 .margin(Margin::symmetric(8, 4))
@@ -3672,6 +3725,8 @@ impl eframe::App for WeeChatApp {
         }
 
         self.show_quick_switcher(ctx, accent_color, text_muted);
+        self.show_mentions(ctx, accent_color, text_muted);
+        self.show_paste_dialog(ctx, accent_color, text_muted);
         self.show_topic_editor(ctx);
         self.show_settings_window(ctx, accent_color, is_light);
         self.show_connections_window(ctx, accent_color, is_light);

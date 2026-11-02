@@ -233,6 +233,7 @@ pub enum KeybindAction {
     QuickSwitcher,
     OpenSettings,
     OpenConnections,
+    Mentions,
 }
 
 impl KeybindAction {
@@ -249,6 +250,7 @@ impl KeybindAction {
             Self::QuickSwitcher      => "Quick switcher",
             Self::OpenSettings       => "Open settings",
             Self::OpenConnections    => "Open connections",
+            Self::Mentions           => "Show mentions",
         }
     }
 
@@ -264,6 +266,7 @@ impl KeybindAction {
         Self::QuickSwitcher,
         Self::OpenSettings,
         Self::OpenConnections,
+        Self::Mentions,
     ];
 }
 
@@ -288,6 +291,7 @@ fn default_keybinds() -> HashMap<KeybindAction, Shortcut> {
         // Reachable even with the toolbar hidden.
         (OpenSettings,       (cmd,  Comma)),
         (OpenConnections,    (cmd_shift, C)),
+        (Mentions,           (cmd_shift, M)),
     ].into()
 }
 
