@@ -1141,13 +1141,6 @@ impl WeeChatApp {
         });
     }
 
-    /// A mention for the toolbar's count, unless the mentions view shows it already.
-    fn count_mention(&mut self) {
-        if !self.mentions.open {
-            self.mentions.unseen += 1;
-        }
-    }
-
     pub(crate) fn strip_ansi(text: &str) -> String {
         ansi_re().replace_all(text, "").to_string()
     }

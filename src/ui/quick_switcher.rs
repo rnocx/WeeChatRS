@@ -6,6 +6,8 @@ use crate::ui::icons;
 use egui::{Color32, Key, Modifiers, RichText};
 
 const MAX_RESULTS: usize = 12;
+/// Mentions' place in the results, past any buffer's index.
+const MENTIONS: usize = usize::MAX;
 
 #[derive(Default)]
 pub(crate) struct QuickSwitcherState {
@@ -59,7 +61,7 @@ impl WeeChatApp {
 
         let query = self.quick_switcher.query.to_lowercase();
         let mut results: Vec<(i32, usize)> = self.buffers.iter().enumerate()
-            .filter(|(_, b)| !b.hidden || self.show_hidden_buffers)
+            .filter(|(_, b)| (!b.hidden || self.show_hidden_buffers) && !crate::ui::app::is_highmon_buffer(&b.full_name))
             .filter_map(|(idx, b)| {
                 let by_name = fuzzy_score(&query, &b.name.to_lowercase());
                 // Full name ("irc.libera.#rust") also matches, at a discount.
@@ -73,6 +75,10 @@ impl WeeChatApp {
                 Some((score, idx))
             })
             .collect();
+        // Mentions, which isn't a buffer of any connection.
+        if let Some(score) = fuzzy_score(&query, "mentions") {
+            results.insert(0, (score + if self.mentions.unseen > 0 { 30 } else { 0 }, MENTIONS));
+        }
         if !query.is_empty() {
             // Stable sort keeps buffer-list order among equal scores.
             results.sort_by(|a, b| b.0.cmp(&a.0));
@@ -112,7 +118,10 @@ impl WeeChatApp {
                 ui.label(RichText::new("No matching buffers").color(muted));
             }
             for (row, &(_, idx)) in results.iter().enumerate() {
-                let b = &self.buffers[idx];
+                let (name, full_name, unread, highlight) = match self.buffers.get(idx) {
+                    Some(b) => (b.name.as_str(), b.full_name.as_str(), b.unread_count as usize, b.activity == BufferActivity::Highlight),
+                    None => ("Mentions", "from every buffer", self.mentions.unseen, true),
+                };
                 let is_sel = row == state.selected;
                 let frame = egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(8, 4))
@@ -121,16 +130,16 @@ impl WeeChatApp {
                 let resp = frame.show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(&b.name).strong());
-                        ui.label(RichText::new(&b.full_name).color(muted).small());
-                        if b.unread_count > 0 {
+                        ui.label(RichText::new(name).strong());
+                        ui.label(RichText::new(full_name).color(muted).small());
+                        if unread > 0 {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let color = if b.activity == BufferActivity::Highlight {
+                                let color = if highlight {
                                     Color32::from_rgb(200, 50, 50)
                                 } else {
                                     accent
                                 };
-                                ui.label(RichText::new(b.unread_count.to_string()).color(color).small().strong());
+                                ui.label(RichText::new(unread.to_string()).color(color).small().strong());
                             });
                         }
                     });
@@ -143,7 +152,7 @@ impl WeeChatApp {
         });
 
         if let Some(idx) = chosen {
-            let id = self.buffers[idx].id.clone();
+            let id = self.buffers.get(idx).map_or(crate::ui::mentions::MENTIONS_ID.to_string(), |b| b.id.clone());
             self.quick_switcher.open = false;
             self.select_buffer(id);
         } else if modal.should_close() {

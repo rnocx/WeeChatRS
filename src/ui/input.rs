@@ -1,6 +1,6 @@
 use egui::text_edit::TextEditState;
 use egui::text::{CCursorRange, CCursor};
-use crate::ui::app::{WeeChatApp, CompletionState, RemoteCompletion};
+use crate::ui::app::{WeeChatApp, CompletionState, RemoteCompletion, is_highmon_buffer};
 use crate::ui::emoji;
 
 impl WeeChatApp {
@@ -174,29 +174,24 @@ impl WeeChatApp {
 
     pub(crate) fn cycle_buffer(&mut self, delta: i32) {
         if self.buffers.is_empty() { return; }
-        let current_id = match self.selected_buffer_id.clone() {
-            Some(id) => id,
-            None => {
-                if let Some(first) = self.buffers.first() {
-                    let id = first.id.clone();
-                    self.select_buffer(id);
-                }
-                return;
+        // Mentions comes first, as in the buffer list, which leaves out highmon.
+        let order: Vec<String> = std::iter::once(crate::ui::mentions::MENTIONS_ID.to_string())
+            .chain(self.buffers.iter().filter(|b| !is_highmon_buffer(&b.full_name)).map(|b| b.id.clone()))
+            .collect();
+        let new_id = match &self.selected_buffer_id {
+            None => self.buffers[0].id.clone(),
+            Some(current) => {
+                let Some(idx) = order.iter().position(|id| id == current) else { return };
+                order[(idx as i32 + delta).rem_euclid(order.len() as i32) as usize].clone()
             }
         };
-
-        if let Some(idx) = self.buffers.iter().position(|b| b.id == current_id) {
-            let new_idx = (idx as i32 + delta).rem_euclid(self.buffers.len() as i32) as usize;
-            let new_id = self.buffers[new_idx].id.clone();
-            self.select_buffer(new_id);
-        }
+        self.select_buffer(new_id);
     }
 
-    /// Jump to the Nth visible (non-hidden) buffer (1-indexed).
     pub(crate) fn jump_buffer_by_number(&mut self, n: usize) {
         if n == 0 { return; }
         let visible: Vec<String> = self.buffers.iter()
-            .filter(|b| !b.hidden || self.show_hidden_buffers)
+            .filter(|b| (!b.hidden || self.show_hidden_buffers) && !is_highmon_buffer(&b.full_name))
             .map(|b| b.id.clone())
             .collect();
         if let Some(id) = visible.get(n - 1) {
@@ -361,7 +356,7 @@ impl WeeChatApp {
                 self.history_index = None;
                 return;
             } else if msg.trim() == "/mentions" {
-                self.mentions.toggle();
+                self.toggle_mentions();
                 self.input_text.clear();
                 self.completion = None;
                 self.history_index = None;

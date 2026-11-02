@@ -220,7 +220,7 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
 const GROUP_MAX_GAP_SECS: i64 = 5 * 60;
 
 /// The highmon script's buffer (`{connection}/perl.highmon`, `…/python.highmon`).
-fn is_highmon_buffer(full_name: &str) -> bool {
+pub(crate) fn is_highmon_buffer(full_name: &str) -> bool {
     let name = full_name.rsplit_once('/').map_or(full_name, |(_, name)| name);
     matches!(name.split_once('.'), Some((_, "highmon")))
 }
@@ -1380,11 +1380,16 @@ impl WeeChatApp {
             }
         }
 
+        if id == crate::ui::mentions::MENTIONS_ID {
+            self.mentions_viewed();
+        }
         self.selected_buffer_id = Some(id.clone());
         self.server_search = None;
         self.focus_input = true;
         self.selected_view_since = Some(std::time::Instant::now());
-        self.cleared_buffer_ids.insert(id.clone());
+        if id != crate::ui::mentions::MENTIONS_ID {
+            self.cleared_buffer_ids.insert(id.clone());
+        }
         self.chat_view_start = self.buffer_by_id(&id).and_then(|b| {
             b.messages.len().checked_sub(INITIAL_LINES).map(|i| b.messages[i].id.clone())
         });
@@ -1968,7 +1973,7 @@ impl eframe::App for WeeChatApp {
 
             let any_mod = i.modifiers.command || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.ctrl;
             // While the quick switcher is open it owns the arrow keys.
-            if !any_mod && !quick_switcher_open && !self.mentions.open {
+            if !any_mod && !quick_switcher_open {
                 if i.consume_key(Modifiers::NONE, Key::ArrowUp) { history_up = true; }
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) { history_down = true; }
             }
@@ -1982,7 +1987,7 @@ impl eframe::App for WeeChatApp {
         }
         if jump_next_unread { self.jump_next_unread(); }
         if quick_switcher_shortcut { self.quick_switcher.toggle(); }
-        if mentions_shortcut { self.mentions.toggle(); }
+        if mentions_shortcut { self.toggle_mentions(); }
         self.send_paste_queue(ctx);
         if open_settings_shortcut { self.open_settings(ctx); }
         if open_connections_shortcut { self.open_connections(ctx); }
@@ -2132,6 +2137,8 @@ impl eframe::App for WeeChatApp {
                         let unseen = self.mentions.unseen;
                         let mentions_label = if unseen > 0 {
                             egui::RichText::new(format!("{} {}", icons::AT, unseen)).size(15.0).color(Color32::from_rgb(220, 70, 70))
+                        } else if self.mentions_selected() {
+                            egui::RichText::new(icons::AT).size(16.0).color(accent_color)
                         } else {
                             egui::RichText::new(icons::AT).size(16.0)
                         };
@@ -2141,7 +2148,7 @@ impl eframe::App for WeeChatApp {
                             n => format!("Mentions — {n} new"),
                         };
                         if ui.button(mentions_label).on_hover_text(mentions_tip).clicked() {
-                            self.mentions.toggle();
+                            self.toggle_mentions();
                         }
                         if ui.button(egui::RichText::new(icons::PLUGS).size(14.0)).on_hover_text("Connections").clicked() {
                             self.open_connections(ui.ctx());
@@ -2225,9 +2232,13 @@ impl eframe::App for WeeChatApp {
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 2.0;
+                        if self.mentions_row(ui, accent_color, text_primary, text_muted) {
+                            next_selected_buffer_id = Some(crate::ui::mentions::MENTIONS_ID.to_string());
+                        }
                         let mut last_conn_prefix: Option<String> = None;
                         for buffer in &self.buffers {
-                            if buffer.hidden && !self.show_hidden_buffers {
+                            // Mentions above shows what WeeChat's highmon buffer would.
+                            if (buffer.hidden && !self.show_hidden_buffers) || is_highmon_buffer(&buffer.full_name) {
                                 continue;
                             }
                             let is_selected = self.selected_buffer_id.as_deref() == Some(&buffer.id);
@@ -2833,6 +2844,7 @@ impl eframe::App for WeeChatApp {
 
         // fset has its own controls and highmon is read-only: no input bar there.
         let shows_input = !is_fset_buffer
+            && !self.mentions_selected()
             && !current_buffer_full_name.as_deref().is_some_and(is_highmon_buffer);
         if current_buffer_id.is_some() && shows_input {
             // Is the SELECTED buffer's connection up? Different from any_connected when
@@ -3106,6 +3118,10 @@ impl eframe::App for WeeChatApp {
                                 self.editing_profile_idx = None;
                             }
                         });
+                });
+            } else if self.mentions_selected() {
+                ui.vertical(|ui| {
+                    self.draw_mentions(ui, &render_theme, accent_color, text_muted, surface_color.linear_multiply(0.3));
                 });
             } else if current_buffer_full_name.is_some() {
                 ui.vertical(|ui| {
@@ -3727,7 +3743,6 @@ impl eframe::App for WeeChatApp {
         }
 
         self.show_quick_switcher(ctx, accent_color, text_muted);
-        self.show_mentions(ctx, accent_color, text_muted);
         self.show_paste_dialog(ctx, accent_color, text_muted);
         self.show_topic_editor(ctx);
         self.show_settings_window(ctx, accent_color, is_light);
