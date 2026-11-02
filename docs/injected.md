@@ -87,8 +87,9 @@ text for retry. If the upload succeeds but the conversation disconnects, the lin
 stays available to copy or send after reconnecting; retrying the link does not
 upload the text again.
 
-This paste service is offered only for Injected connections. WeeChat and direct
-IRC keep their existing paste/file-sharing options. Expiry, size limits, and rate
+This paste service is offered only for Injected connections. WeeChat, IRC, soju
+and ZNC share pastes anonymously through a PrivateBin server instead (Settings →
+File sharing). Expiry, size limits, and rate
 limits are controlled by the Injected server; the client does not promise a fixed
 retention period.
 

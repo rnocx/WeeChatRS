@@ -1,6 +1,7 @@
 //! Pasting several lines into the input line: instead of joining them into one,
-//! ask whether to send them as messages (a few at a time, so the server doesn't
-//! disconnect us for flooding), join them, or upload them and send the link.
+//! ask whether to share them as a paste and send its link (Injected's own pastes,
+//! or an anonymous PrivateBin elsewhere), send them as messages (a few at a time,
+//! so the server doesn't disconnect us for flooding), join them, or upload a file.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -14,22 +15,37 @@ const BURST: usize = 4;
 const SPACING: Duration = Duration::from_secs(2);
 const PREVIEW_LINES: usize = 12;
 
+/// Where Share sends a paste: Injected's own service on Injected, an anonymous
+/// PrivateBin server everywhere else.
+#[derive(Clone, Copy, PartialEq)]
+enum ShareService {
+    Injected,
+    PrivateBin,
+}
+
+/// A paste that was stored: its link, and on PrivateBin the link that deletes it.
+#[derive(Clone)]
+struct Shared {
+    url: String,
+    delete_url: Option<String>,
+}
+
 pub(crate) struct PendingPaste {
     buffer_id: String,
     buffer_name: String,
     text: String,
     lines: Vec<String>,
-    injected: bool,
-    uploaded_url: Option<String>,
+    service: ShareService,
+    shared: Option<Shared>,
     error: Option<String>,
 }
 
 /// Dropping a pending upload cancels its request and prevents posting a link.
-pub(crate) struct InjectedPasteUpload {
-    receiver: std::sync::mpsc::Receiver<Result<String, String>>,
+pub(crate) struct PasteShareUpload {
+    receiver: std::sync::mpsc::Receiver<Result<Shared, String>>,
     abort: tokio::task::AbortHandle,
 }
-impl Drop for InjectedPasteUpload {
+impl Drop for PasteShareUpload {
     fn drop(&mut self) { self.abort.abort(); }
 }
 
@@ -80,18 +96,26 @@ impl WeeChatApp {
         let buffer_name = self.buffer_by_id(&buffer_id).map(|b| b.name.clone()).unwrap_or_default();
         let injected = self.client_for_buffer(&buffer_id).is_some_and(|(client,_)| client.supports_paste_upload());
         let lines = if injected { injected_lines(&text) } else { paste_lines(&text) };
-        self.pending_paste = Some(PendingPaste { buffer_id, buffer_name, text, lines, injected, uploaded_url: None, error: None });
+        let service = if injected { ShareService::Injected } else { ShareService::PrivateBin };
+        self.pending_paste = Some(PendingPaste { buffer_id, buffer_name, text, lines, service, shared: None, error: None });
+    }
+
+    /// Whether the paste's link can be sent: its conversation is open and connected.
+    fn can_share_to(&self, buffer_id: &str) -> bool {
+        self.buffer_by_id(buffer_id).is_some_and(|b| matches!(b.kind.as_str(), "channel" | "private"))
+            && self.client_for_buffer(buffer_id).is_some_and(|(client, _)| client.is_connected())
     }
 
     pub(crate) fn show_paste_dialog(&mut self, ctx: &egui::Context, accent: Color32, muted: Color32) {
         let Some(paste) = self.pending_paste.as_ref() else { return };
-        let injected = paste.injected;
-        let native_uploading = self.injected_paste_upload.is_some();
+        let injected = paste.service == ShareService::Injected;
+        let sharing = self.paste_share_upload.is_some();
         let uploading = self.file_share_progress.is_some();
-        let chat_target = self.buffer_by_id(&paste.buffer_id).is_some_and(|b| matches!(b.kind.as_str(), "channel" | "private"));
-        let native_connected = chat_target && self.client_for_buffer(&paste.buffer_id)
-            .is_some_and(|(client,_)| client.supports_paste_upload() && client.is_connected());
-        let (mut send, mut join, mut upload, mut cancel, mut copy) = (false, false, false, false, false);
+        let can_share = self.can_share_to(&paste.buffer_id);
+        let host = crate::ui::privatebin::normalize_server(&self.privatebin_server).ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        let (mut send, mut join, mut upload, mut share, mut cancel, mut copy) = (false, false, false, false, false, false);
         let modal = egui::Modal::new(egui::Id::unique("paste_guard")).show(ctx, |ui| {
             ui.set_width(560.0);
             ui.label(RichText::new(format!("Paste {} lines into {}?", paste.lines.len(), paste.buffer_name)).strong());
@@ -105,9 +129,14 @@ impl WeeChatApp {
                     }
                 });
             });
-            if injected {
-                ui.label(RichText::new("Share the text through Injected and send only its link to this conversation.").small().color(muted));
-                if !native_connected { ui.label("Connect to the original channel or private conversation before sharing."); }
+            let about = if injected {
+                "Share the text through Injected and send only its link to this conversation.".to_string()
+            } else {
+                format!("Share sends only a link. The text is encrypted here and stored on {host}, which can't read it; no account is used.")
+            };
+            ui.label(RichText::new(about).small().color(muted));
+            if !can_share {
+                ui.label("Connect to the original channel or private conversation before sharing.");
             }
             if paste.lines.len() > BURST {
                 ui.label(RichText::new(format!(
@@ -116,33 +145,38 @@ impl WeeChatApp {
                 )).small().color(muted));
             }
             if let Some(error) = &paste.error { ui.colored_label(Color32::from_rgb(220,80,80), error); }
-            if let Some(url) = &paste.uploaded_url { ui.hyperlink(url); copy = ui.button("Copy paste link").clicked(); }
-            if native_uploading { ui.horizontal(|ui| { ui.spinner(); ui.label("Creating Injected paste…"); }); ctx.request_repaint_after(Duration::from_millis(100)); }
+            if let Some(shared) = &paste.shared { ui.hyperlink(&shared.url); copy = ui.button("Copy paste link").clicked(); }
+            if sharing {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(if injected { "Creating Injected paste…" } else { "Encrypting and uploading…" });
+                });
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
-                if injected {
-                    let label = if paste.uploaded_url.is_some() { "Send paste link" } else { "Share as Injected paste" };
-                    upload = ui.add_enabled(!native_uploading && native_connected, egui::Button::new(RichText::new(label).strong().color(Color32::WHITE)).fill(accent)).clicked();
-                }
-                let label = format!("Send {} lines", paste.lines.len());
-                let button = egui::Button::new(if injected { RichText::new(label) } else { RichText::new(label).color(Color32::WHITE).strong() });
-                let button = if injected { button } else { button.fill(accent) };
-                send = ui.add_enabled(!native_uploading,button).clicked();
-                join = ui.add_enabled(!native_uploading,egui::Button::new("Paste as one line")).clicked();
+                let label = match (&paste.shared, injected) {
+                    (Some(_), _) => "Send paste link",
+                    (None, true) => "Share as Injected paste",
+                    (None, false) => "Share as PrivateBin paste",
+                };
+                share = ui.add_enabled(!sharing && can_share, egui::Button::new(RichText::new(label).strong().color(Color32::WHITE)).fill(accent)).clicked();
+                send = ui.add_enabled(!sharing, egui::Button::new(format!("Send {} lines", paste.lines.len()))).clicked();
+                join = ui.add_enabled(!sharing, egui::Button::new("Paste as one line")).clicked();
                 if !injected {
-                    upload = ui.add_enabled(!uploading, egui::Button::new("Upload as a file"))
-                        .on_hover_text("Send a link to the text instead, with the service in Settings → File sharing").clicked();
+                    upload = ui.add_enabled(!sharing && !uploading, egui::Button::new("Upload as a file"))
+                        .on_hover_text("Send a link to the text as a file, with the service in Settings → File sharing").clicked();
                 }
                 cancel = ui.button("Cancel").clicked();
             });
         });
-        if copy { if let Some(url) = &paste.uploaded_url { ctx.copy_text(url.clone()); } }
-        if cancel || (!(send || join || upload) && modal.should_close()) {
-            self.injected_paste_upload = None;
+        if copy { if let Some(shared) = &paste.shared { ctx.copy_text(shared.url.clone()); } }
+        if cancel || (!(send || join || upload || share) && modal.should_close()) {
+            self.paste_share_upload = None;
             self.pending_paste = None;
             return;
         }
-        if upload && injected { self.share_injected_paste(ctx); return; }
+        if share { self.share_paste(ctx); return; }
         if !(send || join || upload) { return; }
         let paste = self.pending_paste.take().expect("shown above");
         if send {
@@ -156,48 +190,75 @@ impl WeeChatApp {
                 sent: 0, next_at: Instant::now(), paced,
             });
         } else if join {
-            if paste.injected && self.buffer_by_id(&paste.buffer_id).is_some() { self.select_buffer(paste.buffer_id.clone()); }
+            let injected = paste.service == ShareService::Injected;
+            if injected && self.buffer_by_id(&paste.buffer_id).is_some() { self.select_buffer(paste.buffer_id.clone()); }
             if !self.input_text.is_empty() && !self.input_text.ends_with(' ') { self.input_text.push(' '); }
             let text = paste.lines.join(" ");
-            self.input_text.push_str(&if paste.injected && self.input_text.is_empty() { as_message(&text) } else { text });
+            self.input_text.push_str(&if injected && self.input_text.is_empty() { as_message(&text) } else { text });
             self.focus_input = true;
             crate::ui::input::set_cursor(ctx, crate::ui::input::input_id(), self.input_text.chars().count());
         } else if upload { self.upload_paste(paste.buffer_id, &paste.text); }
     }
 
-    fn share_injected_paste(&mut self, ctx: &egui::Context) {
-        if self.injected_paste_upload.is_some() { return; }
+    /// Stores the paste with its service, or sends the link once it's stored.
+    fn share_paste(&mut self, ctx: &egui::Context) {
+        if self.paste_share_upload.is_some() { return; }
         let Some(paste) = &self.pending_paste else { return; };
-        if let Some(url) = &paste.uploaded_url {
-            let sent = self.buffer_by_id(&paste.buffer_id).is_some() && self.client_for_buffer(&paste.buffer_id)
-                .is_some_and(|(client,raw)| {
-                    if !client.supports_paste_upload() || !client.is_connected() { return false; }
-                    client.send_message(&raw,url); true
-                });
-            if sent { self.pending_paste = None; }
-            else if let Some(paste) = &mut self.pending_paste { paste.error = Some("Paste created, but its original conversation is disconnected. Reconnect to send the link, or copy it.".into()); }
+        let buffer_id = paste.buffer_id.clone();
+        if let Some(shared) = paste.shared.clone() {
+            if !self.can_share_to(&buffer_id) {
+                if let Some(paste) = &mut self.pending_paste {
+                    paste.error = Some("Paste created, but its original conversation is disconnected. Reconnect to send the link, or copy it.".into());
+                }
+                return;
+            }
+            if let Some((client, raw)) = self.client_for_buffer(&buffer_id) {
+                client.send_message(&raw, &shared.url);
+            }
+            if let Some(delete_url) = &shared.delete_url {
+                self.local_info(&buffer_id, &format!("Only you see this: the paste can be deleted at {delete_url}"));
+            }
+            self.pending_paste = None;
             return;
         }
-        let Some((client,_)) = self.client_for_buffer(&paste.buffer_id).filter(|(c,_)| c.supports_paste_upload() && c.is_connected()) else { return; };
-        let future = client.create_paste(paste.text.clone());
-        let (tx,receiver) = std::sync::mpsc::channel();
+        if !self.can_share_to(&buffer_id) { return; }
+        let future: std::pin::Pin<Box<dyn std::future::Future<Output = Result<Shared, String>> + Send>> = match paste.service {
+            ShareService::Injected => {
+                let Some((client, _)) = self.client_for_buffer(&buffer_id).filter(|(c, _)| c.supports_paste_upload()) else { return };
+                let upload = client.create_paste(paste.text.clone());
+                Box::pin(async move { upload.await.map(|url| Shared { url, delete_url: None }) })
+            }
+            ShareService::PrivateBin => {
+                let options = crate::ui::privatebin::Options {
+                    server: self.privatebin_server.clone(),
+                    expire: self.privatebin_expire.clone(),
+                    burn_after_reading: self.privatebin_burn,
+                };
+                let text = paste.text.clone();
+                Box::pin(async move {
+                    crate::ui::privatebin::create(&options, text).await
+                        .map(|made| Shared { url: made.url, delete_url: Some(made.delete_url) })
+                })
+            }
+        };
+        let (tx, receiver) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         let task = tokio::spawn(async move { let _ = tx.send(future.await); ctx.request_repaint(); });
-        self.injected_paste_upload = Some(InjectedPasteUpload {receiver,abort:task.abort_handle()});
+        self.paste_share_upload = Some(PasteShareUpload { receiver, abort: task.abort_handle() });
         if let Some(paste) = &mut self.pending_paste { paste.error = None; }
     }
 
-    fn poll_injected_paste(&mut self, ctx: &egui::Context) {
-        let Some(upload) = &self.injected_paste_upload else { return; };
+    fn poll_paste_share(&mut self, ctx: &egui::Context) {
+        let Some(upload) = &self.paste_share_upload else { return; };
         let result = match upload.receiver.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => { ctx.request_repaint_after(Duration::from_millis(100)); return; }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("Paste upload stopped. Your text is still available to retry.".into()),
         };
-        self.injected_paste_upload = None;
+        self.paste_share_upload = None;
         if let Some(paste) = &mut self.pending_paste {
             match result {
-                Ok(url) => { paste.uploaded_url = Some(url); self.share_injected_paste(ctx); }
+                Ok(shared) => { paste.shared = Some(shared); self.share_paste(ctx); }
                 Err(error) => paste.error = Some(error),
             }
         }
@@ -226,7 +287,7 @@ impl WeeChatApp {
 
     /// Sends the pasted lines that are due; called every frame.
     pub(crate) fn send_paste_queue(&mut self, ctx: &egui::Context) {
-        self.poll_injected_paste(ctx);
+        self.poll_paste_share(ctx);
         let now = Instant::now();
         loop {
             let Some(queue) = self.paste_queue.as_mut() else { return };
@@ -287,14 +348,14 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_native_upload_stops_its_completion_task() {
-        let (tx,receiver) = std::sync::mpsc::channel::<Result<String,String>>();
+        let (tx,receiver) = std::sync::mpsc::channel::<Result<Shared,String>>();
         let (started,ready) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = started.send(());
             std::future::pending::<()>().await;
-            let _ = tx.send(Ok("https://injected-irc.com/paste?id=never-posted".into()));
+            let _ = tx.send(Ok(Shared { url: "https://injected-irc.com/paste?id=never-posted".into(), delete_url: None }));
         });
-        let upload = InjectedPasteUpload { receiver, abort: task.abort_handle() };
+        let upload = PasteShareUpload { receiver, abort: task.abort_handle() };
         ready.await.unwrap();
         drop(upload);
         assert!(task.await.unwrap_err().is_cancelled());

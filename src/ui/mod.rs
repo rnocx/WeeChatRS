@@ -20,6 +20,7 @@ pub(crate) mod quick_switcher;
 pub(crate) mod mentions;
 pub(crate) mod alias;
 pub(crate) mod paste;
+pub(crate) mod privatebin;
 #[cfg(target_os = "macos")]
 mod vibrancy;
 mod url_safety;

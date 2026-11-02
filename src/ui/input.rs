@@ -35,9 +35,6 @@ impl WeeChatApp {
                     .filter(|n| n.starts_with(&typed))
                     .map(|n| format!("/{n}"))
                     .collect();
-                if "paste".starts_with(&typed) && self.selected_buffer_id.as_deref()
-                    .and_then(|id| self.client_for_buffer(id)).is_some_and(|(c,_)| c.supports_paste_upload())
-                { names.push("/paste".into()); }
                 names.sort();
                 names.dedup();
                 names
@@ -326,9 +323,8 @@ impl WeeChatApp {
     /// Sends `msg` from the input line, or runs it when this client handles it.
     /// `record` puts it in the input history.
     fn send_input(&mut self, msg: String, record: bool) {
-        if (msg == "/paste" || msg.starts_with("/paste ")) && self.selected_buffer_id.as_deref()
-            .and_then(|id| self.client_for_buffer(id)).is_some_and(|(client,_)| client.supports_paste_upload())
-        {
+        // `/paste <text>` asks like a paste of several lines, on every connection.
+        if msg == "/paste" || msg.starts_with("/paste ") {
             let text = msg.strip_prefix("/paste").unwrap().strip_prefix(' ').unwrap_or("");
             if text.trim().is_empty() { self.paste_error = Some("Usage: /paste <text> (or paste several lines into the input).".into()); }
             else if let Some(id) = self.selected_buffer_id.clone() { self.ask_about_paste(id,text.to_owned()); }
@@ -488,7 +484,7 @@ fn opens_fset(command: &str) -> bool {
 }
 
 /// Commands this client handles itself (see `send_current_message`).
-const LOCAL_COMMANDS: &[&str] = &["mentions", "np", "share", "sysinfo"];
+const LOCAL_COMMANDS: &[&str] = &["mentions", "np", "paste", "share", "sysinfo"];
 
 /// The input line's id, so its focus and cursor can be found.
 pub(crate) fn input_id() -> egui::Id {

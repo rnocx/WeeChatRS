@@ -252,7 +252,10 @@ impl WeeChatApp {
                         SettingsSection::Chat => self.chat_section(ui),
                         SettingsSection::Appearance => self.appearance_section(ui, p),
                         SettingsSection::Theme => self.theme_section(ui, p),
-                        SettingsSection::FileSharing => self.file_sharing_section(ui),
+                        SettingsSection::FileSharing => {
+                            self.file_sharing_section(ui);
+                            self.privatebin_section(ui);
+                        }
                         SettingsSection::Keybinds => self.keybinds_section(ui, p),
                     }
                     ui.add_space(12.0);
@@ -925,6 +928,47 @@ impl WeeChatApp {
                     });
             }
         }
+    }
+
+    fn privatebin_section(&mut self, ui: &mut egui::Ui) {
+        section_heading(ui, "Text pastes (PrivateBin)");
+        hint(ui, "When you paste several lines, Share as PrivateBin paste sends a link instead, on IRC, soju, ZNC and WeeChat (Injected has its own pastes). The text is encrypted on this computer and the key is only in the link, so the server can't read it. No account is used; the server sees only your IP address.");
+        egui::Grid::new("privatebin_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Server URL:");
+            ui.vertical(|ui| {
+                let resp = ui.add(egui::TextEdit::singleline(&mut self.privatebin_server)
+                    .hint_text(crate::ui::privatebin::DEFAULT_SERVER)
+                    .desired_width(320.0));
+                if resp.lost_focus() {
+                    if self.privatebin_server.trim().is_empty() {
+                        self.privatebin_server = crate::ui::privatebin::DEFAULT_SERVER.to_string();
+                    } else if let Ok(url) = crate::ui::privatebin::normalize_server(&self.privatebin_server) {
+                        self.privatebin_server = url.to_string();
+                    }
+                }
+                match crate::ui::privatebin::normalize_server(&self.privatebin_server) {
+                    Err(err) => { ui.label(RichText::new(err).small().color(Color32::from_rgb(220, 80, 80))); }
+                    Ok(_) => hint(ui, "Your own PrivateBin, or a public one."),
+                }
+            });
+            ui.end_row();
+
+            ui.label("Expiry:");
+            let selected = crate::ui::privatebin::EXPIRY.iter()
+                .find(|(v, _)| *v == self.privatebin_expire)
+                .map_or("1 week", |(_, l)| *l);
+            egui::ComboBox::from_id_salt("privatebin_expire_combo")
+                .selected_text(selected)
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for &(value, label) in crate::ui::privatebin::EXPIRY {
+                        ui.selectable_value(&mut self.privatebin_expire, value.to_string(), label);
+                    }
+                });
+            ui.end_row();
+        });
+        ui.checkbox(&mut self.privatebin_burn, "Burn after reading");
+        hint(ui, "The paste is deleted once it's opened, so only the first person to open the link can read it. In a channel, that's rarely what you want.");
     }
 
     fn keybinds_section(&mut self, ui: &mut egui::Ui, p: &Palette) {

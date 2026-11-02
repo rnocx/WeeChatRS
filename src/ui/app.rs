@@ -633,6 +633,13 @@ pub struct AppSettings {
     /// Jirafeau server ("selfhost"). Upload/download passwords live in the Keychain.
     #[serde(default = "default_jirafeau_url")]
     pub jirafeau_url: String,
+    /// The PrivateBin server for anonymous text pastes, and their expiry.
+    #[serde(default = "default_privatebin_server")]
+    pub privatebin_server: String,
+    #[serde(default = "default_privatebin_expire")]
+    pub privatebin_expire: String,
+    #[serde(default)]
+    pub privatebin_burn: bool,
     #[serde(default)]
     pub keybinds: KeybindsMap,
     /// Server group keys (buffer.server) whose child buffers are collapsed in the list.
@@ -660,6 +667,8 @@ fn default_nicklist_width() -> f32 { 180.0 }
 fn default_prefix_suffix() -> String { "│".to_string() }
 fn default_file_share_duration() -> String { "day".to_string() }
 fn default_jirafeau_url() -> String { crate::ui::fileshare::DEFAULT_JIRAFEAU_URL.to_string() }
+fn default_privatebin_server() -> String { crate::ui::privatebin::DEFAULT_SERVER.to_string() }
+fn default_privatebin_expire() -> String { "1week".to_string() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -713,6 +722,9 @@ impl Default for AppSettings {
             file_share_service: crate::ui::fileshare::FileShareService::default(),
             file_share_duration: "day".to_string(),
             jirafeau_url: default_jirafeau_url(),
+            privatebin_server: default_privatebin_server(),
+            privatebin_expire: default_privatebin_expire(),
+            privatebin_burn: false,
             keybinds: KeybindsMap::default(),
             collapsed_servers: HashSet::new(),
             adaptive_theme: false,
@@ -914,7 +926,7 @@ pub struct WeeChatApp {
     pub(crate) mentions: crate::ui::mentions::MentionsState,
     /// A paste of several lines, waiting for the user to say what to do with it.
     pub(crate) pending_paste: Option<crate::ui::paste::PendingPaste>,
-    pub(crate) injected_paste_upload: Option<crate::ui::paste::InjectedPasteUpload>,
+    pub(crate) paste_share_upload: Option<crate::ui::paste::PasteShareUpload>,
     pub(crate) paste_queue: Option<crate::ui::paste::PasteQueue>,
     pub(crate) paste_error: Option<String>,
     /// The file of a paste being uploaded, removed when the upload is over.
@@ -956,6 +968,9 @@ pub struct WeeChatApp {
     pub(crate) file_share_service: crate::ui::fileshare::FileShareService,
     pub(crate) file_share_duration: String,
     pub(crate) jirafeau_url: String,
+    pub(crate) privatebin_server: String,
+    pub(crate) privatebin_expire: String,
+    pub(crate) privatebin_burn: bool,
     /// Progress of the running upload (None when idle).
     pub(crate) file_share_progress: Option<std::sync::Arc<crate::ui::fileshare::UploadProgress>>,
     /// Jirafeau passwords as edited in Settings, loaded from the Keychain for `jirafeau_pw_loaded_for`.
@@ -1166,6 +1181,9 @@ impl WeeChatApp {
             file_share_service: settings.file_share_service,
             file_share_duration: settings.file_share_duration,
             jirafeau_url: settings.jirafeau_url,
+            privatebin_server: settings.privatebin_server,
+            privatebin_expire: settings.privatebin_expire,
+            privatebin_burn: settings.privatebin_burn,
             file_share_progress: None,
             jirafeau_upload_pw: String::new(),
             jirafeau_download_pw: String::new(),
@@ -1176,7 +1194,7 @@ impl WeeChatApp {
             quick_switcher: Default::default(),
             mentions: Default::default(),
             pending_paste: None,
-            injected_paste_upload: None,
+            paste_share_upload: None,
             paste_queue: None,
             paste_error: None,
             paste_upload_dir: None,
@@ -1722,6 +1740,9 @@ impl eframe::App for WeeChatApp {
             file_share_service: self.file_share_service.clone(),
             file_share_duration: self.file_share_duration.clone(),
             jirafeau_url: self.jirafeau_url.clone(),
+            privatebin_server: self.privatebin_server.clone(),
+            privatebin_expire: self.privatebin_expire.clone(),
+            privatebin_burn: self.privatebin_burn,
             keybinds: self.keybinds.clone(),
             collapsed_servers: self.collapsed_servers.clone(),
             adaptive_theme: self.adaptive_theme,
