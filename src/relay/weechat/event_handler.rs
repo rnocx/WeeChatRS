@@ -203,6 +203,7 @@ impl WeeChatApp {
                         .or_else(|| self.buffers.iter().rposition(|b| same_conn(b)).map(|i| i + 1))
                         .unwrap_or(self.buffers.len());
                     self.buffers.insert(pos, buf);
+                    self.apply_saved_order_for(conn_prefix);
                     self.rebuild_buffer_idx();
                 }
                 // Auto-select when nothing is currently selected (e.g. first buffer on connect).
@@ -853,7 +854,7 @@ impl WeeChatApp {
 
             // Re-apply user's custom ordering
             if !self.buffer_order.is_empty() {
-                apply_buffer_order(&mut self.buffers, &self.buffer_order);
+                apply_buffer_order(&mut self.buffers, &self.buffer_order, |b| b.id.clone());
             }
 
             // When multiple connections are present, group all buffers by connection prefix
@@ -1151,7 +1152,23 @@ impl WeeChatApp {
         });
     }
 
-    pub(crate) fn strip_ansi(text: &str) -> String {
+/// IRC, soju, ZNC and Injected buffers arrive one by one; each time, the
+    /// connection's buffers take the order the user gave them, kept by `local_buffer_key`.
+    fn apply_saved_order_for(&mut self, conn_prefix: &str) {
+        if self.buffer_order.is_empty()
+            || !self.connections.iter().any(|c| c.prefix == conn_prefix && c.backend_type != crate::ui::app::BackendType::WeeChat)
+        {
+            return;
+        }
+        let pfx = format!("{}/", conn_prefix);
+        let (Some(first), Some(last)) = (
+            self.buffers.iter().position(|b| b.id.starts_with(&pfx)),
+            self.buffers.iter().rposition(|b| b.id.starts_with(&pfx)),
+        ) else { return };
+        apply_buffer_order(&mut self.buffers[first..=last], &self.buffer_order, |b| crate::ui::app::local_buffer_key(conn_prefix, b));
+    }
+
+        pub(crate) fn strip_ansi(text: &str) -> String {
         ansi_re().replace_all(text, "").to_string()
     }
 
@@ -1295,32 +1312,50 @@ impl WeeChatApp {
 /// header, and a saved position only orders them within that group. That way a buffer
 /// whose group changed (e.g. a plugin buffer moved under core) can't end up stranded
 /// between other networks.
-fn apply_buffer_order(buffers: &mut [Buffer], order: &[String]) {
+/// Sorts buffers into the user's saved order, `order` holding each buffer's `key`:
+/// the id for WeeChat, `local_buffer_key` for the other connections, whose ids
+/// don't last from one session to the next. Groups keep their channels under them,
+/// and buffers the order doesn't know go after the known ones.
+pub(crate) fn apply_buffer_order(buffers: &mut [Buffer], order: &[String], key: impl Fn(&Buffer) -> String) {
     let max_order = order.len();
+    let position: std::collections::HashMap<&str, usize> = order.iter().enumerate()
+        .rev()
+        .map(|(i, k)| (k.as_str(), i))
+        .collect();
     let is_root = |b: &Buffer| b.kind == "server" || b.kind == "core";
 
+    // A group is a server on one connection: two connections can share a network name,
+    // and every WeeChat connection has a core group.
+    let group_key = |b: &Buffer| (b.id.split_once('/').map_or("", |(conn, _)| conn).to_string(), b.server.clone());
     // Earliest saved position of each group's header.
-    let mut header_pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut header_pos: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     for b in buffers.iter().filter(|b| is_root(b)) {
-        if let Some(pos) = order.iter().position(|id| id == &b.id) {
-            header_pos.entry(b.server.clone()).and_modify(|p| *p = (*p).min(pos)).or_insert(pos);
+        if let Some(&pos) = position.get(key(b).as_str()) {
+            header_pos.entry(group_key(b)).and_modify(|p| *p = (*p).min(pos)).or_insert(pos);
         }
     }
 
-    buffers.sort_by_key(|b| {
+    // Groups the order doesn't know keep their place among themselves.
+    let mut first_seen: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    for (i, b) in buffers.iter().enumerate() {
+        first_seen.entry(group_key(b)).or_insert(i);
+    }
+
+    buffers.sort_by_cached_key(|b| {
         // The core group (WeeChat buffer + plugin buffers) is always first, like buffer 1.
+        let g = group_key(b);
         let group = if b.server == "!00_core" {
             0
         } else {
-            1 + header_pos.get(&b.server).copied().unwrap_or(max_order)
+            1 + header_pos.get(&g).copied().unwrap_or(max_order + first_seen[&g])
         };
         let within = if is_root(b) {
             0
         } else {
-            1 + order.iter().position(|id| id == &b.id)
+            1 + position.get(key(b).as_str()).copied()
                 .unwrap_or(max_order + b.number.max(0) as usize)
         };
-        (group, b.server.clone(), within)
+        (group, g, within)
     });
 }
 
@@ -1383,7 +1418,7 @@ mod tests {
             buf("supernets", "server", "supernets", 4), buf("core", "core", "!00_core", 1),
             buf("highmon", "plugin", "!00_core", 5),
         ];
-        apply_buffer_order(&mut buffers, &order);
+        apply_buffer_order(&mut buffers, &order, |b| b.id.clone());
         let ids: Vec<&str> = buffers.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(ids, ["core", "highmon", "nixsec", "#a", "supernets"]);
     }
@@ -1399,6 +1434,38 @@ mod tests {
     }
 
     #[test]
+    fn irc_buffers_take_their_saved_order_by_name() {
+        // Saved by name: oftc before libera, and #go before #rust.
+        let key = |b: &Buffer| crate::ui::app::local_buffer_key("irc", b);
+        let mut buffers = vec![
+            buf("irc/1", "server", "libera", 1), buf("irc/2", "channel", "libera", 2), buf("irc/3", "channel", "libera", 3),
+            buf("irc/4", "server", "oftc", 4), buf("irc/5", "channel", "oftc", 5),
+            buf("irc/6", "server", "newnet", 6), buf("irc/7", "server", "another", 7),
+        ];
+        for (b, name) in buffers.iter_mut().zip(["libera", "#rust", "#go", "oftc", "#debian", "newnet", "another"]) {
+            b.name = name.into();
+        }
+        let order: Vec<String> = ["irc|oftc|oftc", "irc|oftc|#debian", "irc|libera|libera", "irc|libera|#go", "irc|libera|#rust"]
+            .iter().map(|s| s.to_string()).collect();
+        apply_buffer_order(&mut buffers, &order, key);
+        let names: Vec<&str> = buffers.iter().map(|b| b.name.as_str()).collect();
+        // Networks the order doesn't know stay in the order they came.
+        assert_eq!(names, ["oftc", "#debian", "libera", "#go", "#rust", "newnet", "another"]);
+    }
+
+    #[test]
+    fn saved_order_keeps_connections_with_the_same_network_apart() {
+        let order: Vec<String> = ["b/libera", "b/#w", "a/libera", "a/#r"].iter().map(|s| s.to_string()).collect();
+        let mut buffers = vec![
+            buf("a/libera", "server", "libera", 1), buf("a/#r", "channel", "libera", 2),
+            buf("b/libera", "server", "libera", 1), buf("b/#w", "channel", "libera", 2),
+        ];
+        apply_buffer_order(&mut buffers, &order, |b| b.id.clone());
+        let ids: Vec<&str> = buffers.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["b/libera", "b/#w", "a/libera", "a/#r"]);
+    }
+
+    #[test]
     fn saved_order_keeps_children_under_their_header() {
         // Saved order from before the fix: fset/highmon were stranded between networks.
         let order: Vec<String> = ["core", "nixsec", "#a", "myam", "#b", "highmon", "fset", "supernets"]
@@ -1410,7 +1477,7 @@ mod tests {
             buf("myam", "server", "myam", 5), buf("#a", "channel", "nixsec", 3),
             buf("newnet", "server", "newnet", 10), buf("#new", "channel", "nixsec", 4),
         ];
-        apply_buffer_order(&mut buffers, &order);
+        apply_buffer_order(&mut buffers, &order, |b| b.id.clone());
         let ids: Vec<&str> = buffers.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(ids, ["core", "highmon", "fset", "nixsec", "#a", "#new", "myam", "#b", "supernets", "newnet"]);
     }

@@ -341,45 +341,95 @@ pub const MAX_STORED_LINES: usize = 10_000;
 
 /// Reorder `buffers` by moving the dragged item (and its whole server group when it is a server
 /// header) to just before `drop_before_id`, or to the end when `drop_before_id` is `None`.
+/// The connection a buffer belongs to: the prefix of its id.
+fn conn_of(buffer: &Buffer) -> &str {
+    buffer.id.split_once('/').map_or("", |(conn, _)| conn)
+}
+
+/// Whether two buffers are in the same network group: the same server on the same
+/// connection. Two connections can have networks of the same name.
+pub(crate) fn same_group(a: &Buffer, b: &Buffer) -> bool {
+    a.server == b.server && conn_of(a) == conn_of(b)
+}
+
+/// The key a network group is collapsed by: its connection and server.
+pub(crate) fn group_key(buffer: &Buffer) -> String {
+    format!("{}|{}", conn_of(buffer), buffer.server)
+}
+
+fn is_group_header(buffer: &Buffer) -> bool {
+    buffer.kind == "server" || buffer.kind == "core"
+}
+
+/// Moves a dragged buffer before `drop_before_id`, or to the end. A network's header
+/// takes its whole group along, and lands between groups of its own connection; a
+/// channel stays within its own network, so nothing ends up under another header.
 fn apply_drag_reorder(buffers: &mut Vec<Buffer>, drag_id: &str, drop_before_id: Option<&str>) {
-    let drag_idx = match buffers.iter().position(|b| b.id == drag_id) {
-        Some(i) => i,
-        None => return,
-    };
+    let Some(drag_idx) = buffers.iter().position(|b| b.id == drag_id) else { return };
+    let dragged = buffers[drag_idx].clone();
+    let is_header = is_group_header(&dragged);
 
-    let is_header = buffers[drag_idx].kind == "server" || buffers[drag_idx].kind == "core";
-    let server_key = buffers[drag_idx].server.clone();
-
-    // Indices of all buffers that will move (header + its children when moving a header).
+    // The buffers that move: the header and its group, or the one buffer.
     let group_indices: Vec<usize> = if is_header {
         buffers.iter().enumerate()
-            .filter(|(_, b)| b.server == server_key)
+            .filter(|(_, b)| same_group(b, &dragged))
             .map(|(i, _)| i)
             .collect()
     } else {
         vec![drag_idx]
     };
-
-    // If the drop target is inside the group being moved, do nothing.
+    // Dropped onto itself or inside its own group: nothing to do.
     if let Some(tid) = drop_before_id {
         if group_indices.iter().any(|&i| buffers[i].id == tid) {
             return;
         }
     }
 
-    // Remove from highest index first to keep lower indices valid.
+    let original = buffers.clone();
     let mut moved: Vec<Buffer> = group_indices.iter().rev()
         .map(|&i| buffers.remove(i))
         .collect();
     moved.reverse();
 
-    let insert_at = match drop_before_id {
-        Some(tid) => buffers.iter().position(|b| b.id == tid).unwrap_or(buffers.len()),
-        None => buffers.len(),
-    };
+    let mut at = drop_before_id
+        .and_then(|tid| buffers.iter().position(|b| b.id == tid))
+        .unwrap_or(buffers.len());
+
+    if is_header {
+        // Among its own connection's buffers…
+        let conn = conn_of(&dragged);
+        if let (Some(first), Some(last)) = (
+            buffers.iter().position(|b| conn_of(b) == conn),
+            buffers.iter().rposition(|b| conn_of(b) == conn),
+        ) {
+            at = at.clamp(first, last + 1);
+        }
+        // …and not inside another group: after the group it was dropped into.
+        while at > 0 && at < buffers.len() && !is_group_header(&buffers[at]) && same_group(&buffers[at - 1], &buffers[at]) {
+            at += 1;
+        }
+    } else {
+        // Within its own group, after the header.
+        let header = buffers.iter().position(|b| is_group_header(b) && same_group(b, &dragged));
+        let members: Vec<usize> = buffers.iter().enumerate()
+            .filter(|(_, b)| same_group(b, &dragged))
+            .map(|(i, _)| i)
+            .collect();
+        match (header, members.first(), members.last()) {
+            (_, Some(&first), Some(&last)) => {
+                let start = header.map_or(first, |h| h + 1);
+                at = at.clamp(start, last + 1);
+            }
+            // The only buffer of its group: it stays where it was.
+            _ => {
+                *buffers = original;
+                return;
+            }
+        }
+    }
 
     for (offset, buf) in moved.into_iter().enumerate() {
-        buffers.insert(insert_at + offset, buf);
+        buffers.insert(at + offset, buf);
     }
 }
 
@@ -1255,7 +1305,9 @@ impl WeeChatApp {
             paste_queue: None,
             paste_error: None,
             paste_upload_dir: None,
-            collapsed_servers: settings.collapsed_servers,
+            // Keys from before they named the connection would collapse every
+            // network of that name; those groups start open once.
+            collapsed_servers: settings.collapsed_servers.into_iter().filter(|k| k.contains('|')).collect(),
             adaptive_theme,
             adaptive_theme_result: None,
             wallpaper_rx,
@@ -1504,6 +1556,19 @@ impl WeeChatApp {
         } else {
             (local_buffer_key(&conn.prefix, buffer), false)
         })
+    }
+
+    /// The buffer list's order as saved: WeeChat buffers by id, the others by
+    /// `local_buffer_key`, since their ids change from one session to the next.
+    pub(crate) fn buffer_order_keys(&self) -> Vec<String> {
+        let weechat: HashSet<&str> = self.connections.iter()
+            .filter(|c| c.backend_type == BackendType::WeeChat)
+            .map(|c| c.prefix.as_str())
+            .collect();
+        self.buffers.iter().map(|b| {
+            let conn = conn_of(b);
+            if weechat.contains(conn) { b.id.clone() } else { local_buffer_key(conn, b) }
+        }).collect()
     }
 
     /// Who we are on the server of `buffer_id`, for the menus.
@@ -2310,8 +2375,7 @@ impl eframe::App for WeeChatApp {
                     let dragged_group_ids: HashSet<String> = if let Some(drag_id) = &self.dragging_buffer_id {
                         if let Some(drag_buf) = self.buffer_by_id(drag_id) {
                             if drag_buf.kind == "server" || drag_buf.kind == "core" {
-                                let skey = drag_buf.server.clone();
-                                self.buffers.iter().filter(|b| b.server == skey).map(|b| b.id.clone()).collect()
+                                self.buffers.iter().filter(|b| same_group(b, drag_buf)).map(|b| b.id.clone()).collect()
                             } else {
                                 std::iter::once(drag_id.clone()).collect()
                             }
@@ -2347,7 +2411,7 @@ impl eframe::App for WeeChatApp {
                             let is_core  = buffer.kind == "core";
                             let is_root  = buffer.kind == "server" || is_core;
                             // Skip children of collapsed server groups.
-                            if !is_root && self.collapsed_servers.contains(&buffer.server) {
+                            if !is_root && self.collapsed_servers.contains(&group_key(buffer)) {
                                 continue;
                             }
                             let is_child = !is_root;
@@ -2510,7 +2574,7 @@ impl eframe::App for WeeChatApp {
                                     egui::pos2(outer_rect.max.x - chevron_w, outer_rect.min.y),
                                     outer_rect.max,
                                 );
-                                let is_collapsed = self.collapsed_servers.contains(&buffer.server);
+                                let is_collapsed = self.collapsed_servers.contains(&group_key(buffer));
                                 let chevron_char = if is_collapsed { icons::CARET_RIGHT } else { icons::CARET_DOWN };
                                 let chev_id   = egui::Id::unique("buf_chev").with(&buffer.id);
                                 let chev_resp = ui.interact(chevron_rect, chev_id, egui::Sense::click());
@@ -2524,7 +2588,7 @@ impl eframe::App for WeeChatApp {
                                         chev_color,
                                     );
                                 if chev_resp.clicked() {
-                                    pending_collapse_toggle = Some(buffer.server.clone());
+                                    pending_collapse_toggle = Some(group_key(buffer));
                                 }
                             }
 
@@ -2669,7 +2733,14 @@ impl eframe::App for WeeChatApp {
                         if let Some(drag_id) = self.dragging_buffer_id.take() {
                             let drop_id = self.drag_drop_before_id.take();
                             apply_drag_reorder(&mut self.buffers, &drag_id, drop_id.as_deref());
-                            self.buffer_order = self.buffers.iter().map(|b| b.id.clone()).collect();
+                            // Positions changed: the id lookup must follow, or new lines and
+                            // nick lists go to whichever buffer took a moved one's place.
+                            self.rebuild_buffer_idx();
+                            // Buffers of connections that aren't up keep their saved places.
+                            let mut order = self.buffer_order_keys();
+                            let current: HashSet<String> = order.iter().cloned().collect();
+                            order.extend(self.buffer_order.iter().filter(|k| !current.contains(*k)).cloned());
+                            self.buffer_order = order;
                         }
                         self.drag_drop_before_id = None;
                     }
@@ -3875,6 +3946,55 @@ impl eframe::App for WeeChatApp {
 #[cfg(test)]
 mod tests {
     use super::WeeChatApp;
+
+    /// Two connections: "a" with networks libera and oftc, "b" with its own libera.
+    fn list() -> Vec<crate::relay::models::Buffer> {
+        let buf = |id: &str, kind: &str, server: &str| crate::relay::models::Buffer {
+            id: id.into(), name: id.into(), kind: kind.into(), server: server.into(), ..Default::default()
+        };
+        vec![
+            buf("a/libera", "server", "libera"), buf("a/#rust", "channel", "libera"), buf("a/#go", "channel", "libera"),
+            buf("a/oftc", "server", "oftc"), buf("a/#debian", "channel", "oftc"),
+            buf("b/libera", "server", "libera"), buf("b/#weechat", "channel", "libera"),
+        ]
+    }
+
+    fn ids(buffers: &[crate::relay::models::Buffer]) -> Vec<&str> {
+        buffers.iter().map(|b| b.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_network_moves_with_its_channels_only() {
+        let mut b = list();
+        super::apply_drag_reorder(&mut b, "a/oftc", Some("a/libera"));
+        assert_eq!(ids(&b), ["a/oftc", "a/#debian", "a/libera", "a/#rust", "a/#go", "b/libera", "b/#weechat"]);
+    }
+
+    #[test]
+    fn a_network_dropped_inside_another_lands_after_it() {
+        let mut b = list();
+        super::apply_drag_reorder(&mut b, "a/oftc", Some("a/#go"));
+        assert_eq!(ids(&b), ["a/libera", "a/#rust", "a/#go", "a/oftc", "a/#debian", "b/libera", "b/#weechat"]);
+        // Nor into another connection.
+        let mut b = list();
+        super::apply_drag_reorder(&mut b, "a/libera", Some("b/#weechat"));
+        assert_eq!(ids(&b), ["a/oftc", "a/#debian", "a/libera", "a/#rust", "a/#go", "b/libera", "b/#weechat"]);
+    }
+
+    #[test]
+    fn a_channel_stays_in_its_network() {
+        let mut b = list();
+        super::apply_drag_reorder(&mut b, "a/#go", Some("a/#rust"));
+        assert_eq!(ids(&b), ["a/libera", "a/#go", "a/#rust", "a/oftc", "a/#debian", "b/libera", "b/#weechat"]);
+        // Dropped into oftc: it goes to the end of libera instead.
+        let mut b = list();
+        super::apply_drag_reorder(&mut b, "a/#rust", Some("a/#debian"));
+        assert_eq!(ids(&b), ["a/libera", "a/#go", "a/#rust", "a/oftc", "a/#debian", "b/libera", "b/#weechat"]);
+        // Dropped above its own header: first in its network.
+        let mut b = list();
+        super::apply_drag_reorder(&mut b, "a/#go", Some("a/libera"));
+        assert_eq!(ids(&b), ["a/libera", "a/#go", "a/#rust", "a/oftc", "a/#debian", "b/libera", "b/#weechat"]);
+    }
 
     fn line(prefix: &str, secs: i64) -> crate::relay::models::Line {
         let ts = chrono::DateTime::from_timestamp(1_790_000_000 + secs, 0).unwrap();
