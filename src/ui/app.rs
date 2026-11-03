@@ -1458,13 +1458,14 @@ impl WeeChatApp {
     }
 
     pub(crate) fn draw_sidebar_icon(painter: &Painter, rect: Rect, color: Color32, is_right: bool) {
-        let stroke = Stroke::new(1.5, color);
+        let stroke = Stroke::new(1.4, color);
         let rounding = CornerRadius::same(2);
-        painter.rect_stroke(rect.shrink(4.0), rounding, stroke, egui::StrokeKind::Middle);
+        let frame = Rect::from_center_size(rect.center(), egui::vec2(16.0, 14.0));
+        painter.rect_stroke(frame, rounding, stroke, egui::StrokeKind::Middle);
 
-        let split_x = if is_right { rect.right() - 8.0 } else { rect.left() + 8.0 };
+        let split_x = if is_right { frame.right() - 5.0 } else { frame.left() + 5.0 };
         painter.line_segment(
-            [egui::pos2(split_x, rect.top() + 4.0), egui::pos2(split_x, rect.bottom() - 4.0)],
+            [egui::pos2(split_x, frame.top()), egui::pos2(split_x, frame.bottom())],
             stroke
         );
     }
@@ -2316,12 +2317,16 @@ impl eframe::App for WeeChatApp {
             .show(root_ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                    ui.spacing_mut().button_padding = egui::vec2(5.0, 3.0);
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    // Plain grey icons, as in the mockup, whatever colour the theme's text is.
+                    let icon = |glyph: &str| egui::RichText::new(glyph).size(15.0).color(text_secondary);
 
-                    let icon_size = Vec2::splat(24.0);
+                    let icon_size = Vec2::splat(22.0);
 
                     let (rect, res) = ui.allocate_at_least(icon_size, egui::Sense::click());
                     if res.clicked() { self.show_buffers = !self.show_buffers; }
-                    let color = if self.show_buffers { accent_color } else { Color32::GRAY };
+                    let color = if self.show_buffers { accent_color } else { text_muted };
                     Self::draw_sidebar_icon(ui.painter(), rect, color, false);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2331,20 +2336,20 @@ impl eframe::App for WeeChatApp {
                             .unwrap_or(false);
                         let (rect, res) = ui.allocate_at_least(icon_size, if buf_has_nicklist { egui::Sense::click() } else { egui::Sense::hover() });
                         if buf_has_nicklist && res.clicked() { self.show_nicklist = !self.show_nicklist; }
-                        let color = if buf_has_nicklist && self.show_nicklist { accent_color } else { Color32::GRAY.linear_multiply(if buf_has_nicklist { 1.0 } else { 0.4 }) };
+                        let color = if buf_has_nicklist && self.show_nicklist { accent_color } else { text_muted.linear_multiply(if buf_has_nicklist { 1.0 } else { 0.4 }) };
                         Self::draw_sidebar_icon(ui.painter(), rect, color, true);
                         ui.add_space(8.0);
 
-                        if ui.button(egui::RichText::new(icons::GEAR).size(16.0)).on_hover_text("Settings").clicked() {
+                        if ui.button(icon(icons::GEAR)).on_hover_text("Settings").clicked() {
                             self.open_settings(ui.ctx());
                         }
                         let unseen = self.mentions.unseen;
                         let mentions_label = if unseen > 0 {
                             egui::RichText::new(format!("{} {}", icons::AT, unseen)).size(15.0).color(Color32::from_rgb(220, 70, 70))
                         } else if self.mentions_selected() {
-                            egui::RichText::new(icons::AT).size(16.0).color(accent_color)
+                            icon(icons::AT).color(accent_color)
                         } else {
-                            egui::RichText::new(icons::AT).size(16.0)
+                            icon(icons::AT)
                         };
                         let mentions_tip = match unseen {
                             0 => "Mentions".to_string(),
@@ -2354,13 +2359,13 @@ impl eframe::App for WeeChatApp {
                         if ui.button(mentions_label).on_hover_text(mentions_tip).clicked() {
                             self.toggle_mentions();
                         }
-                        if ui.button(egui::RichText::new(icons::PLUGS).size(14.0)).on_hover_text("Connections").clicked() {
+                        if ui.button(icon(icons::PLUGS)).on_hover_text("Connections").clicked() {
                             self.open_connections(ui.ctx());
                         }
                         let log_icon = if self.connection_log_unread {
-                            egui::RichText::new(icons::TERMINAL_WINDOW).size(16.0).color(Color32::from_rgb(255, 165, 0))
+                            icon(icons::TERMINAL_WINDOW).color(Color32::from_rgb(255, 165, 0))
                         } else {
-                            egui::RichText::new(icons::TERMINAL_WINDOW).size(16.0)
+                            icon(icons::TERMINAL_WINDOW)
                         };
                         if ui.button(log_icon).on_hover_text("Connection log").clicked() {
                             self.show_connection_log = !self.show_connection_log;
@@ -2379,7 +2384,7 @@ impl eframe::App for WeeChatApp {
                                 } else {
                                     Color32::from_rgb(50, 205, 50)
                                 };
-                                ui.label(egui::RichText::new(status_text).color(status_color).small());
+                                ui.label(egui::RichText::new(status_text).color(status_color).size(12.0));
                             }
                         }
                         if self.show_lag {
@@ -3402,10 +3407,10 @@ impl eframe::App for WeeChatApp {
 
                     // fset's title is its terminal key help; the panel has its own toolbar.
                     if self.show_titlebar && !is_fset_buffer && (!current_buffer_topic.is_empty() || !current_buffer_modes.is_empty()) {
-                        Frame::NONE
+                        // One line's height and a hairline under it: no box, no separator gap.
+                        let topic_frame = Frame::NONE
                             .fill(surface_color.linear_multiply(0.3))
-                            .inner_margin(Margin::symmetric(16, 6))
-                            .stroke(Stroke::new(1.0, Color32::from_white_alpha(10)))
+                            .inner_margin(Margin::symmetric(16, 3))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal_wrapped(|ui| {
@@ -3439,8 +3444,8 @@ impl eframe::App for WeeChatApp {
                                     }
                                 });
                             });
-                        ui.add_space(-1.0);
-                        ui.separator();
+                        let r = topic_frame.response.rect;
+                        ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, border_color));
                     }
 
                     // -------------------------------------------------------
