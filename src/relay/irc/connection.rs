@@ -27,6 +27,9 @@ pub enum IrcCommand {
     Context { buffer_id: String, timestamp: String, request: String },
     /// A command for a ZNC module, answered with `BouncerReply`.
     ZncCommand { module: String, text: String },
+    /// LIST, for channels with at least `min_users` where the server can filter;
+    /// answered with `ChannelList` for the status buffer.
+    ListChannels { min_users: u32 },
     Disconnect,
 }
 
@@ -120,6 +123,11 @@ struct Session {
     /// Channels whose topic we asked for with a bare /topic: its replies are printed
     /// there, as WeeChat does, instead of only updating the topic bar.
     topic_queries: HashSet<String>,
+    /// ISUPPORT ELIST: the LIST filters the server knows (`U` for user counts).
+    elist: String,
+    /// A LIST we asked for is coming in; its channels wait here to go out in parts.
+    list_pending: bool,
+    list_batch: Vec<crate::relay::models::ListedChannel>,
 }
 
 impl Session {
@@ -164,6 +172,9 @@ impl Session {
             chanmodes: ["beI".into(), "k".into(), "l".into()],
             prefix_modes: "qaohv".into(),
             topic_queries: HashSet::new(),
+            elist: String::new(),
+            list_pending: false,
+            list_batch: Vec::new(),
         }
     }
 
@@ -331,6 +342,19 @@ fn timestamp_from_msg(msg: &IrcMessage) -> DateTime<Utc> {
 
 fn make_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>, highlight: bool) -> Line {
     Line::new(id.to_string(), ts, prefix.to_string(), text.to_string(), true, highlight)
+}
+
+/// Channels sent to the app at a time while a LIST comes in.
+const LIST_BATCH: usize = 500;
+
+/// LIST, asking only for channels with at least `min_users` when the server's ELIST
+/// has `U`; servers without it would take `>9` for a channel name.
+pub(crate) fn list_command(elist: &str, min_users: u32) -> String {
+    if min_users > 1 && elist.contains('U') {
+        format!("LIST >{}", min_users - 1)
+    } else {
+        "LIST".to_string()
+    }
 }
 
 /// The inside of a CTCP message, `\x01VERSION\x01` → `VERSION`, split into its kind
@@ -1605,6 +1629,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                         session.chanmodes = [(); 3].map(|_| types.next().unwrap_or_default());
                     } else if let Some(modes) = token.strip_prefix("PREFIX=(").and_then(|v| v.split(')').next()) {
                         session.prefix_modes = modes.to_string();
+                    } else if let Some(filters) = token.strip_prefix("ELIST=") {
+                        session.elist = filters.to_ascii_uppercase();
                     }
                 }
             }
@@ -1615,6 +1641,40 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                     buffer_id: "status".to_string(),
                     line: make_line(&line_counter.to_string(), "--", &text, timestamp_from_msg(msg), false),
                 });
+            }
+        }
+
+        // The channel list we asked for: 321 starts it, a 322 per channel, 323 ends it.
+        // A LIST typed by hand (/quote LIST) isn't collected and stays quiet.
+        "321" | "322" | "323" | "263" | "416" if session.list_pending => {
+            match msg.command.as_str() {
+                "322" => {
+                    session.list_batch.push(crate::relay::models::ListedChannel {
+                        name: msg.param(1).unwrap_or("").to_string(),
+                        users: msg.param(2).and_then(|n| n.parse().ok()).unwrap_or(0),
+                        topic: irc_to_ansi(msg.param(3).unwrap_or("")),
+                    });
+                    if session.list_batch.len() >= LIST_BATCH {
+                        events.push(BackendEvent::ChannelList {
+                            buffer_id: "status".to_string(),
+                            channels: std::mem::take(&mut session.list_batch),
+                            done: false,
+                            error: None,
+                        });
+                    }
+                }
+                "323" | "263" | "416" => {
+                    session.list_pending = false;
+                    // 263 RPL_TRYAGAIN and 416 ERR_TOOMANYMATCHES say why there's no list.
+                    let error = (msg.command != "323").then(|| msg.params.last().cloned().unwrap_or_default());
+                    events.push(BackendEvent::ChannelList {
+                        buffer_id: "status".to_string(),
+                        channels: std::mem::take(&mut session.list_batch),
+                        done: true,
+                        error,
+                    });
+                }
+                _ => {}
             }
         }
 
@@ -1976,6 +2036,15 @@ pub fn spawn(
                                             send!(BackendEvent::HistoryResults { request, lines: Vec::new(), error: Some("The server doesn't keep history".to_string()) });
                                         }
                                     }
+                                    Some(IrcCommand::ListChannels { min_users }) => {
+                                        session.list_pending = true;
+                                        session.list_batch.clear();
+                                        let line = list_command(&session.elist, min_users);
+                                        log::debug!("channel list asked: {line} (ELIST {:?})", session.elist);
+                                        if write_half.write_all(format!("{line}\r\n").as_bytes()).await.is_err() {
+                                            break 'conn;
+                                        }
+                                    }
                                     Some(IrcCommand::ZncCommand { module, text }) => {
                                         // Sent with the write queue at the top of the loop.
                                         session.znc_query(&module, &text);
@@ -2107,6 +2176,38 @@ mod tests {
         assert_eq!(expand_irc_command("#chan", "/quote KILL bob :spam").as_deref(), Some("KILL bob :spam"));
         assert_eq!(expand_irc_command("status", "/raw STATS p").as_deref(), Some("STATS p"));
         assert_eq!(expand_irc_command("status", "/quote"), None);
+    }
+
+    #[test]
+    fn list_replies_come_in_parts_for_the_status_buffer() {
+        assert_eq!(list_command("CMNTU", 10), "LIST >9");
+        assert_eq!(list_command("", 10), "LIST", "no ELIST U: >9 would be a channel name");
+        assert_eq!(list_command("U", 0), "LIST");
+        let config = config(None);
+        let mut session = Session::new("sam");
+        session.registered = true;
+        let mut counter = 0;
+        let mut run = |session: &mut Session, raw: &str| translate(&IrcMessage::parse(raw).unwrap(), session, &mut counter, &config);
+        // Not asked for: a LIST typed by hand stays quiet.
+        let shown = |events: &[BackendEvent]| events.iter().any(|e| matches!(e, BackendEvent::ChannelList { .. } | BackendEvent::LineAdded { .. }));
+        assert!(!shown(&run(&mut session, ":irc.test 322 sam #rust 842 :Rust")));
+        session.list_pending = true;
+        assert!(!shown(&run(&mut session, ":irc.test 321 sam Channel :Users  Name")));
+        let mut got = Vec::new();
+        for n in 0..(LIST_BATCH + 2) {
+            got.extend(run(&mut session, &format!(":irc.test 322 sam #c{n} {n} :\x02topic\x02 {n}")));
+        }
+        got.extend(run(&mut session, ":irc.test 323 sam :End of /LIST"));
+        let parts: Vec<(usize, bool)> = got.iter().filter_map(|e| match e {
+            BackendEvent::ChannelList { buffer_id, channels, done, error } if buffer_id == "status" && error.is_none() => Some((channels.len(), *done)),
+            _ => None,
+        }).collect();
+        assert_eq!(parts, [(LIST_BATCH, false), (2, true)]);
+        assert!(!session.list_pending);
+        // Refused: the reason comes with the end.
+        session.list_pending = true;
+        let refused = run(&mut session, ":irc.test 263 sam LIST :Server load is temporarily too heavy");
+        assert!(matches!(&refused[..], [BackendEvent::ChannelList { done: true, error: Some(e), .. }] if e.contains("too heavy")));
     }
 
     #[test]

@@ -108,6 +108,9 @@ impl WeeChatApp {
                     self.connection_log_unread = true;
                 }
             }
+            BackendEvent::ChannelList { buffer_id, channels, done, error } => {
+                self.channel_list_received(&format!("{}/{}", conn_prefix, buffer_id), channels, done, error);
+            }
             BackendEvent::TunnelFailed(e) => {
                 if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
                     conn.client.disconnect();
@@ -486,6 +489,8 @@ impl WeeChatApp {
                 }
                 "buffer_title_changed" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let title = resp.body.as_ref().and_then(|b| b.get("title")).and_then(|v| v.as_str()).unwrap_or("");
+                        self.weechat_list_title(&format!("{}/{}", conn_prefix, raw_id), title);
                         if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
                             conn.client.refresh_buffer(&raw_id);
                         }
@@ -543,6 +548,7 @@ impl WeeChatApp {
                 "buffer_cleared" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
+                        self.weechat_list_cleared(&full_id);
                         if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                             Arc::make_mut(&mut buf.messages).clear();
                             buf.last_read_id = None;
@@ -1199,6 +1205,7 @@ impl WeeChatApp {
                     let timestamp = Self::parse_date(obj.get("date"));
 
                     let line = Line::new(id, timestamp, prefix.to_string(), message.to_string(), displayed, is_highlight);
+                    self.weechat_list_row(&buffer_id, message);
 
                     let is_selected = self.selected_buffer_id.as_deref() == Some(&buffer_id);
                     let mut notify_data: Option<(String, String, String)> = None;

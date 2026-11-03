@@ -2,10 +2,10 @@ use super::{
     protocol::{self, Packet},
     Command, InjectedConfig,
 };
-use crate::relay::irc::connection::{ctcp, ctcp_query_text, ctcp_reply_text, expand_irc_command, irc_to_ansi, nick_color_ansi, topic_set_by};
+use crate::relay::irc::connection::{ctcp, ctcp_query_text, ctcp_reply_text, expand_irc_command, irc_to_ansi, list_command, nick_color_ansi, topic_set_by};
 use crate::relay::{
     backend::{BackendEvent, ServerStatus},
-    models::{Buffer, BufferActivity, Line, Nick},
+    models::{Buffer, BufferActivity, Line, ListedChannel, Nick},
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -150,6 +150,10 @@ struct State {
     /// Channel buffers whose topic we asked for with a bare /topic; the replies come
     /// as raw events and are printed there.
     topic_queries: HashSet<String>,
+    /// Servers whose channel list we asked for, with what has come in so far.
+    listing: HashMap<String, Vec<ListedChannel>>,
+    /// Each server's ISUPPORT ELIST, when its raw 005 came through.
+    elist: HashMap<String, String>,
     seen: HashSet<(String, String)>,
     seen_order: VecDeque<(String, String)>,
     local_echoes: VecDeque<(String, String, String, i64)>,
@@ -179,6 +183,8 @@ impl State {
             buffers: HashMap::new(),
             members: HashMap::new(),
             topic_queries: HashSet::new(),
+            listing: HashMap::new(),
+            elist: HashMap::new(),
             seen: HashSet::new(),
             seen_order: VecDeque::new(),
             local_echoes: VecDeque::new(),
@@ -683,6 +689,12 @@ impl State {
     fn command(&mut self, command: Command) {
         match command {
             Command::Send(id, text) => self.send(&id, &text),
+            Command::List(id, min_users) => {
+                let Some((server, _)) = self.buffers.get(&id).cloned() else { return };
+                let line = list_command(self.elist.get(&server).map_or("", String::as_str), min_users);
+                self.listing.insert(server.clone(), Vec::new());
+                self.request("irc:send-raw",json!({"serverId":server,"raw":line}),Request::Action);
+            }
             // From the UI on every switch to a buffer: only what isn't there yet.
             // Fetching it again brought back lines and a nick list already shown.
             Command::History(id, count, before) => {
@@ -739,9 +751,38 @@ impl State {
                 self.sequence+=1;
                 self.emit(BackendEvent::LineAdded {buffer_id:id,line});
             }
-            // The server's own lines; only the replies to a bare /topic are used.
+            // The server's own lines: the channel list we asked for, ELIST, and the
+            // replies to a bare /topic.
             "irc:event:raw"=> {
                 let params: Vec<&str> = v["params"].as_array().map(|p| p.iter().filter_map(Value::as_str).map(str::trim_end).collect()).unwrap_or_default();
+                let command = string(&v, "command");
+                if command == "005" {
+                    if let Some(filters) = params.iter().find_map(|t| t.strip_prefix("ELIST=")) {
+                        self.elist.insert(server.clone(), filters.to_ascii_uppercase());
+                    }
+                }
+                if let Some(batch) = self.listing.get_mut(&server) {
+                    let done = match command {
+                        "322" => {
+                            batch.push(ListedChannel {
+                                name: params.get(1).unwrap_or(&"").to_string(),
+                                users: params.get(2).and_then(|n| n.parse().ok()).unwrap_or(0),
+                                topic: irc_to_ansi(params.get(3).unwrap_or(&"")),
+                            });
+                            None
+                        }
+                        "323" => Some(None),
+                        "263" | "416" => Some(Some(params.last().unwrap_or(&"").to_string())),
+                        _ => None,
+                    };
+                    if done.is_some() || batch.len() >= 500 {
+                        let channels = std::mem::take(batch);
+                        if done.is_some() { self.listing.remove(&server); }
+                        let status = buffer_id(&server, "@status");
+                        self.emit(BackendEvent::ChannelList { buffer_id: status, channels, done: done.is_some(), error: done.flatten() });
+                    }
+                    if matches!(command, "321" | "322" | "323" | "263" | "416") { return; }
+                }
                 let Some(channel) = params.get(1) else { return };
                 let id = buffer_id(&server, channel);
                 if !self.topic_queries.contains(&id) { return; }
@@ -1692,6 +1733,29 @@ mod tests {
         assert_eq!(printed.len(), 2, "{printed:?}");
         assert_eq!(printed[0], "Topic for #DNSK is \"Hello world\x1B[0m\"");
         assert!(printed[1].starts_with("Topic set by dnsk (dnsk@dnsk.dj) on "));
+    }
+
+    #[test]
+    fn channel_list_is_asked_raw_and_collected_from_raw_replies() {
+        let (mut s, mut rx) = state();
+        s.event("irc:event:raw",json!({"serverId":"net","command":"005","params":["alice","ELIST=CMNTU","are supported"]}));
+        let status = s.open("net", "@status");
+        drain(&mut rx);
+        s.command(Command::List(status.clone(), 10));
+        assert!(s.out.back().unwrap().contains(r#""raw":"LIST >9""#), "{:?}", s.out.back());
+        for (command, params) in [
+            ("321", json!(["alice","Channel","Users Name"])),
+            ("322", json!(["alice","#rust","842","The Rust language\r\n"])),
+            ("322", json!(["alice","#linux","1412",""])),
+            ("323", json!(["alice","End of /LIST"])),
+        ] {
+            s.event("irc:event:raw", json!({"serverId":"net","command":command,"params":params}));
+        }
+        let lists: Vec<(String, Vec<String>, bool)> = drain(&mut rx).into_iter().filter_map(|e| match e {
+            BackendEvent::ChannelList { buffer_id, channels, done, .. } => Some((buffer_id, channels.into_iter().map(|c| c.name).collect(), done)),
+            _ => None,
+        }).collect();
+        assert_eq!(lists, [(status, vec!["#rust".to_string(), "#linux".to_string()], true)]);
     }
 
     #[test]

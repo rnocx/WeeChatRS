@@ -61,7 +61,7 @@ impl WeeChatApp {
 
         let query = self.quick_switcher.query.to_lowercase();
         let mut results: Vec<(i32, usize)> = self.buffers.iter().enumerate()
-            .filter(|(_, b)| (!b.hidden || self.show_hidden_buffers) && !crate::ui::app::is_highmon_buffer(&b.full_name))
+            .filter(|(_, b)| (!b.hidden || self.show_hidden_buffers) && !crate::ui::app::shown_elsewhere(b))
             .filter_map(|(idx, b)| {
                 let by_name = fuzzy_score(&query, &b.name.to_lowercase());
                 // Full name ("irc.libera.#rust") also matches, at a discount.

@@ -358,6 +358,13 @@ impl BackendClient for WeeChatClient {
 
     fn supports_completion(&self) -> bool { true }
 
+    // WeeChat's /list fills its own list buffer, whose rows the app reads.
+    fn supports_channel_list(&self) -> bool { true }
+
+    fn list_channels(&self, buffer_id: &str, _min_users: u32) {
+        self.send_message(buffer_id, "/list");
+    }
+
     fn complete(&self, buffer_id: &str, text: &str, position: usize, tag: &str) {
         self.send_api(
             "POST /api/completion",

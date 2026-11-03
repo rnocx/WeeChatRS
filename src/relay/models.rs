@@ -151,6 +151,15 @@ impl Line {
     }
 }
 
+/// A channel from the server's `LIST`: its name, how many are in it, and its topic
+/// as ANSI (from the IRC formatting).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListedChannel {
+    pub name: String,
+    pub users: u32,
+    pub topic: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Nick {
     pub name: String,

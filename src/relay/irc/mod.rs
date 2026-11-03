@@ -177,6 +177,12 @@ impl BackendClient for IrcClient {
         let _ = self.cmd_tx.send(IrcCommand::ZncCommand { module: module.to_string(), text: text.to_string() });
     }
 
+    fn supports_channel_list(&self) -> bool { true }
+
+    fn list_channels(&self, buffer_id: &str, min_users: u32) {
+        self.route(buffer_id, |_| IrcCommand::ListChannels { min_users });
+    }
+
     fn detects_oper(&self) -> bool { true }
 
     fn fetch_lines_before(&self, buffer_id: &str, before_ts: &str) {
@@ -433,6 +439,7 @@ fn network_event(
         BackendEvent::ActivityChanged { buffer_id, activity, unread_count, markread_ts } => BackendEvent::ActivityChanged { buffer_id: id(buffer_id), activity, unread_count, markread_ts },
         BackendEvent::TopicChanged { buffer_id, topic } => BackendEvent::TopicChanged { buffer_id: id(buffer_id), topic },
         BackendEvent::ModesChanged { buffer_id, modes } => BackendEvent::ModesChanged { buffer_id: id(buffer_id), modes },
+        BackendEvent::ChannelList { buffer_id, channels, done, error } => BackendEvent::ChannelList { buffer_id: id(buffer_id), channels, done, error },
         BackendEvent::BufferHidden { buffer_id, hidden } => BackendEvent::BufferHidden { buffer_id: id(buffer_id), hidden },
         BackendEvent::LinesLoaded { buffer_id, lines, is_prepend } => BackendEvent::LinesLoaded { buffer_id: id(buffer_id), lines, is_prepend },
         BackendEvent::HistoryResults { request, lines, error } => BackendEvent::HistoryResults {

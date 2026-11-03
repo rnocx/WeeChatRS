@@ -220,6 +220,12 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
 const GROUP_MAX_GAP_SECS: i64 = 5 * 60;
 
 /// The highmon script's buffer (`{connection}/perl.highmon`, `…/python.highmon`).
+/// WeeChat buffers the app shows its own way, which the buffer list, switching and
+/// cycling leave out: highmon (as Mentions) and the /list buffer (as the channel list).
+pub(crate) fn shown_elsewhere(buffer: &Buffer) -> bool {
+    is_highmon_buffer(&buffer.full_name) || crate::ui::channel_list::is_weechat_list_buffer(buffer)
+}
+
 pub(crate) fn is_highmon_buffer(full_name: &str) -> bool {
     let name = full_name.rsplit_once('/').map_or(full_name, |(_, name)| name);
     matches!(name.split_once('.'), Some((_, "highmon")))
@@ -1030,6 +1036,8 @@ pub struct WeeChatApp {
     pub(crate) editing_keybind: Option<crate::ui::keybinds::KeybindAction>,
     pub(crate) quick_switcher: crate::ui::quick_switcher::QuickSwitcherState,
     pub(crate) mentions: crate::ui::mentions::MentionsState,
+    /// Each open channel list, by its entry's buffer id.
+    pub(crate) channel_lists: HashMap<String, crate::ui::channel_list::ChannelList>,
     /// A paste of several lines, waiting for the user to say what to do with it.
     pub(crate) pending_paste: Option<crate::ui::paste::PendingPaste>,
     pub(crate) paste_share_upload: Option<crate::ui::paste::PasteShareUpload>,
@@ -1300,6 +1308,7 @@ impl WeeChatApp {
             editing_keybind: None,
             quick_switcher: Default::default(),
             mentions: Default::default(),
+            channel_lists: HashMap::new(),
             pending_paste: None,
             paste_share_upload: None,
             paste_queue: None,
@@ -1499,7 +1508,9 @@ impl WeeChatApp {
 
     pub(crate) fn select_buffer(&mut self, id: String) {
         if let Some(prev_id) = self.selected_buffer_id.clone() {
-            if prev_id != id {
+            // A channel list is the app's own: nothing to tell the server about it.
+            let is_list = self.buffer_by_id(&prev_id).is_some_and(|b| b.kind == crate::ui::channel_list::KIND);
+            if prev_id != id && !is_list {
                 if let Some((client, raw_id)) = self.client_for_buffer(&prev_id) {
                     client.mark_read(&raw_id);
                 }
@@ -1527,11 +1538,12 @@ impl WeeChatApp {
                 buffer.visit_start_marker_id = buffer.last_read_id.clone();
             }
             let fetch_nicks = buffer.has_nicklist;
+            let is_list = buffer.kind == crate::ui::channel_list::KIND;
             // fset has a line per option, often thousands. On WeeChat the fset session
             // fetches them once the panel's format is in place.
             let is_fset = crate::ui::fset::is_fset_buffer(&buffer.full_name);
             let lines = if is_fset { MAX_STORED_LINES } else { INITIAL_LINES };
-            if let Some((client, raw_id)) = self.client_for_buffer(&id) {
+            if let Some((client, raw_id)) = self.client_for_buffer(&id).filter(|_| !is_list) {
                 client.refresh_buffer(&raw_id);
                 if !(is_fset && client.supports_completion()) {
                     client.fetch_lines(&raw_id, lines);
@@ -2403,8 +2415,8 @@ impl eframe::App for WeeChatApp {
                         }
                         let mut last_conn_prefix: Option<String> = None;
                         for buffer in &self.buffers {
-                            // Mentions above shows what WeeChat's highmon buffer would.
-                            if (buffer.hidden && !self.show_hidden_buffers) || is_highmon_buffer(&buffer.full_name) {
+                            // Mentions and the channel list show what WeeChat's highmon and /list buffers would.
+                            if (buffer.hidden && !self.show_hidden_buffers) || shown_elsewhere(buffer) {
                                 continue;
                             }
                             let is_selected = self.selected_buffer_id.as_deref() == Some(&buffer.id);
@@ -2799,6 +2811,14 @@ impl eframe::App for WeeChatApp {
             }
         }
 
+        // A channel list closes here; the server knows nothing of it.
+        let pending_buffer_command = pending_buffer_command.filter(|(id, cmd)| {
+            let is_list = self.buffer_by_id(id).is_some_and(|b| b.kind == crate::ui::channel_list::KIND);
+            if is_list && cmd == "/close" {
+                self.close_channel_list(id);
+            }
+            !is_list
+        });
         if let Some((id, cmd)) = pending_buffer_command {
             let hide = match cmd.as_str() {
                 "/buffer hide" => Some(true),
@@ -3018,6 +3038,7 @@ impl eframe::App for WeeChatApp {
         // fset has its own controls and highmon is read-only: no input bar there.
         let shows_input = !is_fset_buffer
             && !self.mentions_selected()
+            && current_buffer_kind != crate::ui::channel_list::KIND
             && !current_buffer_full_name.as_deref().is_some_and(is_highmon_buffer);
         if current_buffer_id.is_some() && shows_input {
             // Is the SELECTED buffer's connection up? Different from any_connected when
@@ -3295,6 +3316,11 @@ impl eframe::App for WeeChatApp {
             } else if self.mentions_selected() {
                 ui.vertical(|ui| {
                     self.draw_mentions(ui, &render_theme, accent_color, text_muted, surface_color.linear_multiply(0.3));
+                });
+            } else if current_buffer_kind == crate::ui::channel_list::KIND {
+                let id = current_buffer_id.clone().unwrap_or_default();
+                ui.vertical(|ui| {
+                    self.draw_channel_list(ui, &id, accent_color, text_muted, surface_color.linear_multiply(0.3));
                 });
             } else if current_buffer_full_name.is_some() {
                 ui.vertical(|ui| {

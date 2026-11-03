@@ -34,6 +34,8 @@ pub(super) enum Command {
     History(String, usize, Option<i64>),
     Nicks(String),
     Read(String),
+    /// LIST on the server of this buffer, for channels with at least this many users.
+    List(String, u32),
 }
 
 pub struct InjectedClient {
@@ -89,6 +91,10 @@ impl BackendClient for InjectedClient {
         self.command(Command::Send(buffer_id.into(), text.into()));
     }
     fn supports_paste_upload(&self) -> bool { true }
+    fn supports_channel_list(&self) -> bool { true }
+    fn list_channels(&self, buffer_id: &str, min_users: u32) {
+        self.command(Command::List(buffer_id.into(), min_users));
+    }
     fn create_paste(&self, content: String) -> crate::relay::backend::PasteUpload {
         let config = self.config.clone();
         Box::pin(async move { paste::create(&config, content).await })

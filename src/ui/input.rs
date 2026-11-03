@@ -1,6 +1,6 @@
 use egui::text_edit::TextEditState;
 use egui::text::{CCursorRange, CCursor};
-use crate::ui::app::{WeeChatApp, CompletionState, RemoteCompletion, is_highmon_buffer};
+use crate::ui::app::{WeeChatApp, CompletionState, RemoteCompletion, shown_elsewhere};
 use crate::ui::emoji;
 
 impl WeeChatApp {
@@ -173,7 +173,7 @@ impl WeeChatApp {
         if self.buffers.is_empty() { return; }
         // Mentions comes first, as in the buffer list, which leaves out highmon.
         let order: Vec<String> = std::iter::once(crate::ui::mentions::MENTIONS_ID.to_string())
-            .chain(self.buffers.iter().filter(|b| !is_highmon_buffer(&b.full_name)).map(|b| b.id.clone()))
+            .chain(self.buffers.iter().filter(|b| !shown_elsewhere(b)).map(|b| b.id.clone()))
             .collect();
         let new_id = match &self.selected_buffer_id {
             None => self.buffers[0].id.clone(),
@@ -188,7 +188,7 @@ impl WeeChatApp {
     pub(crate) fn jump_buffer_by_number(&mut self, n: usize) {
         if n == 0 { return; }
         let visible: Vec<String> = self.buffers.iter()
-            .filter(|b| (!b.hidden || self.show_hidden_buffers) && !is_highmon_buffer(&b.full_name))
+            .filter(|b| (!b.hidden || self.show_hidden_buffers) && !shown_elsewhere(b))
             .map(|b| b.id.clone())
             .collect();
         if let Some(id) = visible.get(n - 1) {
@@ -351,6 +351,16 @@ impl WeeChatApp {
                 self.completion = None;
                 self.history_index = None;
                 return;
+            } else if let Some(query) = (msg.trim() == "/list").then_some("").or_else(|| msg.strip_prefix("/list ")) {
+                // IRC, soju, ZNC and Injected: the channel list browser. WeeChat has its own.
+                let opened = self.selected_buffer_id.clone().is_some_and(|id| self.open_channel_list(&id, query));
+                if opened {
+                    if record { self.record_history(msg); }
+                    self.input_text.clear();
+                    self.completion = None;
+                    self.history_index = None;
+                    return;
+                }
             } else if msg.trim() == "/mentions" {
                 self.toggle_mentions();
                 self.input_text.clear();

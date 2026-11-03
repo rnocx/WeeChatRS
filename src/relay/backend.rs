@@ -105,6 +105,16 @@ pub enum BackendEvent {
         status: ServerStatus,
     },
 
+    /// Part of the server's channel list (`list_channels`), in the order it arrives,
+    /// for the network whose server buffer is `buffer_id`. `done` comes with the last
+    /// part, or with `error` when the server refused.
+    ChannelList {
+        buffer_id: String,
+        channels: Vec<crate::relay::models::ListedChannel>,
+        done: bool,
+        error: Option<String>,
+    },
+
     /// Temporary tunnel for WeeChat relay responses until the event handler
     /// is fully migrated to BackendEvent in Phase 3.
     #[doc(hidden)]
@@ -197,6 +207,14 @@ pub trait BackendClient: Send {
     /// showing in the chat; the reply comes back as `BouncerReply`. Changes to the
     /// networks are followed by a fresh `znc_networks` list. Default is a no-op.
     fn znc_command(&self, _module: &str, _text: &str) {}
+
+    /// Whether the app shows this backend's channel list; WeeChat has its own /list
+    /// buffer. Default is false.
+    fn supports_channel_list(&self) -> bool { false }
+
+    /// Asks the server of `buffer_id`'s network for its channels, those with at least
+    /// `min_users` where the server can filter; they come back as `ChannelList`.
+    fn list_channels(&self, _buffer_id: &str, _min_users: u32) {}
 
     /// True if the backend reports whether we're an IRC operator (`ServerStatus`).
     /// Where it doesn't, the user says so per server. Default is false.

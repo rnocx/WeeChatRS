@@ -18,6 +18,7 @@ pub(crate) mod fonts;
 pub(crate) mod icons;
 pub(crate) mod quick_switcher;
 pub(crate) mod mentions;
+pub(crate) mod channel_list;
 pub(crate) mod alias;
 pub(crate) mod paste;
 pub(crate) mod privatebin;
