@@ -1295,7 +1295,7 @@ impl WeeChatApp {
                             ui.end_row();
                         });
                         if self.editing_profile.backend_type == BackendType::Injected {
-                            hint(ui, "Sign in through Injected’s official page. You can also import an existing desktop session or enter a token manually.");
+                            hint(ui, "Sign in through Injected's official page. You can also import an existing desktop session or enter a token manually.");
                             let official = self.editing_profile.host == "injected-irc.com" && self.editing_profile.port == "443" && self.editing_profile.use_ssl;
                             ui.add_enabled_ui(official && self.injected_import.receiver.is_none(), |ui| {
                                 ui.horizontal(|ui| {
@@ -1322,7 +1322,6 @@ impl WeeChatApp {
                             }
                             if let Some(message) = &self.injected_import.message { hint(ui, message); }
                             hint(ui, "The masked token field also accepts a token manually. Save token in keychain keeps it for future connections.");
-                            ui.hyperlink_to("Open Injected to sign in", "https://injected-irc.com");
                         }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
