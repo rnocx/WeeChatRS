@@ -1023,6 +1023,9 @@ pub struct WeeChatApp {
     /// The view draws every line it shows each frame, and a buffer left alone for a
     /// long time collects up to MAX_STORED_LINES, so it starts at the newest ones.
     pub(crate) chat_view_start: Option<String>,
+    /// Where each buffer's chat was left: its first drawn line, and whether it was at
+    /// the bottom. A buffer scrolled up opens where it was.
+    pub(crate) chat_positions: HashMap<String, (Option<String>, bool)>,
     pub(crate) nick_style_cache: Option<NickStyleCache>,
 
     // Context menu opened by secondary click on a message row.
@@ -1280,6 +1283,7 @@ impl WeeChatApp {
             prefix_suffix: settings.prefix_suffix,
             prefix_col_widths: HashMap::new(),
             chat_view_start: None,
+            chat_positions: HashMap::new(),
             nick_style_cache: None,
             ctx_menu_state: None,
             ctx_menu_just_opened: false,
@@ -1528,9 +1532,13 @@ impl WeeChatApp {
         if id != crate::ui::mentions::MENTIONS_ID {
             self.cleared_buffer_ids.insert(id.clone());
         }
-        self.chat_view_start = self.buffer_by_id(&id).and_then(|b| {
-            b.messages.len().checked_sub(INITIAL_LINES).map(|i| b.messages[i].id.clone())
-        });
+        // Back where it was if it was scrolled up, else the newest lines.
+        self.chat_view_start = match self.chat_positions.get(&id) {
+            Some((start, false)) => start.clone(),
+            _ => self.buffer_by_id(&id).and_then(|b| {
+                b.messages.len().checked_sub(INITIAL_LINES).map(|i| b.messages[i].id.clone())
+            }),
+        };
         if let Some(buffer) = self.buffer_by_id_mut(&id) {
             buffer.activity = BufferActivity::None;
             buffer.unread_count = 0;
@@ -3444,7 +3452,10 @@ impl eframe::App for WeeChatApp {
                     // The chat runs up to the nick list; a bar on that border looks like
                     // the nick list's own.
                     ui.spacing_mut().scroll.bar_outer_margin = 6.0;
+                    // A scroll position per buffer: one shared by all of them carried one
+                    // buffer's offset into the next, which then opened scrolled up.
                     let chat_scroll = ScrollArea::vertical()
+                        .id_salt(("chat", current_buffer_id.clone().unwrap_or_default()))
                         .stick_to_bottom(true)
                         .auto_shrink([false, false])
                         .horizontal_scroll_offset(0.0)
@@ -3861,6 +3872,11 @@ impl eframe::App for WeeChatApp {
                         });
                     }); // ScrollArea
 
+                    let at_bottom = chat_scroll.state.clamped_offset().y + chat_scroll.inner_rect.height()
+                        >= chat_scroll.content_size.y - 2.0;
+                    if let (Some(id), true) = (&current_buffer_id, self.search_text.is_empty()) {
+                        self.chat_positions.insert(id.clone(), (self.chat_view_start.clone(), at_bottom));
+                    }
                     if let Some(messages) = &current_buffer_messages {
                         if show_older_in_memory {
                             self.chat_view_start = chat_start.checked_sub(LOAD_MORE_LINES)
@@ -3868,8 +3884,6 @@ impl eframe::App for WeeChatApp {
                         } else if self.search_text.is_empty() && messages.len() - chat_start > 2 * INITIAL_LINES {
                             // Lines keep arriving while the view is open. At the bottom the
                             // older ones can go without moving anything on screen.
-                            let at_bottom = chat_scroll.state.clamped_offset().y + chat_scroll.inner_rect.height()
-                                >= chat_scroll.content_size.y - 2.0;
                             if at_bottom {
                                 self.chat_view_start = Some(messages[messages.len() - INITIAL_LINES].id.clone());
                             }
