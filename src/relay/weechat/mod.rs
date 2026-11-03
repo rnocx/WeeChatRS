@@ -244,6 +244,9 @@ impl BackendClient for WeeChatClient {
                                 Some(msg) = ws_rx.next() => match msg {
                                     Ok(Message::Text(text)) => {
                                         last_received = std::time::Instant::now();
+                                        // RUST_LOG=weechat_rs::relay::weechat=trace shows what the relay
+                                        // sends. It holds message text.
+                                        log::trace!("received {}", text.chars().take(600).collect::<String>());
                                         if let Ok(resp) = serde_json::from_str::<WeeChatResponse>(&text) {
                                             // WeeChatResponse → BackendEvent translation happens
                                             // inside event_handler (still on WeeChatApp).

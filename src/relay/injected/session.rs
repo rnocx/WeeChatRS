@@ -730,6 +730,12 @@ impl State {
         }
     }
     fn event(&mut self, name: &str, v: Value) {
+        // RUST_LOG=weechat_rs::relay::injected=trace shows what Injected sends, to see
+        // the shape of events this doesn't handle yet. It holds message text.
+        if log::log_enabled!(log::Level::Trace) {
+            let text = v.to_string();
+            log::trace!("received {name}: {}", text.chars().take(400).collect::<String>());
+        }
         if name == "sync:update" {
             if string(&v, "key") == "lastseen" {
                 self.merge_seen(&v["value"]);

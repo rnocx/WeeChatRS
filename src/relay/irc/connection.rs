@@ -1855,6 +1855,9 @@ pub fn spawn(
                                         // Strip \r\n and decode with lossy UTF-8
                                         let raw = String::from_utf8_lossy(raw_buf.trim_ascii_end()).into_owned();
                                         raw_buf.clear();
+                                        // RUST_LOG=weechat_rs::relay::irc=trace shows every line the server
+                                        // sends. It holds message text.
+                                        log::trace!("received {}", raw.chars().take(400).collect::<String>());
                                         if let Some(msg) = IrcMessage::parse(&raw) {
                                             let evs = translate(&msg, &mut session, &mut line_counter, &config);
                                             // Before the events and the router act on them.
