@@ -333,6 +333,56 @@ fn make_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>, highlight: b
     Line::new(id.to_string(), ts, prefix.to_string(), text.to_string(), true, highlight)
 }
 
+/// The inside of a CTCP message, `\x01VERSION\x01` → `VERSION`, split into its kind
+/// and arguments. Not ACTION, which is a message (/me). Some clients leave out the
+/// closing `\x01`.
+pub(crate) fn ctcp(text: &str) -> Option<(String, &str)> {
+    let inner = text.strip_prefix('\x01')?;
+    let inner = inner.strip_suffix('\x01').unwrap_or(inner);
+    let (kind, args) = inner.split_once(' ').unwrap_or((inner, ""));
+    let kind = kind.to_ascii_uppercase();
+    (!kind.is_empty() && kind != "ACTION").then_some((kind, args.trim()))
+}
+
+/// "CTCP query to bob: VERSION", for a CTCP we send.
+pub(crate) fn ctcp_query_text(target: &str, kind: &str, args: &str) -> String {
+    // A PING's argument is our clock, only there to time the reply.
+    if kind == "PING" || args.is_empty() {
+        format!("CTCP query to {target}: {kind}")
+    } else {
+        format!("CTCP query to {target}: {kind} {}", irc_to_ansi(args))
+    }
+}
+
+/// "CTCP reply from bob: VERSION …"; a PING reply says how long it took, from the
+/// time in milliseconds that our query carried.
+pub(crate) fn ctcp_reply_text(nick: &str, kind: &str, args: &str, now: DateTime<Utc>) -> String {
+    if kind == "PING" {
+        if let Ok(sent) = args.parse::<i64>() {
+            let ms = now.timestamp_millis() - sent;
+            if (0..3_600_000).contains(&ms) {
+                return format!("CTCP reply from {nick}: PING {:.3} seconds", ms as f64 / 1000.0);
+            }
+        }
+    }
+    if args.is_empty() {
+        format!("CTCP reply from {nick}: {kind}")
+    } else {
+        format!("CTCP reply from {nick}: {kind} {}", irc_to_ansi(args))
+    }
+}
+
+/// Our answer to a CTCP request, as the NOTICE's text, or None for kinds we don't answer.
+fn ctcp_answer(kind: &str, args: &str) -> Option<String> {
+    match kind {
+        "PING" => Some(format!("\x01PING {args}\x01")),
+        "VERSION" => Some(format!("\x01VERSION WeeChatRS {}\x01", env!("CARGO_PKG_VERSION"))),
+        "TIME" => Some(format!("\x01TIME {}\x01", chrono::Local::now().format("%a, %d %b %Y %H:%M:%S %z"))),
+        "CLIENTINFO" => Some("\x01CLIENTINFO ACTION CLIENTINFO PING TIME VERSION\x01".to_string()),
+        _ => None,
+    }
+}
+
 /// Presence/metadata line (join, part, quit, kick, nick change).
 /// displayed=false: hidden when "show filtered lines" is off, never counted as unread.
 fn make_presence_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>) -> Line {
@@ -487,7 +537,7 @@ fn is_channel(target: &str) -> bool {
 /// directly to a raw server command, or `None` to fall through to the normal
 /// send logic.  `/me` and `/msg` are intentionally NOT handled here — they go
 /// through the PRIVMSG branch so that self-echo stays correct.
-fn expand_irc_command(buffer_id: &str, text: &str) -> Option<String> {
+pub(crate) fn expand_irc_command(buffer_id: &str, text: &str) -> Option<String> {
     let trimmed = text.trim();
     if !trimmed.starts_with('/') {
         return None;
@@ -1144,31 +1194,26 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                 return events;
             }
 
-            // CTCP detection: \x01COMMAND[ params]\x01, but not ACTION (handled below)
-            let is_ctcp = text.starts_with('\x01') && text.ends_with('\x01')
-                && !text.starts_with("\x01ACTION");
-
-            if is_ctcp {
-                if msg.command == "NOTICE" {
-                    // CTCP replies (VERSION, PING, etc.) — pure protocol noise, drop silently
+            // CTCP (not ACTION, a /me message, handled below): replies and requests go
+            // to the server buffer, as in WeeChat.
+            if let Some((kind, args)) = ctcp(&text) {
+                // Our own request, echoed back by echo-message: shown when sent.
+                if nick.eq_ignore_ascii_case(&session.our_nick) {
                     return events;
                 }
-                // CTCP requests (PRIVMSG): auto-respond to PING and VERSION, ignore the rest
-                let inner = text.trim_matches('\x01');
-                let (ctcp_cmd, ctcp_arg) = inner.split_once(' ').unwrap_or((inner, ""));
-                match ctcp_cmd.to_uppercase().as_str() {
-                    "PING" => {
-                        session.whois_lines.push(format!("NOTICE {} :\x01PING {}\x01", nick, ctcp_arg));
+                let line = if msg.command == "NOTICE" {
+                    ctcp_reply_text(&nick, &kind, args, Utc::now())
+                } else {
+                    if let Some(answer) = ctcp_answer(&kind, args) {
+                        session.whois_lines.push(format!("NOTICE {} :{}", nick, answer));
                     }
-                    "VERSION" => {
-                        session.whois_lines.push(format!(
-                            "NOTICE {} :\x01VERSION weechat-gui {}\x01",
-                            nick,
-                            env!("CARGO_PKG_VERSION")
-                        ));
-                    }
-                    _ => {}
-                }
+                    format!("CTCP requested by {nick}: {kind}")
+                };
+                *line_counter += 1;
+                events.push(BackendEvent::LineAdded {
+                    buffer_id: "status".to_string(),
+                    line: make_line(&line_counter.to_string(), "--", &line, ts, false),
+                });
                 return events;
             }
 
@@ -1861,6 +1906,16 @@ pub fn spawn(
                                                 }
                                             }
                                         } else if let Some(wire) = expand_irc_command(&buffer_id, &text).filter(|_| !literal) {
+                                            // A CTCP we send shows in the server buffer; its reply follows.
+                                            if let Some((target, query)) = wire.strip_prefix("PRIVMSG ").and_then(|r| r.split_once(" :")) {
+                                                if let Some((kind, args)) = ctcp(query) {
+                                                    line_counter += 1;
+                                                    send!(BackendEvent::LineAdded {
+                                                        buffer_id: "status".to_string(),
+                                                        line: make_line(&line_counter.to_string(), "--", &ctcp_query_text(target, &kind, args), Utc::now(), false),
+                                                    });
+                                                }
+                                            }
                                             if let Some(channel) = wire.strip_prefix("TOPIC ").filter(|rest| !rest.contains(' ')) {
                                                 session.topic_queries.insert(channel.to_lowercase());
                                             }
@@ -2052,6 +2107,33 @@ mod tests {
         assert_eq!(expand_irc_command("#chan", "/quote KILL bob :spam").as_deref(), Some("KILL bob :spam"));
         assert_eq!(expand_irc_command("status", "/raw STATS p").as_deref(), Some("STATS p"));
         assert_eq!(expand_irc_command("status", "/quote"), None);
+    }
+
+    #[test]
+    fn ctcp_replies_and_requests_show_in_the_server_buffer() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        session.registered = true;
+        let mut counter = 0;
+        let mut status = |session: &mut Session, raw: &str| -> Vec<String> {
+            translate(&IrcMessage::parse(raw).unwrap(), session, &mut counter, &config).into_iter()
+                .filter_map(|e| match e { BackendEvent::LineAdded { buffer_id, line } if buffer_id == "status" => Some(line.message), _ => None })
+                .collect()
+        };
+        assert_eq!(status(&mut session, ":bob!b@host NOTICE sam :\x01VERSION irssi 1.4\x01"), ["CTCP reply from bob: VERSION irssi 1.4"]);
+        let sent = (Utc::now().timestamp_millis() - 250).to_string();
+        let ping = status(&mut session, &format!(":bob!b@host NOTICE sam :\x01PING {sent}\x01"));
+        assert!(ping[0].starts_with("CTCP reply from bob: PING 0.2"), "{ping:?}");
+        // A request is answered, and shown.
+        assert_eq!(status(&mut session, ":bob!b@host PRIVMSG sam :\x01VERSION\x01"), ["CTCP requested by bob: VERSION"]);
+        assert!(session.whois_lines.last().unwrap().starts_with("NOTICE bob :\x01VERSION WeeChatRS "));
+        // Our own query, echoed back by echo-message, isn't a request to answer.
+        let queued = session.whois_lines.len();
+        assert!(status(&mut session, ":sam!s@host PRIVMSG bob :\x01VERSION\x01").is_empty());
+        assert_eq!(session.whois_lines.len(), queued);
+        // /me stays a message.
+        assert_eq!(ctcp("\x01ACTION waves\x01"), None);
+        assert_eq!(ctcp_query_text("bob", "PING", "1700000000000"), "CTCP query to bob: PING");
     }
 
     #[test]

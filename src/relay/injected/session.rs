@@ -2,7 +2,7 @@ use super::{
     protocol::{self, Packet},
     Command, InjectedConfig,
 };
-use crate::relay::irc::connection::{irc_to_ansi, nick_color_ansi, topic_set_by};
+use crate::relay::irc::connection::{ctcp, ctcp_query_text, ctcp_reply_text, expand_irc_command, irc_to_ansi, nick_color_ansi, topic_set_by};
 use crate::relay::{
     backend::{BackendEvent, ServerStatus},
     models::{Buffer, BufferActivity, Line, Nick},
@@ -242,6 +242,14 @@ impl State {
         self.out
             .push_back(protocol::no_arg_event("sync:get", self.next_ack));
     }
+    /// A line of our own in the network's server buffer.
+    fn status_line(&mut self, server: &str, text: String) {
+        let id = self.open(server, "@status");
+        self.sequence += 1;
+        let line = Line::new(format!("info-{}", self.sequence), Utc::now(), "--".into(), text, true, false);
+        self.emit(BackendEvent::LineAdded { buffer_id: id, line });
+    }
+
     fn open(&mut self, server: &str, target: &str) -> String {
         let id = buffer_id(server, target);
         if self.buffers.contains_key(&id) {
@@ -660,7 +668,16 @@ impl State {
             "whois" if !first.is_empty() => self.request("irc:whois",json!({"serverId":server,"nick":first}),Request::Action),
             "away" => self.request("irc:set-away",json!({"serverId":server,"message":args}),Request::Action),
             "raw" | "quote" if !args.is_empty() => self.request("irc:send-raw",json!({"serverId":server,"raw":args}),Request::Action),
-            _ => self.emit(BackendEvent::Error("Unsupported Injected command. Use /join, /part, /query, /msg, /me, /nick, /topic, /whois, /away, /connect, /reconnect, /disconnect, or /raw.".into())),
+            "ctcp" if !first.is_empty() && !rest.is_empty() => {
+                if let Some(wire) = expand_irc_command(&target, text) {
+                    self.request("irc:send-raw",json!({"serverId":server,"raw":wire}),Request::Action);
+                    if let Some((kind, args)) = wire.split_once(" :").and_then(|(_, query)| ctcp(query)) {
+                        let text = ctcp_query_text(first, &kind, args);
+                        self.status_line(&server, text);
+                    }
+                }
+            }
+            _ => self.emit(BackendEvent::Error("Unsupported Injected command. Use /join, /part, /query, /msg, /me, /nick, /topic, /whois, /ctcp, /away, /connect, /reconnect, /disconnect, or /raw.".into())),
         }
     }
     fn command(&mut self, command: Command) {
@@ -760,6 +777,15 @@ impl State {
                 let target=string(&v,if notice {"target"} else {"channel"});
                 let who=string(&v,"nick");
                 let own=self.nicks.get(&server).cloned().unwrap_or_default();
+                // CTCP replies and requests go to the server buffer, as on IRC; requests
+                // aren't answered from here. Ours, echoed back, were shown when sent.
+                if let Some((kind, args)) = ctcp(string(&v, "message")) {
+                    if casefold(who) != casefold(&own) {
+                        let text = if notice { ctcp_reply_text(who, &kind, args, Utc::now()) } else { format!("CTCP requested by {who}: {kind}") };
+                        self.status_line(&server, text);
+                    }
+                    return;
+                }
                 // Sent to us by someone else: a private message, which notifies.
                 let private=!own.is_empty() && casefold(target)==casefold(&own) && casefold(who)!=casefold(&own);
                 let target=if !own.is_empty() && casefold(target)==casefold(&own) {who} else {target};
@@ -768,6 +794,22 @@ impl State {
                 let mut line=self.line(&id,&v,false).notifying(private);
                 if notice { line = Line::new(line.id, line.timestamp, format!("-{}-", line.prefix), line.message, line.displayed, line.highlight).notifying(line.notify); }
                 if self.remember(&id,&line) { self.emit(BackendEvent::LineAdded {buffer_id:id,line}); }
+            }
+            // Injected sends CTCP as its own event, its kind in `type` and repeated at the
+            // start of `message`: a reply to our /ctcp (`isReply`), or someone's request.
+            "irc:event:ctcp"=> {
+                let who=string(&v,"nick");
+                let own=self.nicks.get(&server).cloned().unwrap_or_default();
+                let kind=string(&v,"type").to_ascii_uppercase();
+                if kind.is_empty() || kind=="ACTION" || casefold(who)==casefold(&own) { return; }
+                let message=string(&v,"message");
+                let args=message.get(..kind.len()).filter(|k| k.eq_ignore_ascii_case(&kind)).map_or(message,|_| &message[kind.len()..]).trim();
+                let text=if v["isReply"].as_bool().unwrap_or(false) {
+                    ctcp_reply_text(who,&kind,args,Utc::now())
+                } else {
+                    format!("CTCP requested by {who}: {kind}")
+                };
+                self.status_line(&server,text);
             }
             "irc:event:user-list"=> {
                 let channel=string(&v,"channel");
@@ -1650,6 +1692,31 @@ mod tests {
         assert_eq!(printed.len(), 2, "{printed:?}");
         assert_eq!(printed[0], "Topic for #DNSK is \"Hello world\x1B[0m\"");
         assert!(printed[1].starts_with("Topic set by dnsk (dnsk@dnsk.dj) on "));
+    }
+
+    #[test]
+    fn ctcp_is_sent_raw_and_its_reply_shows_in_the_server_buffer() {
+        let (mut s, mut rx) = state();
+        s.event("irc:event:channels-sync",json!({"serverId":"net","channels":["#rust"]}));
+        drain(&mut rx);
+        s.command(Command::Send(buffer_id("net", "#rust"), "/ctcp bob version".into()));
+        assert!(s.out.back().unwrap().contains(r#""raw":"PRIVMSG bob :\u0001VERSION\u0001""#), "{:?}", s.out.back());
+        // As Injected sends it: its own event, beside the raw NOTICE line.
+        s.event("irc:event:raw",json!({"serverId":"net","command":"NOTICE","params":["alice","\u{1}VERSION irssi 1.4\u{1}\r\n"]}));
+        s.event("irc:event:ctcp",json!({"serverId":"net","isReply":true,"message":"VERSION irssi 1.4","nick":"bob","target":"alice","timestamp":1793679147361i64,"type":"VERSION"}));
+        let sent = (Utc::now().timestamp_millis() - 120).to_string();
+        s.event("irc:event:ctcp",json!({"serverId":"net","isReply":true,"message":format!("PING {sent}"),"nick":"bob","target":"alice","type":"PING"}));
+        s.event("irc:event:ctcp",json!({"serverId":"net","isReply":false,"message":"VERSION","nick":"carol","target":"alice","type":"VERSION"}));
+        let status = buffer_id("net", "@status");
+        let printed: Vec<String> = drain(&mut rx).into_iter().filter_map(|e| match e {
+            BackendEvent::LineAdded { buffer_id, line } if buffer_id == status => Some(line.message),
+            BackendEvent::BufferOpened(b) if b.name == "bob" => Some("opened bob".into()),
+            _ => None,
+        }).collect();
+        assert_eq!(printed.len(), 4, "{printed:?}");
+        assert_eq!(printed[..2], ["CTCP query to bob: VERSION", "CTCP reply from bob: VERSION irssi 1.4"]);
+        assert!(printed[2].starts_with("CTCP reply from bob: PING 0.1"), "{printed:?}");
+        assert_eq!(printed[3], "CTCP requested by carol: VERSION");
     }
 
 }
