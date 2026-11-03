@@ -1,33 +1,11 @@
-# WeeChatRS Icon Concepts & Mockups
+# WeeChatRS icon concepts
 
-This folder records the visual identity explorations for the **WeeChatRS** application icon.
+Four icon directions were tried for WeeChatRS. All four sit side by side in [`matrix_exploration_grid.jpg`](matrix_exploration_grid.jpg). Two made the cut.
 
----
+## B4, the chosen one
 
-## 1. Selected Primary Direction: Concept B4 (Cyber Relay Monolith)
+[`concept_b4_master.jpg`](concept_b4_master.jpg) is the primary icon. It's a dark carbon squircle with a slight inner bevel and a faint hex-grid texture. In the middle, a chat bubble outline glows neon green (`#00FF88`, `#10B981`) around a monospace terminal "W". Amber rings (`#FF7700`, `#F59E0B`) pulse out of the top-right corner, for the live WebSocket link to the relay.
 
-- **Status**: **Selected Primary**
-- **Asset**: [`concept_b4_master.jpg`](concept_b4_master.jpg)
-- **Visual Identity**:
-  - **Tile**: Dark obsidian / carbon squircle with subtle inner bevel and high-tech hex matrix texture.
-  - **Centerpiece**: Sharp geometric cyber chat-bubble outline glowing in electric neon-emerald phosphor (`#00FF88` / `#10B981`) enclosing a monospace terminal 'W' glyph.
-  - **Relay Beacon**: Concentric amber/copper radar/radio pulse rings (`#FF7700` / `#F59E0B`) in the upper-right corner symbolizing the live WebSocket relay link.
-- **Vibe**: Futuristic, expressive power-tool aesthetic celebrating real-time messaging and relay connectivity.
+## B1, kept in reserve
 
----
-
-## 2. Preserved Alternative: Concept B1 (Pure CLI Cursor Chevrons)
-
-- **Status**: **Standby Alternative** (Ready for fast switch)
-- **Asset**: [`concept_b1_master.jpg`](concept_b1_master.jpg)
-- **Visual Identity**:
-  - **Tile**: Dark matte obsidian squircle with CRT horizontal micro-scanlines and perimeter rim light.
-  - **Centerpiece**: Monogram 'W' constructed directly from interlocking command prompt chevrons (`>` and `<`) and block cursor accents glowing with green terminal phosphor.
-  - **Prompt Accent**: Warm amber/copper prompt indicator pip at the baseline.
-- **Why preserved**: Purest, minimalist homage to WeeChat's ncurses/command-line roots; highly legible at small 16px/32px dock/tray scales.
-
----
-
-## Reference Overview
-
-- Complete 4-variation comparison grid: [`matrix_exploration_grid.jpg`](matrix_exploration_grid.jpg)
+[`concept_b1_master.jpg`](concept_b1_master.jpg) is ready to swap in if B4 doesn't work out. The squircle is matte, with fine CRT scanlines and a thin rim of light. Here the "W" is built from interlocking `>` and `<` prompt chevrons and block-cursor accents in green phosphor, with a small amber prompt dot at the baseline. It's the plainest nod to WeeChat's ncurses roots, and it still reads at 16 and 32 px in a dock or tray.

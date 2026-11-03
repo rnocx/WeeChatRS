@@ -1,6 +1,6 @@
 # Architecture
 
-WeeChatRS is one Rust binary: an [egui](https://github.com/emilk/egui)/eframe window on top of a [tokio](https://tokio.rs/) runtime. Each connection runs as tokio tasks that turn their protocol into `BackendEvent`s; the UI drains those events once per frame and talks back through the `BackendClient` trait, so it doesn't know which protocol is on the other side.
+WeeChatRS is one Rust binary: an [egui](https://github.com/emilk/egui)/eframe window on top of a [tokio](https://tokio.rs/) runtime. Each connection runs as tokio tasks that turn their protocol into `BackendEvent`s. The UI drains those events once per frame and talks back through the `BackendClient` trait, so it never knows which protocol sits on the other side.
 
 ```
 src/
@@ -52,4 +52,4 @@ src/
 
 ## Tests
 
-`cargo test --bin weechat-rs` runs the unit tests. A few end-to-end tests need servers and are ignored by default; each says in its doc comment what it needs and how to run it (for example `znc_end_to_end`, against a local ZNC).
+`cargo test --bin weechat-rs` runs the unit tests. A few end-to-end tests need servers and are ignored by default. Each one's doc comment says what it needs and how to run it, for example `znc_end_to_end` against a local ZNC.

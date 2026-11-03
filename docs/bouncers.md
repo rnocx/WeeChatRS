@@ -1,6 +1,6 @@
 # Bouncers: soju and ZNC
 
-WeeChatRS connects to [soju](https://soju.im/) and [ZNC](https://znc.in/) as an **IRC** connection, and uses what each bouncer offers once it recognises it. Both work the same way at the top: log in with just your username and every network opens, each in its own group in the buffer list; put a network in the username (`alice/libera`) to open only that one.
+WeeChatRS connects to [soju](https://soju.im/) and [ZNC](https://znc.in/) as an **IRC** connection, and uses what each bouncer offers once it recognises it. On both, logging in with just your username opens every network, each in its own group in the buffer list. Put a network in the username (`alice/libera`) and only that one opens.
 
 - [soju](#soju)
 - [ZNC](#znc)
@@ -19,7 +19,7 @@ Add soju as an **IRC** connection with your soju username and password.
 | One network only | Put the network in the username (`username/network`) to connect to just that network. |
 | Read markers | `draft/read-marker` (or the older `soju.im/read`): opening a buffer sends `MARKREAD`, so the read position is shared with your other soju clients, and unread counts after a reconnect start from it. |
 | History | `chathistory` fills each channel and private conversation on connect, and *Load older messages* fetches more. |
-| Server-side search | With `soju.im/search`, the search bar (`⌘/Ctrl + F`) searches soju's history of the current buffer or the whole network; clicking a result loads the conversation around it. |
+| Server-side search | With `soju.im/search`, the search bar (`⌘/Ctrl + F`) searches soju's history of the current buffer or the whole network. Click a result to load the conversation around it. |
 
 ## ZNC
 
@@ -42,9 +42,9 @@ Talk to ZNC from the control buffer as in any client: `/znc help`, `/znc ListNet
 While a ZNC connection is up, its card in **Connections** (`⌘⇧C` / `Ctrl+Shift+C`) lists the user's networks: a green dot when ZNC is connected to the network's IRC server, its server and how many channels it is in. From there you can:
 
 - **Add network**: a name and a first server (host, port, TLS, optional server password). WeeChatRS sends `AddNetwork` and `AddServer` to `*controlpanel`, and the new network appears in the buffer list once ZNC has connected.
-- **Delete** a network (✕, then confirm): `DelNetwork`; its buffers close.
+- **Delete** a network (✕, then confirm) with `DelNetwork`. Its buffers close.
 - **Connect** / **Disconnect** a network: ZNC joins or leaves its IRC server (`Reconnect` / `Disconnect`).
-- **Refresh** the list. ZNC doesn't announce changes, so after changes from another client or the web admin, Refresh picks them up; changes made here refresh it on their own.
+- **Refresh** the list. ZNC doesn't announce changes, so Refresh picks up changes made from another client or the web admin. Changes made here refresh it by themselves.
 
 ZNC's answer to the last command shows under the list. Managing networks needs ZNC's `controlpanel` module (`/znc LoadMod controlpanel`). The server address is the one ZNC connects to, as seen from the ZNC host.
 

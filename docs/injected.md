@@ -1,101 +1,47 @@
 ## Injected backend (experimental)
 
-Select **Injected** in Connections to use the account's existing Injected networks
-with the native WeeChatRS UI. The default endpoint is `injected-irc.com:443` with
-TLS enabled. No Electron runtime is required.
+Pick **Injected** in Connections and WeeChatRS opens the networks you already have on your Injected account, in its own native window. It connects to `injected-irc.com:443` over TLS by default. No Electron needed.
 
-### Authentication
+### Signing in
 
-1. Add or edit an **Injected** connection in WeeChatRS.
-2. Click **Sign in to Injected…**. A separate window opens the official HTTPS
-   Injected login page.
-3. Enter your username and password there, complete the CAPTCHA and any
-   second-factor prompt, and wait for the window to close.
-4. Check the returned account name, enable **Save token in keychain** if wanted,
-   then save and connect.
+1. Add or edit an **Injected** connection.
+2. Click **Sign in to Injected…**. A separate window opens Injected's official HTTPS login page.
+3. Enter your username and password there, pass the CAPTCHA and any second-factor prompt, and wait for the window to close.
+4. Check the account name it found, tick **Save token in keychain** if you want, then save and connect.
 
-The website handles your login and two-factor flow. WeeChatRS receives the
-completed session through a private helper-process pipe and verifies it with
-Injected before filling the connection form. The helper uses an ephemeral web
-session; it does not store your password or write the session token to a file.
-Closing the window or clicking **Cancel sign-in** cancels the flow. Sign-in is
-limited to `injected-irc.com:443` with TLS; custom endpoints still use a token.
+Your login and two-factor steps happen on Injected's own website. When they're done, the session comes back to WeeChatRS through a private pipe from the helper process, and WeeChatRS checks it with Injected before it fills in the form. The helper's web session is thrown away afterwards. It never stores your password or writes the token to a file. Close the window or click **Cancel sign-in** to stop. Sign-in only works against `injected-irc.com:443` with TLS, so a custom endpoint still needs a token.
 
-The web sign-in window is enabled by the default `injected-web-login` Cargo
-feature. It uses WKWebView on macOS, WebView2 on Windows, and WebKitGTK 4.1 on Linux.
-The Linux release zips keep WebKitGTK out of `weechat-rs` itself: the window is a
-separate `weechat-rs-login` beside it, which needs WebKitGTK 4.1 (package
-`libwebkit2gtk-4.1-0` on Debian and Ubuntu, `webkit2gtk4.1` on Fedora,
-`webkit2gtk-4.1` on Arch) and glibc 2.34 or later. Without them, the app says so, and
-session import and tokens still work. See [build requirements](../BUILDING.md).
-The official form and a successful CAPTCHA were visually checked on macOS.
-Complete session handoff and any WebAuthn/second-factor prompt still need a
-real-account check.
+The window comes from the `injected-web-login` Cargo feature, which is on by default. It's WKWebView on macOS, WebView2 on Windows and WebKitGTK 4.1 on Linux. The Linux release zips keep WebKitGTK out of `weechat-rs` itself. There the window is a separate program, `weechat-rs-login`, next to it, and it needs glibc 2.34 or later plus WebKitGTK 4.1 (`libwebkit2gtk-4.1-0` on Debian and Ubuntu, `webkit2gtk4.1` on Fedora, `webkit2gtk-4.1` on Arch). If they're missing, the app says so, and importing a session or pasting a token still works. See the [build requirements](../BUILDING.md).
 
-If web sign-in is unavailable, sign in to the **Injected desktop app** and click
-**Import Injected session** in WeeChatRS instead.
+Tested so far: the official form and a passed CAPTCHA, by eye, on macOS. The full session handoff, and WebAuthn or other second-factor prompts, still need a try with a real account.
 
-WeeChatRS reads the desktop app's local session and verifies it with Injected.
-It does not search browser profiles or save the token until you save the connection.
-For a nonstandard installation, **Choose data folder…** accepts the Injected app
-support directory or its `Local Storage/leveldb` directory. If import finds no
-readable session, sign in to the desktop app again and retry. Older compacted
-storage may not expose a readable token to the importer.
+### Without the sign-in window
 
-Browser-only users can still enter a token manually: sign in to the official web
-client, open browser developer tools → Application/Storage → Local Storage, and
-copy `injected_token` into the masked **Session token** field. The manual token field does not accept account passwords.
+Sign in to the **Injected desktop app**, then click **Import Injected session** in WeeChatRS. It reads the desktop app's local session and checks it with Injected. It doesn't look through browser profiles, and nothing is saved until you save the connection. If the app is installed somewhere unusual, **Choose data folder…** takes either its app support folder or the `Local Storage/leveldb` folder inside it. Import found nothing readable? Sign in to the desktop app again and retry. Older, compacted storage sometimes has no token the importer can read.
 
-**Save token in keychain** uses the OS credential store; tokens are not serialized
-into profile settings. Replace or reimport an expired session.
+If you only use Injected in a browser, you can paste the token by hand. Sign in to the official web client, open the developer tools (Application or Storage, then Local Storage), and copy `injected_token` into the masked **Session token** field. That field takes a token, never your account password.
 
-### Supported behavior
+**Save token in keychain** puts the token in the system's credential store. It's never written into the profile settings. When a session expires, paste or import a new one.
 
-- Load saved network configurations; attach to existing cloud sessions and restore
-  joined channels, topics, nicklists, and channel history.
-- Theme-aware nick colors and IRC bold, italic, underline, and message colors,
-  using the same renderer as the IRC backend.
-- Send/receive channel messages, private messages, notices, and actions. Open an
-  existing private conversation with `/query nick` to load its stored history.
-- Load older messages, deduplicate history, reconnect with backoff, and synchronize
-  read timestamps with Injected's `lastseen` setting.
-- Use `/join`, `/part`, `/query`, `/msg`, `/me`, `/nick`, `/topic`, `/whois`, `/away`,
-  and `/raw`. Hide/unhide and close are available through buffer context menus.
-- Run `/connect` in a network's server buffer to connect an offline saved network;
-  `/reconnect` retries that network and `/disconnect` disconnects it upstream.
-  Disconnecting the WeeChatRS profile itself only closes this client session.
+### What works
 
-Configure/create networks in the official Injected client. This backend does not
-implement native account management, billing, scripting, voice,
-end-to-end encrypted private messages, or typing indicators. Protocol behavior is
-based on the shipped Injected 1.1.3 client, rather than a published stable API.
-Local mock-service tests cover authentication, heartbeat, history, sends, and clean
-close; a real-account compatibility check is still required.
+- Your saved networks load. WeeChatRS attaches to the sessions already running in the cloud and brings back joined channels, topics, nick lists and channel history.
+- Nick colours follow the theme, and IRC bold, italic, underline and colours are drawn with the same renderer as the IRC backend.
+- Channel messages, private messages, notices and actions go both ways. `/query nick` opens an existing private conversation with its stored history.
+- *Load older messages* works, history isn't shown twice, dropped connections retry with backoff, and read positions sync through Injected's `lastseen` setting.
+- Commands: `/join`, `/part`, `/query`, `/msg`, `/me`, `/nick`, `/topic`, `/whois`, `/ctcp`, `/list`, `/away` and `/raw`. Hide, unhide and close are in each buffer's right-click menu.
+- In a network's server buffer, `/connect` connects a saved network that's offline, `/reconnect` retries it and `/disconnect` takes it offline upstream. Disconnecting the WeeChatRS profile only closes this client's session.
 
+Create and configure networks in the official Injected client. This backend has no account management, billing, scripting, voice, end-to-end encrypted private messages or typing indicators. Injected has no published, stable API, so the protocol comes from what the Injected 1.1.3 client does. Local tests against a mock service cover sign-in, the heartbeat, history, sending and a clean close. A check against a real account is still to do.
 
 ### Sharing text as a paste
 
-When a multiline paste is reviewed on an Injected connection, **Share as Injected
-paste** uploads the original text to that connection's `/api/paste` endpoint using
-its session token. Only the returned link is sent to the original conversation.
-`/paste <text>` opens the same review dialog, including for a single line.
+Paste several lines into an Injected conversation and the review dialog offers **Share as Injected paste**. That uploads the original text to the connection's `/api/paste` endpoint, with its session token, and sends only the returned link to the conversation. `/paste <text>` opens the same dialog, even for one line.
 
-The upload preserves indentation, blank lines, and line endings. Nothing is
-uploaded until you choose the share action. You can still send the lines as
-messages, join them into one input line, or cancel. Failed uploads retain the
-text for retry. If the upload succeeds but the conversation disconnects, the link
-stays available to copy or send after reconnecting; retrying the link does not
-upload the text again.
+Indentation, blank lines and line endings survive the upload. Nothing goes up until you pick the share button, and you can still send the lines as messages, join them into one input line, or cancel. A failed upload keeps the text, so you can retry. If the upload worked but the conversation dropped meanwhile, the link stays there to copy, or to send after you reconnect, and sending it doesn't upload the text a second time.
 
-This paste service is offered only for Injected connections. WeeChat, IRC, soju
-and ZNC share pastes anonymously through a PrivateBin server instead (Settings →
-File sharing). Expiry, size limits, and rate
-limits are controlled by the Injected server; the client does not promise a fixed
-retention period.
+Only Injected connections get this. WeeChat, IRC, soju and ZNC share pastes anonymously through a PrivateBin server instead (Settings → File sharing). The Injected server decides expiry, size and rate limits, so the client can't promise how long a paste lasts.
 
 ### Development checks
 
-`cargo test --bin weechat-rs` covers the protocol and native bridge validation.
-`node tools/test-injected-web-login.mjs` exercises the actual page bridge with
-simulated login completion, rejected sessions, foreign frames, and token changes.
-`cargo test --no-default-features --bin weechat-rs` checks builds without a webview.
+`cargo test --bin weechat-rs` covers the protocol and the checks on the native bridge. `node tools/test-injected-web-login.mjs` runs the real page bridge through a simulated login, rejected sessions, foreign frames and token changes. `cargo test --no-default-features --bin weechat-rs` makes sure it builds without a web view.

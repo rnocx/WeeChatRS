@@ -2,6 +2,4 @@
 
 **Email:** rnocx@nixsec.se
 
-**IRC:**
-- `irc.umbrellanet.org` — `#weechatRS` — nick `roniez`
-- `irc.libera.chat` — `#weechat` — nick `roniez`
+**IRC:** nick `roniez`, in `#weechatRS` on `irc.umbrellanet.org` and in `#weechat` on `irc.libera.chat`.

@@ -2,7 +2,7 @@
 
 Besides the release zips and the DMG ([BUILDING.md](../BUILDING.md)), WeeChatRS can be
 packaged as a Flatpak, for Flathub, and as an MSIX, for the Microsoft Store. Neither
-is published yet; this page says how to build them and what publishing takes.
+is published yet. This page covers building them and what publishing takes.
 
 ## Flatpak
 
@@ -39,9 +39,9 @@ AppStream metainfo that Flathub and software centres show.
   opening links go through portals.
 - **In the sandbox:**
   - SSH tunnels authenticate with keys from the SSH agent, a password, or a key file
-    chosen with *Choose…* in the connection form (through the file portal); keys in
+    chosen with *Choose…* in the connection form (through the file portal). Keys in
     the real `~/.ssh` aren't visible otherwise.
-  - *Import Injected session* can't find the Injected app's data by itself; use
+  - *Import Injected session* can't find the Injected app's data by itself. Use
     *Choose data folder…* (`~/.config/injected`) or sign in with the window.
   - `/np` runs `playerctl`, which isn't in the runtime, so it finds no player, and
     `/sysinfo` shows less (no `lspci`).
@@ -53,7 +53,7 @@ AppStream metainfo that Flathub and software centres show.
   rejects that order.
 
 Checked in a container on ARM64: it builds with no linter findings, both from the
-checkout and from a git tag; the app starts, and the sign-in window shows Injected's
+checkout and from a git tag. The app starts, and the sign-in window shows Injected's
 login page. Not yet checked on a real desktop, or on x86_64.
 
 ### Publishing on Flathub
@@ -69,7 +69,7 @@ login page. Not yet checked on a real desktop, or on x86_64.
    request against `new-pr` titled "Add io.github.rnocx.WeeChatRS". Explain the
    permissions in it: the keyring for passwords, and the SSH agent and `.ssh` for
    tunnels. Comment `bot, build` for a test build on Flathub's builders.
-4. Once accepted, Flathub creates `flathub/io.github.rnocx.WeeChatRS`; accept the
+4. Once accepted, Flathub creates `flathub/io.github.rnocx.WeeChatRS`. Accept the
    invitation within a week (with 2FA on). Each release is then a pull request there
    with the new tag, commit, `cargo-sources.json` and metainfo `<release>`. Verify the
    app in Flathub's Developer Portal by logging in as `rnocx`, the owner of the GitHub
@@ -85,7 +85,7 @@ login page. Not yet checked on a real desktop, or on x86_64.
 It packs `weechat-rs.exe` and `WebView2Loader.dll` from `build-windows.sh`'s zip
 (building it first if needed) with `makemsix`, Microsoft's packing tool built from
 source in `docker/Dockerfile.msix`, so it runs on macOS and Linux. The manifest is
-`packaging/msix/AppxManifest.xml`; the tile icons are made from the app icon.
+`packaging/msix/AppxManifest.xml`, and the tile icons are made from the app icon.
 
 In the package, the app is a full-trust desktop app. Notifications use the package's
 own identity (`<package family>!WeeChatRS`) instead of registering one, so they show
@@ -101,7 +101,7 @@ own folders, apart from a zip install's.
    **Trusted People**.
 3. Double-click the `.msix` and choose **Install**.
 
-The test key stays in `dist/msix/` (not committed); keep it to sign later test
+The test key stays in `dist/msix/` (not committed). Keep it to sign later test
 builds, or a test PC needs the new certificate.
 
 ### Publishing in the Store
@@ -122,5 +122,5 @@ builds, or a test PC needs the new certificate.
 4. Certification takes from hours to a few days. Store installs then update from the
    Store, with SmartScreen no longer warning.
 
-Each release needs a higher version; the package's is `Cargo.toml`'s with `.0`
+Each release needs a higher version. The package uses `Cargo.toml`'s with `.0`
 appended. Not yet checked on a real Windows PC.

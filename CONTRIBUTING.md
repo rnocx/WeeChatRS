@@ -1,21 +1,19 @@
 # Contributing to WeeChatRS
 
-Thank you for your interest in contributing. Please read the guidelines below before submitting a pull request.
+## Code review
 
-## Code Review
+A person has to review and verify all code before it's merged. You're responsible for understanding every line you contribute, and for standing behind it.
 
-All code must be reviewed and verified by a human before being merged. You are responsible for understanding and standing behind every line you contribute.
+## Guidelines
 
-## General Guidelines
+- One logical change per pull request.
+- Commit messages say why the change was made. The diff already shows what changed.
+- Test on at least the platform you develop on.
+- Fixing a bug? Put the steps to reproduce it in the pull request.
 
-- Keep pull requests focused — one logical change per PR.
-- Write clear commit messages that explain *why*, not just *what*.
-- Test your changes on at least the platform you develop on.
-- If you are fixing a bug, describe how to reproduce it in the PR description.
+## Reporting issues
 
-## Reporting Issues
-
-Open an issue on the repository with steps to reproduce, your platform, and the version of WeeChatRS you are running.
+Open an issue with the steps to reproduce, your platform, and the WeeChatRS version you run.
 
 ## License
 
