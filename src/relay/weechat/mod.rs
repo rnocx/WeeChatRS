@@ -1,6 +1,6 @@
 pub mod event_handler;
 
-use crate::relay::backend::{BackendClient, BackendEvent};
+use crate::relay::backend::{BackendClient, BackendEvent, Lag};
 use crate::relay::models::*;
 use egui::Context as EguiContext;
 use futures_util::{SinkExt, StreamExt};
@@ -239,6 +239,15 @@ impl BackendClient for WeeChatClient {
                         idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                         idle_check.tick().await; // skip the immediate first tick
 
+                        // The relay's own lag, for the core buffer: a WebSocket ping every
+                        // 30 s, timed to its pong.
+                        let mut lag_check = tokio::time::interval_at(
+                            tokio::time::Instant::now() + Duration::from_secs(2),
+                            Duration::from_secs(30),
+                        );
+                        lag_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        let mut lag_ping: Option<std::time::Instant> = None;
+
                         loop {
                             tokio::select! {
                                 Some(msg) = ws_rx.next() => match msg {
@@ -262,6 +271,9 @@ impl BackendClient for WeeChatClient {
                                     }
                                     Ok(Message::Pong(_)) => {
                                         last_received = std::time::Instant::now();
+                                        if let Some(sent) = lag_ping.take() {
+                                            send!(BackendEvent::Lag { buffer_id: None, lag: Lag::Measured(sent.elapsed()) });
+                                        }
                                     }
                                     Ok(Message::Close(_)) => {
                                         connected.store(false, Ordering::Relaxed);
@@ -290,6 +302,15 @@ impl BackendClient for WeeChatClient {
                                         break;
                                     }
                                 },
+                                _ = lag_check.tick(), if lag_ping.is_none() => {
+                                    let now = std::time::Instant::now();
+                                    if let Err(e) = ws_tx.send(Message::Ping(Vec::new().into())).await {
+                                        send!(BackendEvent::Error(format!("Send error: {}", e)));
+                                        break;
+                                    }
+                                    lag_ping = Some(now);
+                                    send!(BackendEvent::Lag { buffer_id: None, lag: Lag::Waiting(now) });
+                                }
                                 _ = idle_check.tick() => {
                                     if last_received.elapsed() > Duration::from_secs(300) {
                                         // No data from server in 5 min — connection is dead

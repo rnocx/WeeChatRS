@@ -115,10 +115,29 @@ pub enum BackendEvent {
         error: Option<String>,
     },
 
+    /// A lag check on the network whose server buffer is `buffer_id`, or with `None`
+    /// on the connection itself (the WeeChat relay, Injected's server).
+    Lag {
+        buffer_id: Option<String>,
+        lag: Lag,
+    },
+
     /// Temporary tunnel for WeeChat relay responses until the event handler
     /// is fully migrated to BackendEvent in Phase 3.
     #[doc(hidden)]
     _WeeChat(crate::relay::models::WeeChatResponse),
+}
+
+/// One step of a lag check, for `BackendEvent::Lag`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Lag {
+    /// A check went out at this moment and hasn't been answered yet.
+    Waiting(std::time::Instant),
+    /// The round trip of the last check.
+    Measured(std::time::Duration),
+    /// Under the least lag the server reports: WeeChat leaves out anything under
+    /// irc.network.lag_min_show (500 ms by default).
+    Low,
 }
 
 /// An optional backend-owned paste upload; only Injected implements it.

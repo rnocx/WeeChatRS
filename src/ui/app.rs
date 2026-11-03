@@ -618,6 +618,10 @@ pub struct ConnectionHandle {
     pub znc_reply: Option<(String, Vec<String>)>,
     /// Our nick, oper status and server software, by the `server` of the buffers.
     pub server_status: HashMap<String, crate::relay::backend::ServerStatus>,
+    /// Lag on each network, by the `server` of the buffers.
+    pub lag: HashMap<String, crate::ui::lag::NetworkLag>,
+    /// Lag to the connection's own server: the WeeChat relay, Injected.
+    pub link_lag: crate::ui::lag::NetworkLag,
     #[allow(dead_code)] // held for Drop — kills the ssh process on disconnect
     pub ssh_tunnel: Option<crate::ui::ssh_tunnel::SshTunnel>,
 }
@@ -659,6 +663,8 @@ pub struct AppSettings {
     pub show_nicklist: bool,
     pub auto_reconnect: bool,
     pub show_titlebar: bool,
+    #[serde(default = "default_true")]
+    pub show_lag: bool,
     pub show_server_headers: bool,
     pub show_inline_images: bool,
     pub show_link_previews: bool,
@@ -798,6 +804,7 @@ impl Default for AppSettings {
             show_nicklist: true,
             auto_reconnect: true,
             show_titlebar: true,
+            show_lag: true,
             show_server_headers: true,
             show_inline_images: true,
             show_link_previews: true,
@@ -892,6 +899,8 @@ pub struct WeeChatApp {
     pub(crate) show_timestamps: bool,
     pub(crate) auto_reconnect: bool,
     pub(crate) show_titlebar: bool,
+    /// The lag readout in the toolbar.
+    pub(crate) show_lag: bool,
     pub(crate) show_server_headers: bool,
     pub(crate) show_inline_images: bool,
     pub(crate) show_link_previews: bool,
@@ -1026,6 +1035,9 @@ pub struct WeeChatApp {
     /// Where each buffer's chat was left: its first drawn line, and whether it was at
     /// the bottom. A buffer scrolled up opens where it was.
     pub(crate) chat_positions: HashMap<String, (Option<String>, bool)>,
+    /// Each WeeChat buffer's local variables but `lag`, as last fetched: a local
+    /// variable event that only moves the lag doesn't fetch the buffer list again.
+    pub(crate) weechat_localvars: HashMap<String, String>,
     pub(crate) nick_style_cache: Option<NickStyleCache>,
 
     // Context menu opened by secondary click on a message row.
@@ -1210,6 +1222,7 @@ impl WeeChatApp {
             buffers_width: settings.buffers_width,
             auto_reconnect: settings.auto_reconnect,
             show_titlebar: settings.show_titlebar,
+            show_lag: settings.show_lag,
             show_server_headers: settings.show_server_headers,
             show_inline_images: settings.show_inline_images,
             show_link_previews: settings.show_link_previews,
@@ -1284,6 +1297,7 @@ impl WeeChatApp {
             prefix_col_widths: HashMap::new(),
             chat_view_start: None,
             chat_positions: HashMap::new(),
+            weechat_localvars: HashMap::new(),
             nick_style_cache: None,
             ctx_menu_state: None,
             ctx_menu_just_opened: false,
@@ -1818,6 +1832,8 @@ impl WeeChatApp {
             connection_log: VecDeque::new(),
             znc_reply: None,
             server_status: HashMap::new(),
+            lag: HashMap::new(),
+            link_lag: Default::default(),
             ssh_tunnel,
         };
 
@@ -1874,6 +1890,7 @@ impl eframe::App for WeeChatApp {
             buffers_width: self.buffers_width,
             auto_reconnect: self.auto_reconnect,
             show_titlebar: self.show_titlebar,
+            show_lag: self.show_lag,
             show_server_headers: self.show_server_headers,
             show_inline_images: self.show_inline_images,
             show_link_previews: self.show_link_previews,
@@ -2363,6 +2380,18 @@ impl eframe::App for WeeChatApp {
                                     Color32::from_rgb(50, 205, 50)
                                 };
                                 ui.label(egui::RichText::new(status_text).color(status_color).small());
+                            }
+                        }
+                        if self.show_lag {
+                            if let Some((name, lag, how)) = self.current_lag() {
+                                let now = std::time::Instant::now();
+                                let reading = lag.reading(now);
+                                ui.add_space(4.0);
+                                crate::ui::lag::draw(ui, &name, &reading)
+                                    .on_hover_text(format!("{name}: {}\n{how}\n{}", reading.text, lag.checked_text(now)));
+                                if reading.ticking {
+                                    ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+                                }
                             }
                         }
                     });

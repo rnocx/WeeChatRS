@@ -81,7 +81,8 @@ struct Session {
     seen_msgids: HashSet<String>,
     monitored_nicks: HashSet<String>,
     pending_status_lines: Vec<Line>,
-    pong_received: bool,
+    /// When the PING timing our lag went out, until its PONG comes back.
+    lag_ping: Option<std::time::Instant>,
     targets_batch_ref: Option<String>,
     pending_pm_targets: Vec<String>,
     /// Unbound soju connection that only lists networks; each network gets a
@@ -151,7 +152,7 @@ impl Session {
             seen_msgids: HashSet::new(),
             monitored_nicks: HashSet::new(),
             pending_status_lines: Vec::new(),
-            pong_received: true,
+            lag_ping: None,
             targets_batch_ref: None,
             pending_pm_targets: Vec::new(),
             bouncer_control: false,
@@ -346,6 +347,11 @@ fn make_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>, highlight: b
 
 /// Channels sent to the app at a time while a LIST comes in.
 const LIST_BATCH: usize = 500;
+
+/// How often a PING times the lag.
+const LAG_CHECK: Duration = Duration::from_secs(30);
+/// A lag PING unanswered this long means the connection is dead.
+const DEAD_AFTER: Duration = Duration::from_secs(120);
 
 /// LIST, asking only for channels with at least `min_users` when the server's ELIST
 /// has `U`; servers without it would take `>9` for a channel name.
@@ -1415,12 +1421,17 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
         }
 
         "PONG" => {
-            session.pong_received = true;
             let token = msg.params.last().map(String::as_str).unwrap_or("");
             if let Some(i) = session.znc_queries.iter().position(|q| q.token == token) {
                 if let Some(query) = session.znc_queries.remove(i) {
                     finish_znc_query(query, session, config, &mut events);
                 }
+            } else if let Some(sent) = session.lag_ping.take() {
+                // Any other PONG answers the lag check: some servers don't echo the token.
+                events.push(BackendEvent::Lag {
+                    buffer_id: Some("status".to_string()),
+                    lag: crate::relay::backend::Lag::Measured(sent.elapsed()),
+                });
             }
         }
 
@@ -1831,9 +1842,13 @@ pub fn spawn(
                     connected.store(true, Ordering::Relaxed);
                     backoff = Duration::from_secs(1);
 
-                    let mut ping_interval = tokio::time::interval(Duration::from_secs(60));
+                    // A PING every LAG_CHECK times the lag and shows the connection is
+                    // alive; the first goes out once registration has had time to finish.
+                    let mut ping_interval = tokio::time::interval_at(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                        LAG_CHECK,
+                    );
                     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    ping_interval.tick().await; // skip the immediate first tick
 
                     'conn: loop {
                         // Flush outbound queue populated by translate()
@@ -2060,15 +2075,26 @@ pub fn spawn(
                                 }
                             }
                             _ = ping_interval.tick() => {
-                                if !session.pong_received {
-                                    // No PONG since last PING — connection is dead
-                                    connected.store(false, Ordering::Relaxed);
-                                    send!(BackendEvent::Disconnected);
-                                    break 'conn;
-                                }
-                                session.pong_received = false;
-                                if write_half.write_all(b"PING :keepalive\r\n").await.is_err() {
-                                    break 'conn;
+                                match session.lag_ping {
+                                    Some(sent) if sent.elapsed() >= DEAD_AFTER => {
+                                        // No PONG for two minutes: the connection is dead.
+                                        connected.store(false, Ordering::Relaxed);
+                                        send!(BackendEvent::Disconnected);
+                                        break 'conn;
+                                    }
+                                    // Still waiting: the UI counts the time itself.
+                                    Some(_) => {}
+                                    None => {
+                                        let now = std::time::Instant::now();
+                                        session.lag_ping = Some(now);
+                                        if write_half.write_all(b"PING :wcrs-lag\r\n").await.is_err() {
+                                            break 'conn;
+                                        }
+                                        send!(BackendEvent::Lag {
+                                            buffer_id: Some("status".to_string()),
+                                            lag: crate::relay::backend::Lag::Waiting(now),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -2131,6 +2157,28 @@ mod tests {
             translate(&IrcMessage::parse(line).unwrap(), session, &mut counter, config);
         }
         take_write_queue(session)
+    }
+
+    #[test]
+    fn pong_answers_the_lag_check() {
+        use crate::relay::backend::Lag;
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let lags = |session: &mut Session, counter: &mut u64, line: &str| -> Vec<(Option<String>, Lag)> {
+            translate(&IrcMessage::parse(line).unwrap(), session, counter, &config).into_iter()
+                .filter_map(|e| match e { BackendEvent::Lag { buffer_id, lag } => Some((buffer_id, lag)), _ => None })
+                .collect()
+        };
+        // Nothing asked: a stray PONG isn't lag.
+        assert!(lags(&mut session, &mut counter, ":irc.test PONG irc.test :wcrs-lag").is_empty());
+
+        session.lag_ping = Some(std::time::Instant::now() - Duration::from_millis(250));
+        let got = lags(&mut session, &mut counter, ":irc.test PONG irc.test :wcrs-lag");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0.as_deref(), Some("status"));
+        assert!(matches!(got[0].1, Lag::Measured(d) if d >= Duration::from_millis(250)), "{got:?}");
+        assert!(session.lag_ping.is_none());
     }
 
     #[test]

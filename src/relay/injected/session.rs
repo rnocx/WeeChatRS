@@ -1094,6 +1094,9 @@ async fn session(
     let mut authenticated = false;
     let mut engine_open = false;
     let started = tokio::time::Instant::now();
+    // Lag to Injected's server: a WebSocket ping every 30 s, timed to its pong.
+    let mut lag_ping: Option<std::time::Instant> = None;
+    let mut next_lag_check = started + Duration::from_secs(2);
     loop {
         while let Some(packet) = state.out.pop_front() {
             tokio::time::timeout(Duration::from_secs(10), socket.send(Message::Text(packet)))
@@ -1111,6 +1114,13 @@ async fn session(
                 if !authenticated && started.elapsed()>Duration::from_secs(20) {return Err(Failure::Other("Injected authentication timed out."));}
                 if last_packet.elapsed()>heartbeat {return Err(Failure::Other("Injected heartbeat timed out."));}
                 state.timeout_requests();
+                if authenticated && lag_ping.is_none() && tokio::time::Instant::now() >= next_lag_check {
+                    next_lag_check = tokio::time::Instant::now() + Duration::from_secs(30);
+                    socket.send(Message::Ping(Vec::new().into())).await.map_err(|_|Failure::Other("Injected WebSocket heartbeat failed."))?;
+                    let now = std::time::Instant::now();
+                    lag_ping = Some(now);
+                    state.emit(BackendEvent::Lag { buffer_id: None, lag: crate::relay::backend::Lag::Waiting(now) });
+                }
             }
             message=socket.next()=> {
                 match message {
@@ -1128,6 +1138,11 @@ async fn session(
                         }
                     }
                     Some(Ok(Message::Ping(bytes)))=> {socket.send(Message::Pong(bytes)).await.map_err(|_|Failure::Other("Injected WebSocket heartbeat failed."))?;}
+                    Some(Ok(Message::Pong(_)))=> {
+                        if let Some(sent) = lag_ping.take() {
+                            state.emit(BackendEvent::Lag { buffer_id: None, lag: crate::relay::backend::Lag::Measured(sent.elapsed()) });
+                        }
+                    }
                     Some(Ok(Message::Close(_))) | None=>return Err(Failure::Other("Injected connection closed.")),
                     Some(Err(_))=>return Err(Failure::Other("Injected WebSocket connection failed.")),
                     _=>{},

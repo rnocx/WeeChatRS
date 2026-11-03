@@ -266,6 +266,8 @@ impl WeeChatApp {
     fn general_section(&mut self, ui: &mut egui::Ui) {
         section_heading(ui, "Connections");
         ui.checkbox(&mut self.auto_reconnect, "Auto-reconnect when a connection drops");
+        ui.checkbox(&mut self.show_lag, "Show lag in the toolbar");
+        hint(ui, "For the network of the buffer you're reading. Orange from 1 second, red from 5.");
 
         section_heading(ui, "Buffer list");
         ui.checkbox(&mut self.show_server_headers, "Show server group headers");

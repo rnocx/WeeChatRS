@@ -224,7 +224,7 @@ impl WeeChatApp {
     }
 
     /// The server buffer of `buffer_id`'s network.
-    fn network_server_buffer(&self, buffer_id: &str) -> Option<Buffer> {
+    pub(crate) fn network_server_buffer(&self, buffer_id: &str) -> Option<Buffer> {
         let buffer = self.buffer_by_id(buffer_id)?;
         self.buffers.iter()
             .find(|b| b.kind == "server" && crate::ui::app::same_group(b, buffer))

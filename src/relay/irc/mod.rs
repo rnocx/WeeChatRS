@@ -449,6 +449,7 @@ fn network_event(
         },
         BackendEvent::BouncerReply { command, lines } => BackendEvent::BouncerReply { command, lines },
         BackendEvent::ServerStatus { buffer_id, status } => BackendEvent::ServerStatus { buffer_id: id(buffer_id), status },
+        BackendEvent::Lag { buffer_id, lag } => BackendEvent::Lag { buffer_id: buffer_id.map(id), lag },
         BackendEvent::_WeeChat(r) => BackendEvent::_WeeChat(r),
     }]
 }

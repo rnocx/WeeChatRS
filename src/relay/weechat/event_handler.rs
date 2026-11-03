@@ -17,6 +17,8 @@ impl WeeChatApp {
         match event {
             BackendEvent::Connected => {
                 if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.lag.clear();
+                    conn.link_lag = Default::default();
                     conn.is_connecting = false;
                     conn.connecting_pending = false;
                     conn.auth_error = None;
@@ -65,6 +67,8 @@ impl WeeChatApp {
             BackendEvent::Disconnected => {
                 if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
                     conn.server_status.clear();
+                    conn.lag.clear();
+                    conn.link_lag = Default::default();
                     conn.is_connecting = false;
                     if conn.connecting_pending {
                         conn.connecting_pending = false;
@@ -419,6 +423,21 @@ impl WeeChatApp {
                     conn.server_status.insert(server, status);
                 }
             }
+            BackendEvent::Lag { buffer_id, lag } => {
+                let server = match buffer_id {
+                    Some(id) => match self.buffer_by_id(&format!("{}/{}", conn_prefix, id)) {
+                        Some(b) => Some(b.server.clone()),
+                        None => return,
+                    },
+                    None => None,
+                };
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    match server {
+                        Some(server) => conn.lag.entry(server).or_default().apply(lag),
+                        None => conn.link_lag.apply(lag),
+                    }
+                }
+            }
             BackendEvent::BufferHidden { buffer_id, hidden } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
@@ -565,6 +584,8 @@ impl WeeChatApp {
                     }
                     self.log_conn_for(conn_prefix, "WeeChat upgrade complete — re-synced");
                 }
+                "buffer_localvar_added" | "buffer_localvar_changed" | "buffer_localvar_removed"
+                    if self.weechat_lag_only(conn_prefix, &resp) => {}
                 "buffer_opened" | "buffer_closed" | "buffer_renamed"
                 | "buffer_localvar_added" | "buffer_localvar_changed"
                 | "buffer_localvar_removed" => {
@@ -740,11 +761,38 @@ impl WeeChatApp {
         });
     }
 
+    /// Takes the lag from a local variable event on an IRC server buffer, and says
+    /// whether that was all that changed, so the buffer list needn't be fetched again.
+    fn weechat_lag_only(&mut self, conn_prefix: &str, resp: &WeeChatResponse) -> bool {
+        let (Some(id), Some(vars)) = (
+            resp.buffer_id,
+            resp.body.as_ref().and_then(|b| b.get("local_variables")).and_then(|v| v.as_object()),
+        ) else { return false };
+        let is_server = vars.get("plugin").and_then(|v| v.as_str()) == Some("irc")
+            && vars.get("type").and_then(|v| v.as_str()) == Some("server");
+        if let (true, Some(server)) = (is_server, vars.get("server").and_then(|v| v.as_str())) {
+            let lag = crate::ui::lag::weechat_lag(vars, std::time::Instant::now());
+            if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                conn.lag.entry(server.to_lowercase()).or_default().apply(lag);
+            }
+        }
+        let rest = crate::ui::lag::vars_without_lag(vars);
+        let full_id = format!("{}/{}", conn_prefix, id);
+        if self.weechat_localvars.get(&full_id) == Some(&rest) {
+            return true;
+        }
+        self.weechat_localvars.insert(full_id, rest);
+        false
+    }
+
     fn handle_buffer_list(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
         let body = Self::body_as_vec(&resp);
         let mut new_conn_buffers = Vec::new();
         // Our nick per server, from the irc buffers' `nick` local variable.
         let mut own_nicks: Vec<(String, String)> = Vec::new();
+        // Each IRC server's lag, from its server buffer's `lag` local variable.
+        let mut lags: Vec<(String, crate::relay::backend::Lag)> = Vec::new();
+        let now = std::time::Instant::now();
 
         for val in body {
             if let Some(obj) = val.as_object() {
@@ -802,6 +850,12 @@ impl WeeChatApp {
                     if let Some(nick) = obj.get("local_variables").and_then(|v| v.get("nick")).and_then(|v| v.as_str()) {
                         if plugin == "irc" && !nick.is_empty() { own_nicks.push((server.clone(), nick.to_string())); }
                     }
+                    if let Some(vars) = obj.get("local_variables").and_then(|v| v.as_object()) {
+                        self.weechat_localvars.insert(full_id.clone(), crate::ui::lag::vars_without_lag(vars));
+                        if plugin == "irc" && kind == "server" {
+                            lags.push((server.clone(), crate::ui::lag::weechat_lag(vars, now)));
+                        }
+                    }
 
                     // Core and server buffers never have a usable nicklist regardless of
                     // what the relay reports (unwrap_or(true) above can over-report).
@@ -838,6 +892,9 @@ impl WeeChatApp {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
             for (server, nick) in own_nicks {
                 conn.server_status.entry(server).or_default().nick = nick;
+            }
+            for (server, lag) in lags {
+                conn.lag.entry(server).or_default().apply(lag);
             }
         }
 
