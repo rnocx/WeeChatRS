@@ -356,6 +356,23 @@ const DEAD_AFTER: Duration = Duration::from_secs(120);
 
 /// LIST, asking only for channels with at least `min_users` when the server's ELIST
 /// has `U`; servers without it would take `>9` for a channel name.
+/// The name a login goes by. A bouncer login without a network in its name (the
+/// control login) gets its own client id when the username carries one
+/// (`alice@laptop` becomes `alice@laptop-ctl`). ZNC's clientbuffer module keeps
+/// what each client id has seen and ZNC attaches that login to its first network,
+/// so a shared id lets the control login take that network's replay before the
+/// network's own connection asks for it.
+pub(crate) fn login_name(name: &str, config: &IrcConfig) -> String {
+    if config.list_networks && config.bind_netid.is_none() && !name.contains('/') {
+        if let Some((user, id)) = name.split_once('@') {
+            if !user.is_empty() && !id.is_empty() {
+                return format!("{}@{}-ctl", user, id);
+            }
+        }
+    }
+    name.to_string()
+}
+
 pub(crate) fn list_command(elist: &str, min_users: u32) -> String {
     if min_users > 1 && elist.contains('U') {
         format!("LIST >{}", min_users - 1)
@@ -910,6 +927,7 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             // Server is ready for our SASL payload
             if msg.param(0).unwrap_or("") == "+" {
                 let user = if config.sasl_username.is_empty() { &config.nick } else { &config.sasl_username };
+                let user = login_name(user, config);
                 let payload = format!("\0{}\0{}", user, config.password);
                 let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
                 session.whois_lines.push(format!("AUTHENTICATE {}", encoded));
@@ -1834,6 +1852,7 @@ pub fn spawn(
                     }
                     let _ = write_half.write_all(format!("NICK {}\r\n", config.nick).as_bytes()).await;
                     let user = if config.username.is_empty() { &config.nick } else { &config.username };
+                    let user = login_name(user, &config);
                     let _ = write_half.write_all(format!("USER {} 0 * :{}\r\n", user, config.nick).as_bytes()).await;
 
                     connected.store(true, Ordering::Relaxed);
@@ -2145,6 +2164,21 @@ mod tests {
             channel: "#weechat".into(), tunnel_port: None, auto_reconnect: true,
             bind_netid: bind_netid.map(String::from), list_networks: bind_netid.is_none(),
         }
+    }
+
+    #[test]
+    fn control_login_gets_its_own_client_id() {
+        let control = config(None);
+        assert_eq!(login_name("alice@laptop", &control), "alice@laptop-ctl");
+        // No client id, or a network in the name: left as typed.
+        assert_eq!(login_name("alice", &control), "alice");
+        assert_eq!(login_name("alice@laptop/libera", &control), "alice@laptop/libera");
+        assert_eq!(login_name("alice/libera", &control), "alice/libera");
+        assert_eq!(login_name("@laptop", &control), "@laptop");
+        assert_eq!(login_name("alice@", &control), "alice@");
+        // A connection bound to one network keeps its name.
+        let bound = config(Some("42"));
+        assert_eq!(login_name("alice@laptop", &bound), "alice@laptop");
     }
 
     /// Feed raw lines through translate(), returning the commands it queued.
