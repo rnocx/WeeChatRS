@@ -2979,7 +2979,7 @@ impl eframe::App for WeeChatApp {
                     // longest nick ended instead of at the panel's edge.
                     ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
                             if let Some(nicks) = &current_buffer_nicks {
-                                for (i, row) in crate::ui::nicklist::rows(nicks, self.group_nicklist).into_iter().enumerate() {
+                                for (i, row) in crate::ui::nicklist::rows(nicks, self.group_nicklist, &render_theme).into_iter().enumerate() {
                                     let nick = match row {
                                         crate::ui::nicklist::Row::Heading(title, count, color) => {
                                             if i > 0 { ui.add_space(6.0); }
@@ -3019,7 +3019,7 @@ impl eframe::App for WeeChatApp {
                                     };
                                     let mut job = LayoutJob::default();
                                     let symbol = crate::ui::nicklist::mode_symbol(nick);
-                                    let symbol_color = symbol.and_then(crate::ui::nicklist::mode_color).unwrap_or(text_secondary);
+                                    let symbol_color = symbol.and_then(|s| crate::ui::nicklist::mode_color(s, &render_theme)).unwrap_or(text_secondary);
                                     job.append(&format!("{} ", symbol.unwrap_or(' ')), 0.0,
                                         egui::TextFormat::simple(font_id.clone(), symbol_color));
                                     for s in sections {
