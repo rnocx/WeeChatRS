@@ -6511,7 +6511,7 @@ dependencies = [
 
 [[package]]
 name = "weechat-rs"
-version = "0.9.6-rc3"
+version = "0.9.6-rc5"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
