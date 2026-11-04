@@ -1956,6 +1956,10 @@ impl eframe::App for WeeChatApp {
             }
             self.applied_blur = Some(self.blur_background);
         }
+        #[cfg(target_os = "macos")]
+        if self.adaptive_theme {
+            crate::ui::wallpaper::report_window_screen(&*frame);
+        }
         if !self.notify_initialized {
             self.notify_initialized = true;
             crate::ui::notify::init();

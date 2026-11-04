@@ -173,13 +173,62 @@ pub fn supported() -> bool {
     std::env::var_os("FLATPAK_ID").is_none()
 }
 
-/// Returns the path of the current desktop wallpaper on the primary display.
+/// Returns the path of the current desktop wallpaper: on macOS that of the monitor
+/// the window is on, elsewhere the primary display's.
 pub fn get_wallpaper_path() -> Option<String> {
     platform_wallpaper_path()
 }
 
+/// macOS: the wallpaper of the screen the window is on, set from the UI thread by
+/// `report_window_screen` because AppKit wants screens used on the main thread.
+#[cfg(target_os = "macos")]
+static WINDOW_WALLPAPER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+fn window_wallpaper() -> Option<String> {
+    WINDOW_WALLPAPER.lock().ok()?.clone()
+}
+
+/// Look up the wallpaper of the screen `window` is on and hand it to the watcher
+/// thread. Cheap, but rate-limited, so it can be called every frame.
+#[cfg(target_os = "macos")]
+pub fn report_window_screen(window: &impl raw_window_handle::HasWindowHandle) {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+    thread_local! { static LAST: Cell<Option<Instant>> = const { Cell::new(None) }; }
+    if LAST.get().is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
+        return;
+    }
+    LAST.set(Some(Instant::now()));
+    let path = screen_wallpaper(window);
+    if let Ok(mut slot) = WINDOW_WALLPAPER.lock() {
+        if *slot != path {
+            *slot = path;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn screen_wallpaper(window: &impl raw_window_handle::HasWindowHandle) -> Option<String> {
+    use objc2_app_kit::{NSView, NSWorkspace};
+    use raw_window_handle::RawWindowHandle;
+    let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else { return None };
+    // SAFETY: winit hands out a valid NSView for the lifetime of the window.
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    let screen = view.window()?.screen()?;
+    let url = NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen)?;
+    Some(url.path()?.to_string())
+}
+
 #[cfg(target_os = "macos")]
 fn platform_wallpaper_path() -> Option<String> {
+    // Before the first frame has reported a screen, or when AppKit has no picture
+    // for it, fall back to Finder's, which is the main display's.
+    window_wallpaper().or_else(finder_wallpaper)
+}
+
+#[cfg(target_os = "macos")]
+fn finder_wallpaper() -> Option<String> {
     let out = std::process::Command::new("osascript")
         .args(["-e", "tell app \"Finder\" to POSIX path of (get desktop picture as alias)"])
         .output()
@@ -431,6 +480,18 @@ fn pref_file_changed(last_mtime: &mut Option<std::time::SystemTime>) -> bool {
     }
 }
 
+/// macOS: once a window screen is reported the path is a cheap lookup, and moving the
+/// window to another monitor doesn't touch the preferences files.
+#[cfg(target_os = "macos")]
+fn window_wallpaper_set() -> bool {
+    window_wallpaper().is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn window_wallpaper_set() -> bool {
+    false
+}
+
 /// Windows / Linux: path detection is fast enough to run on every tick.
 #[cfg(not(target_os = "macos"))]
 fn pref_file_changed(_last_mtime: &mut Option<std::time::SystemTime>) -> bool {
@@ -449,10 +510,11 @@ pub fn start_wallpaper_thread(ctx: egui::Context) -> std::sync::mpsc::Receiver<A
             let mut last_path = String::new();
             let mut last_mtime: Option<std::time::SystemTime> = None;
             loop {
-                if pref_file_changed(&mut last_mtime) {
+                if pref_file_changed(&mut last_mtime) || window_wallpaper_set() {
                     if let Some(path) = get_wallpaper_path() {
                         if path != last_path {
                             last_path = path.clone();
+                            log::debug!("wallpaper: {path}");
                             if let Some(theme) = theme_from_wallpaper(&path) {
                                 if tx.send(theme).is_err() {
                                     break;
