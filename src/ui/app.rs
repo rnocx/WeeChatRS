@@ -1463,17 +1463,9 @@ impl WeeChatApp {
         });
     }
 
-    pub(crate) fn draw_sidebar_icon(painter: &Painter, rect: Rect, color: Color32, is_right: bool) {
-        let stroke = Stroke::new(1.4, color);
-        let rounding = CornerRadius::same(2);
-        let frame = Rect::from_center_size(rect.center(), egui::vec2(16.0, 14.0));
-        painter.rect_stroke(frame, rounding, stroke, egui::StrokeKind::Middle);
-
-        let split_x = if is_right { frame.right() - 5.0 } else { frame.left() + 5.0 };
-        painter.line_segment(
-            [egui::pos2(split_x, frame.top()), egui::pos2(split_x, frame.bottom())],
-            stroke
-        );
+    /// A panel toggle in the toolbar: an icon, accent coloured while its panel is open.
+    fn draw_toggle_icon(painter: &Painter, rect: Rect, glyph: &str, color: Color32) {
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, glyph, FontId::proportional(18.0), color);
     }
 
     pub(crate) fn is_twemoji_url(url: &str) -> bool {
@@ -2334,7 +2326,8 @@ impl eframe::App for WeeChatApp {
                     let (rect, res) = ui.allocate_at_least(icon_size, egui::Sense::click());
                     if res.clicked() { self.show_buffers = !self.show_buffers; }
                     let color = if self.show_buffers { accent_color } else { text_muted };
-                    Self::draw_sidebar_icon(ui.painter(), rect, color, false);
+                    Self::draw_toggle_icon(ui.painter(), rect, icons::SIDEBAR_SIMPLE, color);
+                    res.on_hover_text("Buffer list");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let buf_has_nicklist = self.selected_buffer_id.as_ref()
@@ -2344,7 +2337,8 @@ impl eframe::App for WeeChatApp {
                         let (rect, res) = ui.allocate_at_least(icon_size, if buf_has_nicklist { egui::Sense::click() } else { egui::Sense::hover() });
                         if buf_has_nicklist && res.clicked() { self.show_nicklist = !self.show_nicklist; }
                         let color = if buf_has_nicklist && self.show_nicklist { accent_color } else { text_muted.linear_multiply(if buf_has_nicklist { 1.0 } else { 0.4 }) };
-                        Self::draw_sidebar_icon(ui.painter(), rect, color, true);
+                        Self::draw_toggle_icon(ui.painter(), rect, icons::USERS, color);
+                        res.on_hover_text(if buf_has_nicklist { "Nick list" } else { "No nick list in this buffer" });
                         ui.add_space(8.0);
 
                         if ui.button(icon(icons::GEAR)).on_hover_text("Settings").clicked() {

@@ -79,3 +79,6 @@ zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 [build-dependencies]
 winresource = "0.1"
+
+[dev-dependencies]
+ttf-parser = "0.24"

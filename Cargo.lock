@@ -6551,6 +6551,7 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-tungstenite",
+ "ttf-parser",
  "url",
  "webbrowser",
  "windows 0.57.0",
