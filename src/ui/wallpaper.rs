@@ -140,6 +140,15 @@ fn kmeans_palette(pixels: &[(u8, u8, u8)], k: usize) -> Vec<(u8, u8, u8, usize)>
 /// `image::open` needs one to know the format. A failure is logged with the
 /// reason, since a missing theme otherwise gives no hint why.
 fn open_image(path: &str, report: bool) -> Option<image::DynamicImage> {
+    if is_jpeg_xl(path) {
+        return match open_jxl(path) {
+            Ok(img) => Some(img),
+            Err(e) => {
+                if report { log::warn!("wallpaper: can't read {path}: {e}"); }
+                None
+            }
+        };
+    }
     let reader = match image::ImageReader::open(path).and_then(|r| r.with_guessed_format()) {
         Ok(r) => r,
         Err(e) => {
@@ -154,6 +163,26 @@ fn open_image(path: &str, report: bool) -> Option<image::DynamicImage> {
             None
         }
     }
+}
+
+/// JPEG XL, which GNOME and Fedora ship their stock wallpapers as. The image
+/// crate has no decoder for it. A bare codestream starts `FF 0A`, the ISO
+/// container with a 12-byte signature box.
+fn is_jpeg_xl(path: &str) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    if f.read_exact(&mut head).is_err() {
+        return false;
+    }
+    head[..2] == [0xFF, 0x0A] || head == [0, 0, 0, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A]
+}
+
+fn open_jxl(path: &str) -> Result<image::DynamicImage, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::BufReader::new(file))
+        .map_err(|e| e.to_string())?;
+    image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -171,7 +200,10 @@ fn load_image_rgb(path: &str) -> Option<Vec<(u8, u8, u8)>> {
         return Some(img.pixels().map(|p| (p.0[0], p.0[1], p.0[2])).collect());
     }
     // HEIC/HEIF fallback: convert to a temp JPEG via macOS's built-in sips tool.
+    // Remove the last run's sample first: sips can exit 0 without writing a file,
+    // and that stale sample would pass for this wallpaper.
     let tmp = std::env::temp_dir().join("weechat_wallpaper_sample.jpg");
+    let _ = std::fs::remove_file(&tmp);
     let ok = std::process::Command::new("sips")
         .args(["-s", "format", "jpeg", "-z", "128", "128", path, "--out"])
         .arg(&tmp)
@@ -181,8 +213,9 @@ fn load_image_rgb(path: &str) -> Option<Vec<(u8, u8, u8)>> {
     if !ok {
         return None;
     }
-    let img = open_image(&tmp.to_string_lossy(), true)?;
-    let img = img.thumbnail(128, 128).to_rgb8();
+    let img = open_image(&tmp.to_string_lossy(), true);
+    let _ = std::fs::remove_file(&tmp);
+    let img = img?.thumbnail(128, 128).to_rgb8();
     Some(img.pixels().map(|p| (p.0[0], p.0[1], p.0[2])).collect())
 }
 
@@ -582,6 +615,32 @@ mod tests {
         let path = dir.join("wallpaper.jpg");
         write_png(&path);
         assert!(theme_from_wallpaper(path.to_str().unwrap()).is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn jpeg_xl_wallpaper_loads() {
+        // GNOME's stock wallpapers are .jxl. A bare codestream, with and without the extension.
+        let bytes = include_bytes!("testdata/wallpaper.jxl");
+        let dir = temp_dir("jxl");
+        for name in ["fold-d.jxl", "background"] {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(is_jpeg_xl(path.to_str().unwrap()));
+            let img = open_image(path.to_str().unwrap(), true).expect(name);
+            assert_eq!((img.width(), img.height()), (64, 36));
+            assert!(theme_from_wallpaper(path.to_str().unwrap()).is_some(), "{name}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn truncated_jpeg_xl_does_not_decode() {
+        let dir = temp_dir("jxl-cut");
+        let path = dir.join("cut.jxl");
+        std::fs::write(&path, &include_bytes!("testdata/wallpaper.jxl")[..16]).unwrap();
+        // Checked on the decoder: macOS's sips fallback reads partial files.
+        assert!(open_image(path.to_str().unwrap(), false).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
