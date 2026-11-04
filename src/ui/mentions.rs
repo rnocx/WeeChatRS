@@ -65,18 +65,34 @@ impl WeeChatApp {
         self.selected_buffer_id.as_deref() == Some(MENTIONS_ID)
     }
 
-    /// Shows Mentions, or goes back to the buffer before it.
+    /// Shows Mentions, or goes back to the buffer before it. Does nothing while the
+    /// setting is off.
     pub(crate) fn toggle_mentions(&mut self) {
         if self.mentions_selected() {
-            let back = self.mentions.return_to.take()
-                .filter(|id| self.buffer_by_id(id).is_some())
-                .or_else(|| self.buffers.first().map(|b| b.id.clone()));
-            if let Some(id) = back {
-                self.select_buffer(id);
-            }
-        } else {
+            self.leave_mentions();
+        } else if self.show_mentions {
             self.mentions.return_to = self.selected_buffer_id.clone();
             self.select_buffer(MENTIONS_ID.to_string());
+        }
+    }
+
+    /// Goes back to the buffer before Mentions, if it is on screen.
+    fn leave_mentions(&mut self) {
+        let back = self.mentions.return_to.take()
+            .filter(|id| self.buffer_by_id(id).is_some())
+            .or_else(|| self.buffers.first().map(|b| b.id.clone()));
+        if let Some(id) = back {
+            self.select_buffer(id);
+        }
+    }
+
+    /// The setting changed: when it went off, leave Mentions and drop its badge.
+    pub(crate) fn mentions_setting_changed(&mut self) {
+        if !self.show_mentions {
+            if self.mentions_selected() {
+                self.leave_mentions();
+            }
+            self.mentions.unseen = 0;
         }
     }
 
@@ -88,7 +104,7 @@ impl WeeChatApp {
 
     /// A new mention for the badge, unless Mentions is on screen.
     pub(crate) fn count_mention(&mut self) {
-        if !self.mentions_selected() {
+        if self.show_mentions && !self.mentions_selected() {
             self.mentions.unseen += 1;
         }
     }

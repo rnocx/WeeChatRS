@@ -76,7 +76,7 @@ impl WeeChatApp {
             })
             .collect();
         // Mentions, which isn't a buffer of any connection.
-        if let Some(score) = fuzzy_score(&query, "mentions") {
+        if let Some(score) = fuzzy_score(&query, "mentions").filter(|_| self.show_mentions) {
             results.insert(0, (score + if self.mentions.unseen > 0 { 30 } else { 0 }, MENTIONS));
         }
         if !query.is_empty() {

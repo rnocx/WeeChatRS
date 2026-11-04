@@ -671,6 +671,10 @@ pub struct AppSettings {
     pub show_titlebar: bool,
     #[serde(default = "default_true")]
     pub show_lag: bool,
+    /// The Mentions entry: the buffer list row, toolbar button, shortcut, `/mentions`
+    /// and quick switcher.
+    #[serde(default = "default_true")]
+    pub show_mentions: bool,
     pub show_server_headers: bool,
     pub show_inline_images: bool,
     pub show_link_previews: bool,
@@ -815,6 +819,7 @@ impl Default for AppSettings {
             auto_reconnect: true,
             show_titlebar: true,
             show_lag: true,
+            show_mentions: true,
             show_server_headers: true,
             show_inline_images: true,
             show_link_previews: true,
@@ -914,6 +919,7 @@ pub struct WeeChatApp {
     pub(crate) show_titlebar: bool,
     /// The lag readout in the toolbar.
     pub(crate) show_lag: bool,
+    pub(crate) show_mentions: bool,
     pub(crate) show_server_headers: bool,
     pub(crate) show_inline_images: bool,
     pub(crate) show_link_previews: bool,
@@ -1241,6 +1247,7 @@ impl WeeChatApp {
             auto_reconnect: settings.auto_reconnect,
             show_titlebar: settings.show_titlebar,
             show_lag: settings.show_lag,
+            show_mentions: settings.show_mentions,
             show_server_headers: settings.show_server_headers,
             show_inline_images: settings.show_inline_images,
             show_link_previews: settings.show_link_previews,
@@ -1921,6 +1928,7 @@ impl eframe::App for WeeChatApp {
             auto_reconnect: self.auto_reconnect,
             show_titlebar: self.show_titlebar,
             show_lag: self.show_lag,
+            show_mentions: self.show_mentions,
             show_server_headers: self.show_server_headers,
             show_inline_images: self.show_inline_images,
             show_link_previews: self.show_link_previews,
@@ -2380,6 +2388,7 @@ impl eframe::App for WeeChatApp {
                             self.open_settings(ui.ctx());
                         }
                         let unseen = self.mentions.unseen;
+                        if self.show_mentions {
                         let mentions_label = if unseen > 0 {
                             egui::RichText::new(format!("{} {}", icons::AT, unseen)).size(15.0).color(Color32::from_rgb(220, 70, 70))
                         } else if self.mentions_selected() {
@@ -2394,6 +2403,7 @@ impl eframe::App for WeeChatApp {
                         };
                         if ui.button(mentions_label).on_hover_text(mentions_tip).clicked() {
                             self.toggle_mentions();
+                        }
                         }
                         if ui.button(icon(icons::PLUGS)).on_hover_text("Connections").clicked() {
                             self.open_connections(ui.ctx());
@@ -2488,7 +2498,7 @@ impl eframe::App for WeeChatApp {
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        if self.mentions_row(ui, accent_color, text_primary, text_muted) {
+                        if self.show_mentions && self.mentions_row(ui, accent_color, text_primary, text_muted) {
                             next_selected_buffer_id = Some(crate::ui::mentions::MENTIONS_ID.to_string());
                         }
                         let mut last_conn_prefix: Option<String> = None;

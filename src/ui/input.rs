@@ -172,7 +172,7 @@ impl WeeChatApp {
     pub(crate) fn cycle_buffer(&mut self, delta: i32) {
         if self.buffers.is_empty() { return; }
         // Mentions comes first, as in the buffer list, which leaves out highmon.
-        let order: Vec<String> = std::iter::once(crate::ui::mentions::MENTIONS_ID.to_string())
+        let order: Vec<String> = Some(crate::ui::mentions::MENTIONS_ID.to_string()).filter(|_| self.show_mentions).into_iter()
             .chain(self.buffers.iter().filter(|b| !shown_elsewhere(b)).map(|b| b.id.clone()))
             .collect();
         let new_id = match &self.selected_buffer_id {

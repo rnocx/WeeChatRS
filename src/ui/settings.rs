@@ -301,6 +301,12 @@ impl WeeChatApp {
         hint(ui, "Requires the emojinize script on the WeeChat server.");
 
         section_heading(ui, "Highlights");
+        let mentions_before = self.show_mentions;
+        ui.checkbox(&mut self.show_mentions, "Show Mentions");
+        hint(ui, "An entry at the top of the buffer list with the lines that highlighted you, from every buffer. Also the toolbar button, its shortcut, /mentions and the quick switcher.");
+        if self.show_mentions != mentions_before {
+            self.mentions_setting_changed();
+        }
         ui.horizontal(|ui| {
             ui.label("Highlight words:");
             let edit = egui::TextEdit::singleline(&mut self.highlight_words_text)
