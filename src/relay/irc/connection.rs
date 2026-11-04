@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use super::{parser::{parse_attributes, IrcMessage}, IrcConfig, Shared};
 use crate::relay::backend::{BackendEvent, ServerStatus, ZncNetwork};
+use crate::relay::presence;
 use crate::relay::models::{Buffer, BufferActivity, Line, Nick};
 use chrono::{DateTime, Utc};
 use egui::Context as EguiContext;
@@ -415,8 +416,8 @@ fn ctcp_answer(kind: &str, args: &str) -> Option<String> {
 
 /// Presence/metadata line (join, part, quit, kick, nick change).
 /// displayed=false: hidden when "show filtered lines" is off, never counted as unread.
-fn make_presence_line(id: &str, prefix: &str, text: &str, ts: DateTime<Utc>) -> Line {
-    Line::new(id.to_string(), ts, prefix.to_string(), text.to_string(), false, false)
+fn make_presence_line(id: &str, (prefix, text): (String, String), ts: DateTime<Utc>) -> Line {
+    Line::new(id.to_string(), ts, prefix, text, false, false)
 }
 
 /// mIRC colour numbers 0–15 as the ANSI colour slots the theme draws them in.
@@ -1127,12 +1128,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                 *line_counter += 1;
                 // extended-join: param(1) is account ("*" = not logged in), param(2) is realname
                 let account = msg.param(1).unwrap_or("*");
-                let join_text = if account != "*" && !account.is_empty() {
-                    format!("{} ({}) has joined {}", nick, account, channel)
-                } else {
-                    format!("{} has joined {}", nick, channel)
-                };
-                let line = make_presence_line(&line_counter.to_string(), "-->", &join_text, timestamp_from_msg(msg));
+                let account = if account == "*" { "" } else { account };
+                let line = make_presence_line(&line_counter.to_string(), presence::join(&nick, account, &channel), timestamp_from_msg(msg));
                 events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line });
             }
         }
@@ -1148,8 +1145,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             } else if session.joined.contains(&chan_lower) {
                 events.push(BackendEvent::NickRemoved { buffer_id: chan_lower.clone(), nick_name: nick.clone() });
                 *line_counter += 1;
-                let text = if reason.is_empty() { format!("{} has left {}", nick, channel) } else { format!("{} has left {} ({})", nick, channel, reason) };
-                events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line: make_presence_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg)) });
+                let text = presence::part(&nick, &channel, &irc_to_ansi(&reason));
+                events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line: make_presence_line(&line_counter.to_string(), text, timestamp_from_msg(msg)) });
             }
         }
 
@@ -1165,8 +1162,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             } else if session.joined.contains(&chan_lower) {
                 events.push(BackendEvent::NickRemoved { buffer_id: chan_lower.clone(), nick_name: target.clone() });
                 *line_counter += 1;
-                let text = if reason.is_empty() { format!("{} was kicked from {} by {}", target, channel, kicker) } else { format!("{} was kicked from {} by {} ({})", target, channel, kicker, reason) };
-                events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line: make_presence_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg)) });
+                let text = presence::kick(&target, &channel, &kicker, &irc_to_ansi(&reason));
+                events.push(BackendEvent::LineAdded { buffer_id: chan_lower, line: make_presence_line(&line_counter.to_string(), text, timestamp_from_msg(msg)) });
             }
         }
 
@@ -1177,8 +1174,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             for chan in session.joined.clone() {
                 events.push(BackendEvent::NickRemoved { buffer_id: chan.clone(), nick_name: nick.clone() });
                 *line_counter += 1;
-                let text = if reason.is_empty() { format!("{} has quit", nick) } else { format!("{} has quit ({})", nick, reason) };
-                events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_presence_line(&line_counter.to_string(), "<--", &text, timestamp_from_msg(msg)) });
+                let text = presence::quit(&nick, &irc_to_ansi(&reason));
+                events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_presence_line(&line_counter.to_string(), text, timestamp_from_msg(msg)) });
             }
         }
 
@@ -1190,7 +1187,7 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                 events.push(BackendEvent::NickRemoved { buffer_id: chan.clone(), nick_name: old_nick.clone() });
                 events.push(BackendEvent::NickAdded { buffer_id: chan.clone(), nick: Nick { name: new_nick.clone(), prefix: String::new(), color_ansi: nick_color_ansi(&new_nick), away: false } });
                 *line_counter += 1;
-                events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_presence_line(&line_counter.to_string(), "--", &format!("{} is now known as {}", old_nick, new_nick), timestamp_from_msg(msg)) });
+                events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_presence_line(&line_counter.to_string(), presence::nick_change(&old_nick, &new_nick), timestamp_from_msg(msg)) });
             }
         }
 
