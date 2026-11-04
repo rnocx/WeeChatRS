@@ -179,6 +179,7 @@ All of them can be rebound in **Settings → Keybinds**.
 | Linux x86_64 / ARM64 | Supported |
 | Windows x86_64 | Supported |
 
+- **Linux, GNOME:** on a Wayland session the app runs through X11 (Xwayland), because GNOME doesn't draw titlebars for Wayland windows and the frame the toolkit draws instead ignores your GNOME settings. Through X11 the titlebar follows them. Text can look soft on fractional scaling. Set `WEECHATRS_WAYLAND=1` to stay on Wayland.
 - **Linux:** dropping files onto the window works on X11, not yet under Wayland. Use `/share <path>`, `/share` or the paperclip button there. The file picker goes through the desktop's file-chooser portal (`xdg-desktop-portal`), which GNOME and KDE ship, and `/share <path>` works without it.
 - **Windows:** window transparency needs *Transparency effects* turned on (Settings → Personalization → Colors). Otherwise the window gets a solid background.
 

@@ -30,8 +30,15 @@ fn app_id() -> String {
     "weechatrs".to_string()
 }
 
+fn main() -> eframe::Result<()> {
+    // Before the async runtime starts its threads: this edits the environment.
+    #[cfg(target_os = "linux")]
+    desktop_integration::use_x11_on_gnome_wayland();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> eframe::Result<()> {
+async fn run() -> eframe::Result<()> {
     // ssh starts this binary to answer its password and passphrase prompts.
     if let Some(code) = ui::ssh_tunnel::askpass_main() {
         std::process::exit(code);

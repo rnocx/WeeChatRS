@@ -22,6 +22,29 @@ const ICONS: &[(&str, &[u8])] = &[
 /// The app_id the desktop knows us by: the Flatpak app ID in a Flatpak, where the
 /// desktop entry is named after it, else `weechatrs`.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Whether to run through X11 although the session is Wayland. GNOME doesn't draw
+/// titlebars for Wayland windows, so winit falls back to a frame of its own that
+/// ignores the desktop's settings: all three buttons whatever `button-layout` says,
+/// square corners, an old Adwaita look. Through Xwayland, GNOME draws a native
+/// titlebar. Needs an X display; `WEECHATRS_WAYLAND=1` keeps Wayland.
+pub fn prefers_x11(session_type: &str, desktop: &str, display: &str, keep_wayland: &str) -> bool {
+    session_type.eq_ignore_ascii_case("wayland")
+        && desktop.split(':').any(|d| d.eq_ignore_ascii_case("gnome"))
+        && !display.is_empty()
+        && !matches!(keep_wayland, "1" | "true" | "yes")
+}
+
+/// Call before the async runtime and any other thread starts: it changes the
+/// environment, and winit takes Wayland whenever `WAYLAND_DISPLAY` is set.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn use_x11_on_gnome_wayland() {
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    if prefers_x11(&var("XDG_SESSION_TYPE"), &var("XDG_CURRENT_DESKTOP"), &var("DISPLAY"), &var("WEECHATRS_WAYLAND")) {
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("WAYLAND_SOCKET");
+    }
+}
+
 pub fn app_id() -> String {
     std::env::var("FLATPAK_ID").ok().filter(|id| !id.is_empty()).unwrap_or_else(|| APP_ID.to_string())
 }
@@ -114,6 +137,18 @@ fn write_if_changed(path: &Path, contents: &[u8]) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gnome_on_wayland_prefers_x11_when_there_is_a_display() {
+        use super::prefers_x11;
+        assert!(prefers_x11("wayland", "GNOME", ":0", ""));
+        assert!(prefers_x11("wayland", "ubuntu:GNOME", ":0", ""));
+        assert!(!prefers_x11("wayland", "GNOME", "", ""), "no X display to fall back to");
+        assert!(!prefers_x11("wayland", "KDE", ":0", ""));
+        assert!(!prefers_x11("x11", "GNOME", ":0", ""));
+        assert!(!prefers_x11("wayland", "GNOME", ":0", "1"), "opted out");
+        assert!(!prefers_x11("wayland", "X-Cinnamon", ":0", ""));
+    }
+
     #[test]
     fn installs_entry_and_icons_once_into_data_home() {
         let dir = std::env::temp_dir().join(format!("weechatrs-desktop-test-{}", std::process::id()));
