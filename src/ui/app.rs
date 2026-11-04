@@ -4192,8 +4192,10 @@ impl eframe::App for WeeChatApp {
             }
         }
 
+        // Backends request a repaint when something arrives. This is only the net under
+        // that, for a request the platform drops (a hidden window, a wake from sleep).
         if any_connected {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
     }
 }
