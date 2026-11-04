@@ -294,6 +294,17 @@ impl WeeChatApp {
         hint(ui, "On IRC, soju, ZNC and Injected, from the nick list. WeeChat shows them by its own option, irc.look.nick_mode.");
         ui.checkbox(&mut self.show_channel_modes, "Show channel modes (such as [+nt]) before the topic");
         ui.checkbox(&mut self.show_filtered_lines, "Show filtered lines");
+        hint(ui, "Joins, parts and quits the smart filter hides, lines from ignored nicks, and on WeeChat whatever its /filter rules hide.");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.smart_filter, "Smart filter for joins, parts, quits and nick changes");
+        });
+        ui.add_enabled_ui(self.smart_filter, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Show them for nicks that spoke in the last");
+                ui.add(egui::DragValue::new(&mut self.smart_filter_minutes).range(1..=120).suffix(" min"));
+            });
+        });
+        hint(ui, "On IRC, soju, ZNC and Injected, as WeeChat does. A join shows after all when the nick speaks soon after. WeeChat filters on its server. Applies to new lines.");
         ui.checkbox(&mut self.colored_nicks, "Coloured nicknames in the nick list");
         ui.checkbox(&mut self.group_nicklist, "Group the nick list by rank");
         hint(ui, "Owners, Admins, Operators, Half-ops, Voiced and Users, each under its own heading.");

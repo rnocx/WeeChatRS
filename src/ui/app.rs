@@ -655,6 +655,13 @@ pub struct AppSettings {
     #[serde(default)]
     pub use_ssl: bool,
     pub show_filtered_lines: bool,
+    /// Join, part, quit and nick-change lines show only for nicks that spoke lately, on
+    /// IRC, soju, ZNC and Injected.
+    #[serde(default = "default_true")]
+    pub smart_filter: bool,
+    /// How many minutes count as lately.
+    #[serde(default = "default_smart_filter_minutes")]
+    pub smart_filter_minutes: u32,
     pub colored_nicks: bool,
     #[serde(default)]
     pub group_nicklist: bool,
@@ -794,6 +801,7 @@ pub struct AppSettings {
 }
 
 fn default_true() -> bool { true }
+fn default_smart_filter_minutes() -> u32 { 5 }
 fn default_nicklist_width() -> f32 { 180.0 }
 fn default_prefix_suffix() -> String { "│".to_string() }
 fn default_file_share_duration() -> String { "day".to_string() }
@@ -808,6 +816,8 @@ impl Default for AppSettings {
             port: "9001".to_string(),
             use_ssl: true,
             show_filtered_lines: false,
+            smart_filter: true,
+            smart_filter_minutes: default_smart_filter_minutes(),
             colored_nicks: true,
             group_nicklist: false,
             theme: crate::ui::theme::default_theme(),
@@ -908,6 +918,10 @@ pub struct WeeChatApp {
     pub(crate) settings_window_pos: Option<egui::Pos2>,
     pub(crate) connections_window_pos: Option<egui::Pos2>,
     pub(crate) show_filtered_lines: bool,
+    pub(crate) smart_filter: bool,
+    pub(crate) smart_filter_minutes: u32,
+    /// What each IRC, soju, ZNC or Injected buffer's smart filter remembers.
+    pub(crate) smart_filters: HashMap<String, crate::relay::smartfilter::SmartFilter>,
     pub(crate) colored_nicks: bool,
     /// Nicks under rank headings in the nick list.
     pub(crate) group_nicklist: bool,
@@ -1233,6 +1247,9 @@ impl WeeChatApp {
             settings_window_pos: None,
             connections_window_pos: None,
             show_filtered_lines: settings.show_filtered_lines,
+            smart_filter: settings.smart_filter,
+            smart_filter_minutes: settings.smart_filter_minutes,
+            smart_filters: HashMap::new(),
             colored_nicks: settings.colored_nicks,
             group_nicklist: settings.group_nicklist,
             theme: settings.theme,
@@ -1914,6 +1931,8 @@ impl eframe::App for WeeChatApp {
             port: String::new(),
             use_ssl: false,
             show_filtered_lines: self.show_filtered_lines,
+            smart_filter: self.smart_filter,
+            smart_filter_minutes: self.smart_filter_minutes,
             colored_nicks: self.colored_nicks,
             group_nicklist: self.group_nicklist,
             theme: self.theme.clone(),

@@ -110,6 +110,26 @@ pub struct Line {
     pub plain_message: String,
     pub plain_prefix_lower: String,
     pub plain_message_lower: String,
+    /// Set on a join, part, quit, kick or nick-change line, for the smart filter.
+    pub presence: Option<Presence>,
+}
+
+/// What a presence line is about, as the smart filter needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Presence {
+    pub kind: PresenceKind,
+    /// Who joined, left, was kicked or changed nick (the old nick).
+    pub nick: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PresenceKind {
+    Join,
+    Part,
+    Quit,
+    Kick,
+    /// A nick change, to this nick.
+    Nick(String),
 }
 
 impl Line {
@@ -141,7 +161,14 @@ impl Line {
             plain_message,
             plain_prefix_lower,
             plain_message_lower,
+            presence: None,
         }
+    }
+
+    /// The same line, marked as a join, part, quit, kick or nick change.
+    pub fn with_presence(mut self, kind: PresenceKind, nick: &str) -> Self {
+        self.presence = Some(Presence { kind, nick: nick.to_string() });
+        self
     }
 
     /// The same line, notifying when `notify` is set even if it isn't a highlight.

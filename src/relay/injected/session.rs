@@ -6,7 +6,7 @@ use crate::relay::irc::connection::{ctcp, ctcp_query_text, ctcp_reply_text, expa
 use crate::relay::{
     presence,
     backend::{BackendEvent, ServerStatus},
-    models::{Buffer, BufferActivity, Line, ListedChannel, Nick},
+    models::{Buffer, BufferActivity, Line, ListedChannel, Nick, PresenceKind},
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -75,22 +75,22 @@ fn event_line(v: &Value, kind: &str, channel: &str) -> Option<Line> {
         .or_else(|| string(v, "text").split_once('(').map(|(_, r)| r.trim_end().trim_end_matches(')').to_owned()))
         .unwrap_or_default();
     let reason = irc_to_ansi(&reason);
-    let ((prefix, text), who) = match kind {
+    let ((prefix, text), who, presence_kind) = match kind {
         "privmsg" | "action" | "notice" | "" => return None,
         "join" => {
             let (ident, host) = (string(v, "ident"), string(v, "hostname"));
             let from = if ident.is_empty() || host.is_empty() { String::new() } else { format!("{}@{}", ident, host) };
-            (presence::join(nick, &from, channel), nick)
+            (presence::join(nick, &from, channel), nick, PresenceKind::Join)
         }
-        "part" => (presence::part(nick, channel, &reason), nick),
-        "quit" => (presence::quit(nick, &reason), nick),
+        "part" => (presence::part(nick, channel, &reason), nick, PresenceKind::Part),
+        "quit" => (presence::quit(nick, &reason), nick, PresenceKind::Quit),
         "kick" => {
             let kicked = Some(string(v, "kicked")).filter(|k| !k.is_empty()).unwrap_or(string(v, "kickedNick"));
-            (presence::kick(kicked, channel, nick, &reason), kicked)
+            (presence::kick(kicked, channel, nick, &reason), kicked, PresenceKind::Kick)
         }
         "nick" => {
             let old = Some(string(v, "oldNick")).filter(|o| !o.is_empty()).unwrap_or(nick);
-            (presence::nick_change(old, string(v, "newNick")), old)
+            (presence::nick_change(old, string(v, "newNick")), old, PresenceKind::Nick(string(v, "newNick").to_string()))
         }
         _ => {
             let text = string(v, "text");
@@ -102,7 +102,7 @@ fn event_line(v: &Value, kind: &str, channel: &str) -> Option<Line> {
     // Live events carry no message ID; an ID from the event itself lets the same
     // event from history count as already shown.
     let id = json!([kind, ts.timestamp_millis(), casefold(who)]).to_string();
-    Some(Line::new(id, ts, prefix, text, false, false))
+    Some(Line::new(id, ts, prefix, text, false, false).with_presence(presence_kind, who))
 }
 /// A channel's modes from a channel-info event (the server's 324 reply), as `+nt`.
 /// Injected sends `"modes": "+pmtnl 71"`; only the letters are kept, never a key or

@@ -234,6 +234,7 @@ impl WeeChatApp {
             BackendEvent::BufferClosed { buffer_id } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 self.buffers.retain(|b| b.id != full_id);
+                self.smart_filters.remove(&full_id);
                 self.rebuild_buffer_idx();
                 if self.selected_buffer_id.as_deref() == Some(&full_id) {
                     self.selected_buffer_id = self.buffers.first().map(|b| b.id.clone());
@@ -253,6 +254,7 @@ impl WeeChatApp {
             BackendEvent::LineAdded { buffer_id, mut line } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 let from_us = self.apply_line_rules(conn_prefix, &full_id, &mut line);
+                let reveal = self.smart_filter_line(conn_prefix, &full_id, &mut line);
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 if line.notify {
                     log::info!(
@@ -268,7 +270,7 @@ impl WeeChatApp {
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                     new_mention = line.highlight && line.displayed && !from_us && !is_selected && !buf.muted;
                     let notifies = line.notify || (buf.notify == NotifyLevel::All && !from_us && crate::ui::app::is_chat_prefix(&line.plain_prefix));
-                    if !is_selected && !buf.muted && line.displayed && (notifies || buf.notify != NotifyLevel::Mentions) {
+                    if !is_selected && !buf.muted && line.displayed && line.presence.is_none() && (notifies || buf.notify != NotifyLevel::Mentions) {
                         if notifies {
                             buf.activity = crate::relay::models::BufferActivity::Highlight;
                             should_notify = true;
@@ -279,6 +281,12 @@ impl WeeChatApp {
                             buf.activity = crate::relay::models::BufferActivity::Message;
                         }
                         buf.unread_count = buf.unread_count.saturating_add(1);
+                    }
+                    // A nick that speaks brings back its own join.
+                    if let Some(id) = reveal {
+                        if let Some(join) = Arc::make_mut(&mut buf.messages).iter_mut().rev().find(|l| l.id == id) {
+                            join.displayed = true;
+                        }
                     }
                     Arc::make_mut(&mut buf.messages).push_back(line);
                     if buf.messages.len() > MAX_STORED_LINES {
@@ -361,8 +369,17 @@ impl WeeChatApp {
             }
             BackendEvent::LinesLoaded { buffer_id, mut lines, is_prepend } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
+                // History is replayed through a smart filter of its own, in order.
+                let mut smart = crate::relay::smartfilter::SmartFilter::default();
+                let mut reveals = Vec::new();
                 for line in lines.iter_mut() {
                     self.apply_line_rules(conn_prefix, &full_id, line);
+                    reveals.extend(self.smart_filter_with(&mut smart, conn_prefix, &full_id, line));
+                }
+                for id in reveals {
+                    if let Some(join) = lines.iter_mut().find(|l| l.id == id) {
+                        join.displayed = true;
+                    }
                 }
                 let is_selected = self.selected_buffer_id.as_deref() == Some(full_id.as_str());
                 let is_load_more = self.loading_more_buffer_id.as_deref() == Some(full_id.as_str());
@@ -1142,6 +1159,34 @@ impl WeeChatApp {
             line.notify = true;
         }
         false
+    }
+
+    /// The smart filter for IRC, soju, ZNC and Injected: a join, part, quit or nick
+    /// change shows only for a nick that spoke lately. Returns the id of an earlier
+    /// join line to show. WeeChat filters on its server.
+    pub(crate) fn smart_filter_line(&mut self, conn_prefix: &str, buffer_id: &str, line: &mut Line) -> Option<String> {
+        if !self.smart_filter {
+            return None;
+        }
+        let mut smart = self.smart_filters.remove(buffer_id).unwrap_or_default();
+        let reveal = self.smart_filter_with(&mut smart, conn_prefix, buffer_id, line);
+        self.smart_filters.insert(buffer_id.to_string(), smart);
+        reveal
+    }
+
+    fn smart_filter_with(&self, smart: &mut crate::relay::smartfilter::SmartFilter, conn_prefix: &str, buffer_id: &str, line: &mut Line) -> Option<String> {
+        if !self.smart_filter
+            || self.connections.iter().any(|c| c.prefix == conn_prefix && c.backend_type == crate::ui::app::BackendType::WeeChat)
+        {
+            return None;
+        }
+        let ours = line.presence.as_ref().is_some_and(|p| {
+            let server = self.buffer_by_id(buffer_id).map(|b| b.server.clone()).unwrap_or_default();
+            self.connections.iter().find(|c| c.prefix == conn_prefix)
+                .and_then(|c| c.server_status.get(&server))
+                .is_some_and(|s| s.nick.eq_ignore_ascii_case(&p.nick))
+        });
+        smart.apply(line, ours, chrono::Duration::minutes(self.smart_filter_minutes as i64))
     }
 
     /// Hide or show the loaded lines of IRC, soju, ZNC and Injected buffers after the
