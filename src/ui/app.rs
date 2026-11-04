@@ -32,8 +32,10 @@ pub(crate) enum PreviewState {
 
 // --- HTML helpers (used in tokio::spawn, so must be free functions) ---
 
+// The lowercase copy is only searched, and its offsets cut the original, so it must keep
+// every byte where it is: to_ascii_lowercase does, to_lowercase does not (İ grows).
 fn extract_attr_val(tag: &str, attr: &str) -> Option<String> {
-    let lower = tag.to_lowercase();
+    let lower = tag.to_ascii_lowercase();
     for q in ['"', '\''] {
         let needle = format!("{}={}", attr, q);
         if let Some(pos) = lower.find(&needle) {
@@ -48,7 +50,7 @@ fn extract_attr_val(tag: &str, attr: &str) -> Option<String> {
 }
 
 fn extract_og_tag(html: &str, property: &str) -> Option<String> {
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     for q in ['"', '\''] {
         let needle = format!("property={}{}{}", q, property, q);
         if let Some(pos) = lower.find(&needle) {
@@ -63,7 +65,7 @@ fn extract_og_tag(html: &str, property: &str) -> Option<String> {
 }
 
 fn extract_html_title(html: &str) -> Option<String> {
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     let start = lower.find("<title")?;
     let open_end = lower[start..].find('>')? + start + 1;
     let close = lower[open_end..].find("</title>")? + open_end;
@@ -72,7 +74,7 @@ fn extract_html_title(html: &str) -> Option<String> {
 }
 
 fn extract_meta_description(html: &str) -> Option<String> {
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     for q in ['"', '\''] {
         let needle = format!("name={}description{}", q, q);
         if let Some(pos) = lower.find(&needle) {
@@ -4215,7 +4217,25 @@ impl eframe::App for WeeChatApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendType, ConnectionProfile, WeeChatApp};
+    use super::{extract_html_title, extract_meta_description, extract_og_tag, BackendType, ConnectionProfile, WeeChatApp};
+
+    #[test]
+    fn preview_tags_survive_letters_that_change_size_when_lowercased() {
+        // İ is two bytes and its lowercase is three, which used to shift every offset.
+        assert_eq!(extract_html_title("İ<title>ééé</title>").as_deref(), Some("ééé"));
+        assert_eq!(extract_html_title("İ<title>x</title>").as_deref(), Some("x"));
+        assert_eq!(extract_og_tag("İİİ<meta property=\"og:title\" content=\"éé\">", "og:title").as_deref(), Some("éé"));
+        assert_eq!(extract_meta_description("İ<META NAME='Description' CONTENT='é'>").as_deref(), Some("é"));
+        assert_eq!(extract_meta_description("İ<meta name=\"description\" content=\"d&amp;é\">").as_deref(), Some("d&é"));
+    }
+
+    #[test]
+    fn preview_tags_in_plain_pages() {
+        let html = "<html><HEAD><TITLE> A &amp; B </TITLE><meta property='og:description' content='about it'></HEAD>";
+        assert_eq!(extract_html_title(html).as_deref(), Some("A & B"));
+        assert_eq!(extract_og_tag(html, "og:description").as_deref(), Some("about it"));
+        assert_eq!(extract_og_tag(html, "og:title"), None);
+    }
 
     #[test]
     fn warns_only_when_a_password_would_cross_a_network_in_clear() {
