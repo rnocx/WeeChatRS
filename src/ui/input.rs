@@ -169,6 +169,31 @@ impl WeeChatApp {
         }
     }
 
+    /// `/filtered [toggle|show|hide|default]`: whether this buffer shows filtered lines.
+    pub(crate) fn filtered_command(&mut self, arg: &str) {
+        use crate::ui::app::FilterMode;
+        let Some(id) = self.selected_buffer_id.clone() else { return };
+        let showing = self.shows_filtered(&id);
+        match arg {
+            "" => {}
+            "toggle" => self.set_buffer_filter(&id, Some(if showing { FilterMode::Hide } else { FilterMode::Show })),
+            "show" => self.set_buffer_filter(&id, Some(FilterMode::Show)),
+            "hide" => self.set_buffer_filter(&id, Some(FilterMode::Hide)),
+            "default" => self.set_buffer_filter(&id, None),
+            _ => {
+                self.local_info(&id, "Usage: /filtered [toggle|show|hide|default]");
+                return;
+            }
+        }
+        let state = match self.buffer_filter_mode(&id) {
+            Some(FilterMode::Show) => "always shown here",
+            Some(FilterMode::Hide) => "always hidden here",
+            None if self.show_filtered_lines => "shown (follows the setting)",
+            None => "hidden (follows the setting)",
+        };
+        self.local_info(&id, &format!("Filtered lines are {state}"));
+    }
+
     pub(crate) fn cycle_buffer(&mut self, delta: i32) {
         if self.buffers.is_empty() { return; }
         // Mentions comes first, as in the buffer list, which leaves out highmon.
@@ -361,6 +386,13 @@ impl WeeChatApp {
                     self.history_index = None;
                     return;
                 }
+            } else if msg.trim() == "/filtered" || msg.starts_with("/filtered ") {
+                // Not /filter, which WeeChat has for its own filters.
+                self.filtered_command(msg.trim().strip_prefix("/filtered").unwrap_or("").trim());
+                self.input_text.clear();
+                self.completion = None;
+                self.history_index = None;
+                return;
             } else if msg.trim() == "/mentions" {
                 self.toggle_mentions();
                 self.input_text.clear();

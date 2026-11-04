@@ -294,7 +294,7 @@ impl WeeChatApp {
         hint(ui, "On IRC, soju, ZNC and Injected, from the nick list. WeeChat shows them by its own option, irc.look.nick_mode.");
         ui.checkbox(&mut self.show_channel_modes, "Show channel modes (such as [+nt]) before the topic");
         ui.checkbox(&mut self.show_filtered_lines, "Show filtered lines");
-        hint(ui, "Joins, parts and quits the smart filter hides, lines from ignored nicks, and on WeeChat whatever its /filter rules hide.");
+        hint(ui, "Joins, parts and quits the smart filter hides, lines from ignored nicks, and on WeeChat whatever its /filter rules hide. A buffer can differ: right-click it, Filtered lines.");
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.smart_filter, "Smart filter for joins, parts, quits and nick changes");
         });

@@ -662,6 +662,10 @@ pub struct AppSettings {
     /// How many minutes count as lately.
     #[serde(default = "default_smart_filter_minutes")]
     pub smart_filter_minutes: u32,
+    /// Buffers that show or hide filtered lines whatever the setting says, by the key
+    /// muted buffers use.
+    #[serde(default)]
+    pub buffer_filter: HashMap<String, FilterMode>,
     pub colored_nicks: bool,
     #[serde(default)]
     pub group_nicklist: bool,
@@ -802,6 +806,13 @@ pub struct AppSettings {
 
 fn default_true() -> bool { true }
 fn default_smart_filter_minutes() -> u32 { 5 }
+
+/// A buffer's own say on filtered lines, over the setting's.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum FilterMode {
+    Show,
+    Hide,
+}
 fn default_nicklist_width() -> f32 { 180.0 }
 fn default_prefix_suffix() -> String { "│".to_string() }
 fn default_file_share_duration() -> String { "day".to_string() }
@@ -818,6 +829,7 @@ impl Default for AppSettings {
             show_filtered_lines: false,
             smart_filter: true,
             smart_filter_minutes: default_smart_filter_minutes(),
+            buffer_filter: HashMap::new(),
             colored_nicks: true,
             group_nicklist: false,
             theme: crate::ui::theme::default_theme(),
@@ -920,6 +932,7 @@ pub struct WeeChatApp {
     pub(crate) show_filtered_lines: bool,
     pub(crate) smart_filter: bool,
     pub(crate) smart_filter_minutes: u32,
+    pub(crate) buffer_filter: HashMap<String, FilterMode>,
     /// What each IRC, soju, ZNC or Injected buffer's smart filter remembers.
     pub(crate) smart_filters: HashMap<String, crate::relay::smartfilter::SmartFilter>,
     pub(crate) colored_nicks: bool,
@@ -1249,6 +1262,7 @@ impl WeeChatApp {
             show_filtered_lines: settings.show_filtered_lines,
             smart_filter: settings.smart_filter,
             smart_filter_minutes: settings.smart_filter_minutes,
+            buffer_filter: settings.buffer_filter,
             smart_filters: HashMap::new(),
             colored_nicks: settings.colored_nicks,
             group_nicklist: settings.group_nicklist,
@@ -1617,6 +1631,32 @@ impl WeeChatApp {
         self.record_local_read(&id);
     }
 
+    /// The buffer's own choice on filtered lines, if it has made one.
+    pub(crate) fn buffer_filter_mode(&self, buffer_id: &str) -> Option<FilterMode> {
+        let (key, _) = self.saved_state_key(buffer_id)?;
+        self.buffer_filter.get(&key).copied()
+    }
+
+    /// Whether filtered lines show in the buffer: its own choice, else the setting.
+    pub(crate) fn shows_filtered(&self, buffer_id: &str) -> bool {
+        match self.buffer_filter_mode(buffer_id) {
+            Some(FilterMode::Show) => true,
+            Some(FilterMode::Hide) => false,
+            None => self.show_filtered_lines,
+        }
+    }
+
+    /// Sets or clears (None) the buffer's own choice on filtered lines. A choice the
+    /// setting already makes is cleared instead of kept.
+    pub(crate) fn set_buffer_filter(&mut self, buffer_id: &str, mode: Option<FilterMode>) {
+        let Some((key, _)) = self.saved_state_key(buffer_id) else { return };
+        let same_as_setting = mode.is_some_and(|m| (m == FilterMode::Show) == self.show_filtered_lines);
+        match mode {
+            Some(m) if !same_as_setting => { self.buffer_filter.insert(key, m); }
+            _ => { self.buffer_filter.remove(&key); }
+        }
+    }
+
     /// Opens a buffer scrolled to one of its lines, which is marked for a moment. The
     /// chat view starts a little above the line so there is context, and the lines
     /// before that stay out of the view until "Load older messages".
@@ -1933,6 +1973,7 @@ impl eframe::App for WeeChatApp {
             show_filtered_lines: self.show_filtered_lines,
             smart_filter: self.smart_filter,
             smart_filter_minutes: self.smart_filter_minutes,
+            buffer_filter: self.buffer_filter.clone(),
             colored_nicks: self.colored_nicks,
             group_nicklist: self.group_nicklist,
             theme: self.theme.clone(),
@@ -2363,6 +2404,7 @@ impl eframe::App for WeeChatApp {
         let mut next_drag_buffer_id: Option<String> = None;
         // (buffer, full name, level): None mutes.
         let mut pending_mute: Option<(String, String, Option<NotifyLevel>)> = None;
+        let mut pending_filter: Option<(String, Option<FilterMode>)> = None;
         let mut pending_topic_edit: Option<String> = None;
         // An oper command to finish in a buffer's input line, and a server marked as one
         // where we're an oper (or not).
@@ -2753,6 +2795,19 @@ impl eframe::App for WeeChatApp {
                                             }
                                         }
                                     });
+                                    let own_filter = self.buffer_filter_mode(&buf_id);
+                                    ui.menu_button("Filtered lines", |ui| {
+                                        for (mode, label, tip) in [
+                                            (None, "Follow the setting", "Joins, parts and the like show as Settings, Messages says"),
+                                            (Some(FilterMode::Show), "Always show", "Show the lines the filters hide in this buffer"),
+                                            (Some(FilterMode::Hide), "Always hide", "Hide them in this buffer"),
+                                        ] {
+                                            if ui.radio(own_filter == mode, label).on_hover_text(tip).clicked() {
+                                                pending_filter = Some((buf_id.clone(), mode));
+                                                ui.close();
+                                            }
+                                        }
+                                    });
                                     ui.separator();
                                     if buf_kind == "channel" {
                                         if ui.button("Edit Topic…").clicked() {
@@ -2879,6 +2934,9 @@ impl eframe::App for WeeChatApp {
 
         if let Some(buf_id) = pending_topic_edit {
             self.open_topic_editor(&buf_id);
+        }
+        if let Some((buf_id, mode)) = pending_filter {
+            self.set_buffer_filter(&buf_id, mode);
         }
         if let Some((buf_id, full_name, level)) = pending_mute {
             let key = self.saved_state_key(&buf_id).map(|(key, _)| key).unwrap_or(full_name);
@@ -3489,13 +3547,20 @@ impl eframe::App for WeeChatApp {
                     }
 
                     // fset's title is its terminal key help; the panel has its own toolbar.
-                    if self.show_titlebar && !is_fset_buffer && (!current_buffer_topic.is_empty() || !current_buffer_modes.is_empty()) {
+                    // Lines the filters hide, or show because the buffer says so.
+                    let filtered_count = current_buffer_messages.as_ref().map_or(0, |m| m.iter().filter(|l| !l.displayed).count());
+                    let showing_filtered = current_buffer_id.as_deref().is_some_and(|id| self.shows_filtered(id));
+                    if self.show_titlebar && !is_fset_buffer && (!current_buffer_topic.is_empty() || !current_buffer_modes.is_empty() || filtered_count > 0) {
                         // One line's height and a hairline under it: no box, no separator gap.
                         let topic_frame = Frame::NONE
                             .fill(surface_color.linear_multiply(0.3))
                             .inner_margin(Margin::symmetric(16, 3))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
+                                // Room on the right for the filtered-lines count.
+                                if filtered_count > 0 {
+                                    ui.set_max_width(ui.available_width() - 130.0);
+                                }
                                 ui.horizontal_wrapped(|ui| {
                                     if !current_buffer_modes.is_empty() {
                                         ui.label(egui::RichText::new(format!("[{}]", current_buffer_modes)).color(accent_color).small());
@@ -3529,6 +3594,20 @@ impl eframe::App for WeeChatApp {
                             });
                         let r = topic_frame.response.rect;
                         ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, border_color));
+                        if filtered_count > 0 {
+                            let text = if showing_filtered { format!("showing {filtered_count} filtered") } else { format!("{filtered_count} filtered") };
+                            let galley = ui.painter().layout_no_wrap(text, FontId::proportional(11.0), if showing_filtered { accent_color } else { text_muted });
+                            let rect = Rect::from_min_size(egui::pos2(r.right() - 16.0 - galley.size().x, r.center().y - galley.size().y / 2.0), galley.size());
+                            let resp = ui.interact(rect.expand(3.0), ui.scope_id().with("filtered_lines_toggle"), egui::Sense::click())
+                                .on_hover_text(if showing_filtered { "Click to hide filtered lines in this buffer" } else { "Click to show filtered lines in this buffer" });
+                            if resp.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
+                            ui.painter().galley(rect.min, galley, text_muted);
+                            if resp.clicked() {
+                                if let Some(id) = current_buffer_id.clone() {
+                                    self.set_buffer_filter(&id, Some(if showing_filtered { FilterMode::Hide } else { FilterMode::Show }));
+                                }
+                            }
+                        }
                     }
 
                     // -------------------------------------------------------
@@ -3565,6 +3644,7 @@ impl eframe::App for WeeChatApp {
                         _ => 0,
                     };
                     let mut show_older_in_memory = false;
+                    let show_filtered_here = current_buffer_id.as_deref().is_some_and(|id| self.shows_filtered(id));
 
                     // The chat runs up to the nick list; a bar on that border looks like
                     // the nick list's own.
@@ -3620,7 +3700,7 @@ impl eframe::App for WeeChatApp {
                                     Some(self.search_text.to_lowercase())
                                 };
                                 for line in messages.iter().skip(chat_start) {
-                                    if !self.show_filtered_lines && !line.displayed { continue; }
+                                    if !show_filtered_here && !line.displayed { continue; }
 
                                     if let Some(q) = &search_query {
                                         if !line.plain_prefix_lower.contains(q) && !line.plain_message_lower.contains(q) { continue; }
