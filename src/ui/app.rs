@@ -111,15 +111,28 @@ async fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
     // Fail on 4xx/5xx instead of trying to decode the error page as an image.
     let resp = client.get(url).send().await.map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?;
-    if resp.content_length().is_some_and(|n| n as usize > MAX_IMAGE_BYTES) {
-        return Err("image too large".to_string());
-    }
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err("image too large".to_string());
-    }
-    Ok(bytes.to_vec())
+    read_capped(resp, MAX_IMAGE_BYTES).await
 }
+
+/// A response body, or an error as soon as it passes `max` bytes. The length header is
+/// checked first, but a server can leave it out or lie about it, so the bytes are counted
+/// as they arrive and the rest is never read.
+async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        return Err("response too large".to_string());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if bytes.len() + chunk.len() > max {
+            return Err("response too large".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// An oEmbed answer is about 1 KB.
+const MAX_OEMBED_BYTES: usize = 64 * 1024;
 
 /// Most of a page we read looking for its preview tags.
 const MAX_PREVIEW_HTML_BYTES: usize = 1024 * 1024;
@@ -142,11 +155,11 @@ async fn fetch_youtube_preview(client: &reqwest::Client, url: &str) -> Result<Li
         thumbnail_url: Option<String>,
     }
     let encoded: String = url::form_urlencoded::byte_serialize(url.as_bytes()).collect();
-    let body = client
+    let resp = client
         .get(format!("https://www.youtube.com/oembed?format=json&url={}", encoded))
         .send().await.map_err(|e| e.to_string())?
-        .error_for_status().map_err(|e| e.to_string())?
-        .bytes().await.map_err(|e| e.to_string())?;
+        .error_for_status().map_err(|e| e.to_string())?;
+    let body = read_capped(resp, MAX_OEMBED_BYTES).await?;
     let oembed: OEmbed = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     if oembed.title.is_none() {
         return Err("no preview data".to_string());
@@ -4217,6 +4230,7 @@ impl eframe::App for WeeChatApp {
 
 #[cfg(test)]
 mod tests {
+    use super::read_capped;
     use super::{extract_html_title, extract_meta_description, extract_og_tag, BackendType, ConnectionProfile, WeeChatApp};
 
     #[test]
@@ -4227,6 +4241,25 @@ mod tests {
         assert_eq!(extract_og_tag("İİİ<meta property=\"og:title\" content=\"éé\">", "og:title").as_deref(), Some("éé"));
         assert_eq!(extract_meta_description("İ<META NAME='Description' CONTENT='é'>").as_deref(), Some("é"));
         assert_eq!(extract_meta_description("İ<meta name=\"description\" content=\"d&amp;é\">").as_deref(), Some("d&é"));
+    }
+
+    /// A response that sends `chunks` of 10 bytes with no Content-Length, as a chunked
+    /// reply does.
+    fn chunked(chunks: usize) -> reqwest::Response {
+        let stream = futures_util::stream::iter((0..chunks).map(|_| Ok::<_, std::io::Error>(vec![7u8; 10])));
+        reqwest::Response::from(http::Response::new(reqwest::Body::wrap_stream(stream)))
+    }
+
+    #[tokio::test]
+    async fn a_body_is_read_up_to_the_cap_and_no_further() {
+        assert_eq!(read_capped(chunked(3), 30).await.map(|b| b.len()), Ok(30));
+        assert_eq!(read_capped(chunked(3), 29).await, Err("response too large".to_string()));
+        // A body far past the cap stops at the cap's chunk, without reading it all.
+        assert!(read_capped(chunked(1_000_000), 25).await.is_err());
+        assert_eq!(read_capped(chunked(0), 25).await, Ok(Vec::new()));
+        // A known length over the cap fails before any bytes are read.
+        assert!(read_capped(reqwest::Response::from(http::Response::new("x".repeat(99))), 50).await.is_err());
+        assert!(read_capped(reqwest::Response::from(http::Response::new("x".repeat(50))), 50).await.is_ok());
     }
 
     #[test]
