@@ -1,6 +1,6 @@
 //! Mentions: the lines that highlighted us, from every buffer, in an entry of its
 //! own at the top of the buffer list, like WeeChat's highmon on every connection.
-//! A click on a line goes to its buffer.
+//! A click on a line goes to its buffer, scrolled to that line.
 
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, FontId, Label, RichText, text::LayoutJob};
@@ -194,13 +194,13 @@ impl WeeChatApp {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     if resp.on_hover_text(format!("Go to {}", buffer.full_name)).clicked() {
-                        chosen = Some(buffer.id.clone());
+                        chosen = Some((buffer.id.clone(), line.id.clone()));
                     }
                 }
             });
         });
-        if let Some(id) = chosen {
-            self.select_buffer(id);
+        if let Some((buffer_id, line_id)) = chosen {
+            self.show_line(buffer_id, line_id);
         }
     }
 }

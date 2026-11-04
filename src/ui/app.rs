@@ -343,6 +343,10 @@ fn cap_map<V>(map: &mut HashMap<String, V>, cap: usize) {
     }
 }
 pub const LOAD_MORE_LINES: usize = 300;
+/// Lines drawn above a line the chat jumps to.
+const JUMP_CONTEXT_LINES: usize = 40;
+/// How long the line the chat jumped to stays marked.
+const JUMP_MARK_SECS: f32 = 2.5;
 pub const MAX_STORED_LINES: usize = 10_000;
 
 /// Reorder `buffers` by moving the dragged item (and its whole server group when it is a server
@@ -1045,6 +1049,9 @@ pub struct WeeChatApp {
     /// Where each buffer's chat was left: its first drawn line, and whether it was at
     /// the bottom. A buffer scrolled up opens where it was.
     pub(crate) chat_positions: HashMap<String, (Option<String>, bool)>,
+    /// A line to scroll the chat to and mark for a moment: its id, when the jump
+    /// started, and whether the view has scrolled to it yet. Set by a click in Mentions.
+    pub(crate) jump_to_line: Option<(String, std::time::Instant, bool)>,
     /// Each WeeChat buffer's local variables but `lag`, as last fetched: a local
     /// variable event that only moves the lag doesn't fetch the buffer list again.
     pub(crate) weechat_localvars: HashMap<String, String>,
@@ -1309,6 +1316,7 @@ impl WeeChatApp {
             prefix_col_widths: HashMap::new(),
             chat_view_start: None,
             chat_positions: HashMap::new(),
+            jump_to_line: None,
             weechat_localvars: HashMap::new(),
             nick_style_cache: None,
             ctx_menu_state: None,
@@ -1545,6 +1553,7 @@ impl WeeChatApp {
             self.mentions_viewed();
         }
         self.selected_buffer_id = Some(id.clone());
+        self.jump_to_line = None;
         self.server_search = None;
         self.focus_input = true;
         self.selected_view_since = Some(std::time::Instant::now());
@@ -1582,6 +1591,21 @@ impl WeeChatApp {
             }
         }
         self.record_local_read(&id);
+    }
+
+    /// Opens a buffer scrolled to one of its lines, which is marked for a moment. The
+    /// chat view starts a little above the line so there is context, and the lines
+    /// before that stay out of the view until "Load older messages".
+    pub(crate) fn show_line(&mut self, buffer_id: String, line_id: String) {
+        self.select_buffer(buffer_id.clone());
+        let start = self.buffer_by_id(&buffer_id).and_then(|b| {
+            let i = b.messages.iter().position(|l| l.id == line_id)?;
+            Some(b.messages[i.saturating_sub(JUMP_CONTEXT_LINES)].id.clone())
+        });
+        if let Some(start) = start {
+            self.chat_view_start = Some(start);
+            self.jump_to_line = Some((line_id, std::time::Instant::now(), false));
+        }
     }
 
     /// The key a buffer's hidden and muted state is saved under, and whether its
@@ -3640,6 +3664,18 @@ impl eframe::App for WeeChatApp {
                                     } else {
                                         Color32::TRANSPARENT
                                     };
+                                    // The line a click in Mentions jumped to, fading out.
+                                    let jump_fade = self.jump_to_line.as_ref()
+                                        .filter(|(id, _, _)| *id == line.id)
+                                        .map(|(_, since, _)| 1.0 - since.elapsed().as_secs_f32() / JUMP_MARK_SECS)
+                                        .filter(|f| *f > 0.0);
+                                    let row_bg = match jump_fade {
+                                        Some(f) => {
+                                            ctx.request_repaint();
+                                            row_bg.blend(accent_color.gamma_multiply(0.45 * f))
+                                        }
+                                        None => row_bg,
+                                    };
                                     let grouped = self.group_messages && continues_group(prev_shown, line);
                                     prev_shown = Some(line);
                                     // Grouped rows reserve the timestamp and nick columns as empty space of
@@ -3917,6 +3953,12 @@ impl eframe::App for WeeChatApp {
                                     // Detect secondary (right) click via raw input — bypasses the
                                     // egui hit test so image/expand buttons still win primary clicks.
                                     let row_rect = row_resp.response.rect;
+                                    if let Some((id, _, scrolled)) = &mut self.jump_to_line {
+                                        if *id == line.id && !*scrolled {
+                                            row_resp.response.scroll_to_me(Some(egui::Align::Center));
+                                            *scrolled = true;
+                                        }
+                                    }
                                     if let Some((ts_rect, ts)) = hidden_timestamp {
                                         if ui.rect_contains_pointer(row_rect) {
                                             ui.painter().text(ts_rect.left_top(), egui::Align2::LEFT_TOP, ts, font_id.clone(), text_muted);
