@@ -551,6 +551,16 @@ impl ConnectionProfile {
         }
     }
 
+    /// Whether connecting sends the password where anyone on the network path can read
+    /// it: IRC or WeeChat with SSL off, to a host that is not this machine, and not
+    /// through an SSH tunnel. Injected refuses plain connections to other hosts.
+    pub fn sends_password_in_clear(&self) -> bool {
+        self.backend_type != BackendType::Injected
+            && !self.use_ssl
+            && !self.ssh_enabled
+            && !crate::ui::url_safety::is_loopback_host(&self.host)
+    }
+
     /// The SSH secret this profile needs before connecting: the password, or the key
     /// file's passphrase when it has one. None when it logs in another way.
     pub fn ssh_secret_needed(&self) -> Option<&'static str> {
@@ -1948,6 +1958,9 @@ impl WeeChatApp {
         conn.connection_log.push_back(format!("[{}]  Connecting to {}://{}:{}{}", ts, proto, profile.host, relay_port, path));
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         conn.connection_log.push_back(format!("[{}]  SSL/TLS: {}", ts, if profile.use_ssl { "enabled" } else { "disabled" }));
+        if profile.sends_password_in_clear() && !password.is_empty() {
+            conn.connection_log.push_back(format!("[{}]  Warning: SSL is off, so the password is sent unencrypted", ts));
+        }
 
         if self.selected_conn_log.is_none() {
             self.selected_conn_log = Some(prefix.clone());
@@ -4202,7 +4215,24 @@ impl eframe::App for WeeChatApp {
 
 #[cfg(test)]
 mod tests {
-    use super::WeeChatApp;
+    use super::{BackendType, ConnectionProfile, WeeChatApp};
+
+    #[test]
+    fn warns_only_when_a_password_would_cross_a_network_in_clear() {
+        let profile = |backend_type, host: &str, use_ssl, ssh_enabled| ConnectionProfile {
+            backend_type, host: host.into(), use_ssl, ssh_enabled, ..Default::default()
+        };
+        // SSL off to another machine: IRC and WeeChat both.
+        assert!(profile(BackendType::Soju, "irc.example.com", false, false).sends_password_in_clear());
+        assert!(profile(BackendType::WeeChat, "192.168.1.20", false, false).sends_password_in_clear());
+        // SSL on, this machine, or an SSH tunnel keep it off the wire.
+        assert!(!profile(BackendType::Soju, "irc.example.com", true, false).sends_password_in_clear());
+        assert!(!profile(BackendType::WeeChat, "localhost", false, false).sends_password_in_clear());
+        assert!(!profile(BackendType::WeeChat, "127.0.0.1", false, false).sends_password_in_clear());
+        assert!(!profile(BackendType::WeeChat, "10.0.0.5", false, true).sends_password_in_clear());
+        // Injected refuses plain connections to other hosts by itself.
+        assert!(!profile(BackendType::Injected, "injected-irc.com", false, false).sends_password_in_clear());
+    }
 
     /// Two connections: "a" with networks libera and oftc, "b" with its own libera.
     fn list() -> Vec<crate::relay::models::Buffer> {

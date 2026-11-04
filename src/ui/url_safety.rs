@@ -41,6 +41,15 @@ pub fn is_safe_public_url(url_str: &str) -> bool {
     true
 }
 
+/// Whether `host` is this machine: localhost, a 127.x.x.x address or ::1, written bare
+/// or with the brackets of an IPv6 URL host. A connection to one never leaves the
+/// machine, so nothing on a network can read it.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(&host);
+    host == "localhost" || host.ends_with(".localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -99,6 +108,16 @@ mod tests {
         assert!(!is_safe_public_url("ftp://example.com/"));
         assert!(!is_safe_public_url("javascript:alert(1)"));
         assert!(!is_safe_public_url("not a url"));
+    }
+
+    #[test]
+    fn loopback_hosts() {
+        for host in ["localhost", "LocalHost", "localhost.", "irc.localhost", "127.0.0.1", "127.9.9.9", "::1", "[::1]", " 127.0.0.1 "] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in ["", "example.com", "192.168.1.5", "10.0.0.1", "0.0.0.0", "notlocalhost", "localhost.example.com", "[fe80::1]"] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
     }
 
     #[test]

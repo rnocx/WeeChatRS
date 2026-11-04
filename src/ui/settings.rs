@@ -1385,6 +1385,10 @@ impl WeeChatApp {
                             ui.add_space(12.0);
                             if self.editing_profile.backend_type != BackendType::Injected { ui.checkbox(&mut self.editing_profile.ssh_enabled, "SSH Tunnel"); }
                         });
+                        if self.editing_profile.sends_password_in_clear() {
+                            ui.label(RichText::new(format!("{} Without SSL the password is sent unencrypted, and anyone on the network between you and the server can read it. Turn SSL on, or use an SSH tunnel.", icons::WARNING))
+                                .small().color(Color32::from_rgb(230, 150, 40)));
+                        }
                         if self.editing_profile.backend_type != BackendType::Injected && self.editing_profile.ssh_enabled {
                             self.ssh_tunnel_form(ui);
                         }
