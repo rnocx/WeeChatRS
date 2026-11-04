@@ -102,12 +102,14 @@ fn decode_entities(s: &str) -> String {
 const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 
 async fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        // Many hosts (e.g. Wikimedia) answer 403 to requests without a User-Agent.
-        .user_agent(concat!("Mozilla/5.0 (compatible; WeeChatRS/", env!("CARGO_PKG_VERSION"), ")"))
-        .build()
-        .map_err(|e| e.to_string())?;
+    if !is_safe_public_url(url) {
+        return Err("blocked: non-public URL".to_string());
+    }
+    // Many hosts (e.g. Wikimedia) answer 403 to requests without a User-Agent.
+    let client = crate::ui::url_safety::public_client(
+        std::time::Duration::from_secs(15),
+        concat!("Mozilla/5.0 (compatible; WeeChatRS/", env!("CARGO_PKG_VERSION"), ")"),
+    ).map_err(|e| e.to_string())?;
     // Fail on 4xx/5xx instead of trying to decode the error page as an image.
     let resp = client.get(url).send().await.map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?;
@@ -176,11 +178,10 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
     if !is_safe_public_url(&url) {
         return Err("blocked: non-public URL".to_string());
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("Mozilla/5.0 WeeChatRS/0.1 (link preview)")
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::ui::url_safety::public_client(
+        std::time::Duration::from_secs(10),
+        "Mozilla/5.0 WeeChatRS/0.1 (link preview)",
+    ).map_err(|e| e.to_string())?;
 
     if is_youtube_url(&url) {
         if let Ok(preview) = fetch_youtube_preview(&client, &url).await {

@@ -1,14 +1,16 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 // Reject URLs that would let a remote chat participant point us at internal
 // infrastructure (cloud metadata, private LAN, the loopback interface, etc.).
 //
-// Note: this validates by URL host string only. A hostile domain whose A/AAAA
-// records resolve to a private IP at the moment of connect (DNS rebinding) is
-// not blocked here; covering that requires a custom resolver. This guard does
-// stop the common in-channel attacks where an attacker pastes a literal-IP or
-// `localhost` URL.
+// `is_safe_public_url` looks at the URL text only, so it stops a pasted literal address
+// or `localhost`. A name that resolves to a private address, and a public URL that
+// redirects to one, are stopped by `public_client`: it re-checks every redirect and
+// resolves names itself, dropping any address that is not public. Fetch untrusted URLs
+// with that client and nothing else.
 pub fn is_safe_public_url(url_str: &str) -> bool {
     let url = match Url::parse(url_str) {
         Ok(u) => u,
@@ -41,6 +43,52 @@ pub fn is_safe_public_url(url_str: &str) -> bool {
     true
 }
 
+/// A redirect hops at most this many times.
+const MAX_REDIRECTS: usize = 5;
+
+/// Whether a redirect from `previous` hops to `next` may be followed.
+fn redirect_allowed(next: &Url, hops: usize) -> bool {
+    hops < MAX_REDIRECTS && is_safe_public_url(next.as_str())
+}
+
+/// Resolves names for `public_client`, keeping only public addresses. The connection is
+/// made to the addresses returned here, so a name cannot be one thing when checked and
+/// another when connected to (DNS rebinding).
+struct PublicOnlyResolver;
+
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let public: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0)).await?
+                .filter(|addr| is_public_ip(addr.ip()))
+                .collect();
+            if public.is_empty() {
+                return Err("the host only resolves to non-public addresses".into());
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// An HTTP client for a URL a chat participant chose. It refuses redirects to anything
+/// `is_safe_public_url` refuses, and connects only to public addresses. Check the first
+/// URL with `is_safe_public_url` before using it: a literal address in it is not
+/// resolved, so only that check sees it.
+pub fn public_client(timeout: Duration, user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(user_agent)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if redirect_allowed(attempt.url(), attempt.previous().len()) {
+                attempt.follow()
+            } else {
+                attempt.error("redirected to a non-public address, or too many times")
+            }
+        }))
+        .dns_resolver(Arc::new(PublicOnlyResolver))
+        .build()
+}
+
 /// Whether `host` is this machine: localhost, a 127.x.x.x address or ::1, written bare
 /// or with the brackets of an IPv6 URL host. A connection to one never leaves the
 /// machine, so nothing on a network can read it.
@@ -50,7 +98,7 @@ pub fn is_loopback_host(host: &str) -> bool {
     host == "localhost" || host.ends_with(".localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-fn is_public_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -118,6 +166,55 @@ mod tests {
         for host in ["", "example.com", "192.168.1.5", "10.0.0.1", "0.0.0.0", "notlocalhost", "localhost.example.com", "[fe80::1]"] {
             assert!(!is_loopback_host(host), "{host}");
         }
+    }
+
+    #[test]
+    fn redirects_follow_the_same_rule_and_stop_after_five() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        assert!(redirect_allowed(&url("https://example.com/next"), 0));
+        assert!(redirect_allowed(&url("https://example.com/next"), 4));
+        assert!(!redirect_allowed(&url("https://example.com/next"), 5));
+        for target in ["http://127.0.0.1/", "http://192.168.1.1/admin", "http://169.254.169.254/latest/meta-data/", "http://[::1]/", "http://localhost/", "file:///etc/passwd", "ftp://example.com/"] {
+            assert!(!redirect_allowed(&url(target), 0), "{target}");
+        }
+    }
+
+    /// A server on this machine that answers every request with a redirect to `location`.
+    async fn redirecting_to(location: &'static str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let reply = format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_public_url_cannot_redirect_the_client_to_a_private_address() {
+        let client = public_client(Duration::from_secs(5), "test").unwrap();
+        for target in ["http://192.168.1.1/admin", "http://169.254.169.254/latest/meta-data/", "http://127.0.0.1:1/"] {
+            let port = redirecting_to(target).await;
+            // The first hop is a literal address on this machine: the caller's job to
+            // have checked it. What matters is that the redirect from it is refused.
+            let err = client.get(format!("http://127.0.0.1:{port}/")).send().await.unwrap_err();
+            assert!(err.is_redirect(), "{target}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_name_that_resolves_to_this_machine_is_not_connected_to() {
+        let port = redirecting_to("https://example.com/").await;
+        let client = public_client(Duration::from_secs(5), "test").unwrap();
+        // localhost resolves to 127.0.0.1 and ::1, where the server above is listening.
+        let err = client.get(format!("http://localhost:{port}/")).send().await.unwrap_err();
+        assert!(err.is_connect(), "{err:?}");
+        assert!(format!("{err:?}").contains("non-public"), "{err:?}");
     }
 
     #[test]
