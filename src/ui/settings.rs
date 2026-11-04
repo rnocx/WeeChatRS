@@ -431,7 +431,8 @@ impl WeeChatApp {
 
     fn font_family_picker(&mut self, ui: &mut egui::Ui, p: &Palette) {
         let selected_label = if self.font_name.is_empty() { DEFAULT_CHAT_FONT.to_string() } else { self.font_name.clone() };
-        let mut new_font: Option<(String, String)> = None;
+        // (family, path, face index)
+        let mut new_font: Option<(String, String, u32)> = None;
         let combo_resp = egui::ComboBox::from_id_salt("font_family_combo")
             .selected_text(&selected_label)
             .width(220.0)
@@ -446,14 +447,15 @@ impl WeeChatApp {
                 }
                 ui.separator();
                 if ui.selectable_label(self.font_name.is_empty(), DEFAULT_CHAT_FONT).clicked() {
-                    new_font = Some((String::new(), String::new()));
+                    new_font = Some((String::new(), String::new(), 0));
                 }
                 ui.separator();
                 let query = self.font_search.to_lowercase();
-                for (name, path) in &self.available_fonts {
-                    if query.is_empty() || name.to_lowercase().contains(&query) {
-                        if ui.selectable_label(name == &self.font_name, name.as_str()).clicked() {
-                            new_font = Some((name.clone(), path.clone()));
+                for family in &self.available_fonts {
+                    if query.is_empty() || family.name.to_lowercase().contains(&query) {
+                        if ui.selectable_label(family.name == self.font_name, family.name.as_str()).clicked() {
+                            let face = family.regular();
+                            new_font = Some((family.name.clone(), face.path.clone(), face.index));
                         }
                     }
                 }
@@ -461,6 +463,7 @@ impl WeeChatApp {
         if combo_resp.inner.is_none() {
             self.font_search.clear();
         }
+        self.font_weight_picker(ui);
         if ui.add(
             egui::Button::new(RichText::new("Browse…").color(p.accent))
                 .fill(p.secondary_fill)
@@ -470,13 +473,42 @@ impl WeeChatApp {
                 let path_str = path.to_string_lossy().into_owned();
                 let name = fonts::family_from_file(&path_str)
                     .unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
-                new_font = Some((name, path_str));
+                new_font = Some((name, path_str, 0));
             }
         }
-        if let Some((name, path)) = new_font {
+        if let Some((name, path, index)) = new_font {
             self.font_name = name;
             self.font_path = path;
+            self.font_index = index;
             self.font_search.clear();
+        }
+    }
+
+    /// The weights of the chosen family, when it has more than one: thin fonts such as
+    /// Iosevka look grey at Regular, so Medium or SemiBold matter.
+    fn font_weight_picker(&mut self, ui: &mut egui::Ui) {
+        let Some(family) = self.available_fonts.iter().find(|f| f.name == self.font_name) else { return };
+        if family.faces.len() < 2 {
+            return;
+        }
+        let current = family.faces.iter()
+            .find(|f| f.path == self.font_path && f.index == self.font_index)
+            .map_or("Regular", |f| f.style.as_str());
+        let mut picked = None;
+        egui::ComboBox::from_id_salt("font_weight_combo")
+            .selected_text(current)
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                for face in &family.faces {
+                    let selected = face.path == self.font_path && face.index == self.font_index;
+                    if ui.selectable_label(selected, face.style.as_str()).clicked() {
+                        picked = Some((face.path.clone(), face.index));
+                    }
+                }
+            });
+        if let Some((path, index)) = picked {
+            self.font_path = path;
+            self.font_index = index;
         }
     }
 

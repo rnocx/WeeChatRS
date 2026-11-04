@@ -700,6 +700,9 @@ pub struct AppSettings {
     pub font_name: String,
     #[serde(default)]
     pub font_path: String,
+    /// Which face in `font_path`, for a font collection (`.ttc`).
+    #[serde(default)]
+    pub font_index: u32,
     #[serde(default)]
     pub muted_buffer_names: HashSet<String>,
     /// Buffers whose notify level isn't the default, by the same key as muted ones.
@@ -821,6 +824,7 @@ impl Default for AppSettings {
             save_password: false,
             font_name: String::new(),
             font_path: String::new(),
+            font_index: 0,
             muted_buffer_names: HashSet::new(),
             buffer_notify: HashMap::new(),
             highlight_words: Vec::new(),
@@ -970,8 +974,9 @@ pub struct WeeChatApp {
     // Font selection
     pub(crate) font_name: String,
     pub(crate) font_path: String,
-    pub(crate) applied_font_path: String,
-    pub(crate) available_fonts: Vec<(String, String)>,
+    pub(crate) font_index: u32,
+    pub(crate) applied_font: (String, u32),
+    pub(crate) available_fonts: Vec<crate::ui::fonts::FontFamilyEntry>,
 
     // Tracks when the current buffer was selected; drives the unread divider transition.
     pub(crate) selected_view_since: Option<std::time::Instant>,
@@ -1173,7 +1178,7 @@ impl WeeChatApp {
             profile.migrate_ssh_server();
         }
 
-        crate::ui::fonts::apply(&cc.egui_ctx, &settings.font_path);
+        crate::ui::fonts::apply(&cc.egui_ctx, &settings.font_path, settings.font_index);
         let available_fonts = crate::ui::fonts::scan_system_fonts();
 
         let adaptive_theme = settings.adaptive_theme && crate::ui::wallpaper::supported();
@@ -1262,7 +1267,8 @@ impl WeeChatApp {
             cleared_buffer_ids: settings.cleared_buffer_ids,
             font_name: settings.font_name,
             font_path: settings.font_path.clone(),
-            applied_font_path: settings.font_path,
+            font_index: settings.font_index,
+            applied_font: (settings.font_path, settings.font_index),
             available_fonts,
             selected_view_since: None,
             muted_buffer_names: settings.muted_buffer_names,
@@ -1908,6 +1914,7 @@ impl eframe::App for WeeChatApp {
             save_password: false,
             font_name: self.font_name.clone(),
             font_path: self.font_path.clone(),
+            font_index: self.font_index,
             muted_buffer_names: self.muted_buffer_names.clone(),
             buffer_notify: self.buffer_notify.clone(),
             highlight_words: self.highlight_words.clone(),
@@ -2198,9 +2205,9 @@ impl eframe::App for WeeChatApp {
         if open_connections_shortcut { self.open_connections(ctx); }
         if let Some(n) = jump_buffer_n { self.jump_buffer_by_number(n); }
 
-        if self.font_path != self.applied_font_path {
-            crate::ui::fonts::apply(ctx, &self.font_path);
-            self.applied_font_path = self.font_path.clone();
+        if (self.font_path.as_str(), self.font_index) != (self.applied_font.0.as_str(), self.applied_font.1) {
+            crate::ui::fonts::apply(ctx, &self.font_path, self.font_index);
+            self.applied_font = (self.font_path.clone(), self.font_index);
         }
 
         let mut style = (*ctx.global_style()).clone();
