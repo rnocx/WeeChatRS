@@ -20,6 +20,7 @@ pub(crate) mod quick_switcher;
 pub(crate) mod mentions;
 pub(crate) mod channel_list;
 pub(crate) mod lag;
+pub(crate) mod nicklist;
 pub(crate) mod alias;
 pub(crate) mod paste;
 pub(crate) mod privatebin;

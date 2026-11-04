@@ -295,6 +295,8 @@ impl WeeChatApp {
         ui.checkbox(&mut self.show_channel_modes, "Show channel modes (such as [+nt]) before the topic");
         ui.checkbox(&mut self.show_filtered_lines, "Show filtered lines");
         ui.checkbox(&mut self.colored_nicks, "Coloured nicknames in the nick list");
+        ui.checkbox(&mut self.group_nicklist, "Group the nick list by rank");
+        hint(ui, "Owners, Admins, Operators, Half-ops, Voiced and Users, each under its own heading.");
         ui.checkbox(&mut self.emoji_rendering, "Colour emoji rendering");
         hint(ui, "Requires the emojinize script on the WeeChat server.");
 

@@ -652,6 +652,8 @@ pub struct AppSettings {
     pub use_ssl: bool,
     pub show_filtered_lines: bool,
     pub colored_nicks: bool,
+    #[serde(default)]
+    pub group_nicklist: bool,
     pub theme: AppTheme,
     pub font_size: f32,
     /// Use the chat font for the whole UI, not just chat content. Renamed from
@@ -799,6 +801,7 @@ impl Default for AppSettings {
             use_ssl: true,
             show_filtered_lines: false,
             colored_nicks: true,
+            group_nicklist: false,
             theme: crate::ui::theme::default_theme(),
             font_size: 14.0,
             monospace_ui: false,
@@ -897,6 +900,8 @@ pub struct WeeChatApp {
     pub(crate) connections_window_pos: Option<egui::Pos2>,
     pub(crate) show_filtered_lines: bool,
     pub(crate) colored_nicks: bool,
+    /// Nicks under rank headings in the nick list.
+    pub(crate) group_nicklist: bool,
     pub(crate) theme: AppTheme,
     pub(crate) font_size: f32,
     pub(crate) monospace_ui: bool,
@@ -1216,6 +1221,7 @@ impl WeeChatApp {
             connections_window_pos: None,
             show_filtered_lines: settings.show_filtered_lines,
             colored_nicks: settings.colored_nicks,
+            group_nicklist: settings.group_nicklist,
             theme: settings.theme,
             font_size: settings.font_size,
             monospace_ui: settings.monospace_ui,
@@ -1878,6 +1884,7 @@ impl eframe::App for WeeChatApp {
             use_ssl: false,
             show_filtered_lines: self.show_filtered_lines,
             colored_nicks: self.colored_nicks,
+            group_nicklist: self.group_nicklist,
             theme: self.theme.clone(),
             font_size: self.font_size,
             monospace_ui: self.monospace_ui,
@@ -2961,14 +2968,28 @@ impl eframe::App for WeeChatApp {
                     // content width after every resize.
                     ui.set_min_width(ui.available_width());
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("NICKS").strong().color(accent_color).size(11.0));
+                    let user_count = current_buffer_nicks.as_ref().map_or(0, |n| n.len());
+                    ui.label(egui::RichText::new(format!("USERS ({user_count})")).strong().color(accent_color).size(11.0));
                     ui.add_space(8.0);
                     // As wide as the panel: shrunk to the nicks, the bar sat where the
                     // longest nick ended instead of at the panel's edge.
                     ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
                             if let Some(nicks) = &current_buffer_nicks {
-                                for nick in nicks.iter() {
-                                    let text = format!("{}{}", nick.prefix, nick.name);
+                                for (i, row) in crate::ui::nicklist::rows(nicks, self.group_nicklist).into_iter().enumerate() {
+                                    let nick = match row {
+                                        crate::ui::nicklist::Row::Heading(title, count, color) => {
+                                            if i > 0 { ui.add_space(6.0); }
+                                            let color = color.unwrap_or(text_secondary);
+                                            let heading = ui.label(egui::RichText::new(format!("{title} ({count})")).color(color).size(11.0));
+                                            // Ruled across the whole panel, not only under the words.
+                                            ui.painter().hline(ui.max_rect().x_range(), heading.rect.bottom() + 1.0, Stroke::new(1.0, color.gamma_multiply(0.6)));
+                                            ui.add_space(2.0);
+                                            continue;
+                                        }
+                                        crate::ui::nicklist::Row::Nick(nick) => nick,
+                                    };
+                                    // The mode symbol is drawn apart, in its rank's colour: "@ nick".
+                                    let text = nick.name.clone();
                                     let input = if nick.away {
                                         text.clone()
                                     } else if self.colored_nicks {
@@ -2986,13 +3007,17 @@ impl eframe::App for WeeChatApp {
                                         .and_then(|s| s.get(&nick.name));
                                     let sections = match chat_style {
                                         Some(style) => vec![crate::ui::ansi::ANSISection {
-                                            text: format!("{}{}", nick.prefix, nick.name),
+                                            text: nick.name.clone(),
                                             style: *style,
                                             url: None,
                                         }],
                                         None => ANSIParser::parse(&input),
                                     };
                                     let mut job = LayoutJob::default();
+                                    let symbol = crate::ui::nicklist::mode_symbol(nick);
+                                    let symbol_color = symbol.and_then(crate::ui::nicklist::mode_color).unwrap_or(text_secondary);
+                                    job.append(&format!("{} ", symbol.unwrap_or(' ')), 0.0,
+                                        egui::TextFormat::simple(font_id.clone(), symbol_color));
                                     for s in sections {
                                         let mut fmt = s.style.to_format(font_id.clone(), &render_theme);
                                         if nick.away {
