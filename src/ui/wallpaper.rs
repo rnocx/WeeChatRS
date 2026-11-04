@@ -135,9 +135,30 @@ fn kmeans_palette(pixels: &[(u8, u8, u8)], k: usize) -> Vec<(u8, u8, u8, usize)>
 
 // ── Image loading (platform-aware) ────────────────────────────────────────────
 
+/// Open an image by what is in the file, not by its name. GNOME copies the
+/// wallpaper you pick to `~/.config/background`, which has no extension, and
+/// `image::open` needs one to know the format. A failure is logged with the
+/// reason, since a missing theme otherwise gives no hint why.
+fn open_image(path: &str, report: bool) -> Option<image::DynamicImage> {
+    let reader = match image::ImageReader::open(path).and_then(|r| r.with_guessed_format()) {
+        Ok(r) => r,
+        Err(e) => {
+            if report { log::warn!("wallpaper: can't open {path}: {e}"); }
+            return None;
+        }
+    };
+    match reader.decode() {
+        Ok(img) => Some(img),
+        Err(e) => {
+            if report { log::warn!("wallpaper: can't read {path}: {e}"); }
+            None
+        }
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn load_image_rgb(path: &str) -> Option<Vec<(u8, u8, u8)>> {
-    let img = image::open(path).ok()?;
+    let img = open_image(path, true)?;
     let img = img.thumbnail(128, 128).to_rgb8();
     Some(img.pixels().map(|p| (p.0[0], p.0[1], p.0[2])).collect())
 }
@@ -145,7 +166,7 @@ fn load_image_rgb(path: &str) -> Option<Vec<(u8, u8, u8)>> {
 #[cfg(target_os = "macos")]
 fn load_image_rgb(path: &str) -> Option<Vec<(u8, u8, u8)>> {
     // Try formats the image crate supports (JPEG, PNG, WebP, …) directly.
-    if let Ok(img) = image::open(path) {
+    if let Some(img) = open_image(path, false) {
         let img = img.thumbnail(128, 128).to_rgb8();
         return Some(img.pixels().map(|p| (p.0[0], p.0[1], p.0[2])).collect());
     }
@@ -160,7 +181,7 @@ fn load_image_rgb(path: &str) -> Option<Vec<(u8, u8, u8)>> {
     if !ok {
         return None;
     }
-    let img = image::open(&tmp).ok()?;
+    let img = open_image(&tmp.to_string_lossy(), true)?;
     let img = img.thumbnail(128, 128).to_rgb8();
     Some(img.pixels().map(|p| (p.0[0], p.0[1], p.0[2])).collect())
 }
@@ -528,4 +549,49 @@ pub fn start_wallpaper_thread(ctx: egui::Context) -> std::sync::mpsc::Receiver<A
             }
         });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_png(path: &std::path::Path) {
+        let img = image::RgbImage::from_pixel(32, 32, image::Rgb([200, 40, 40]));
+        img.save_with_format(path, image::ImageFormat::Png).unwrap();
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wcrs-wallpaper-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn image_without_an_extension_loads() {
+        // GNOME keeps the picked wallpaper as ~/.config/background.
+        let dir = temp_dir("noext");
+        let path = dir.join("background");
+        write_png(&path);
+        assert!(theme_from_wallpaper(path.to_str().unwrap()).is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extension_that_disagrees_with_the_content_loads() {
+        let dir = temp_dir("wrongext");
+        let path = dir.join("wallpaper.jpg");
+        write_png(&path);
+        assert!(theme_from_wallpaper(path.to_str().unwrap()).is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unreadable_wallpaper_gives_no_theme() {
+        let dir = temp_dir("junk");
+        let path = dir.join("background");
+        std::fs::write(&path, b"not an image").unwrap();
+        assert!(theme_from_wallpaper(path.to_str().unwrap()).is_none());
+        assert!(theme_from_wallpaper(dir.join("missing").to_str().unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
