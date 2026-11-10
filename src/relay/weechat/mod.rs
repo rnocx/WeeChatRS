@@ -52,6 +52,23 @@ pub struct WeeChatConfig {
     /// attempting the WebSocket handshake (used to wait for SSH tunnel readiness).
     pub tunnel_port: Option<u16>,
     pub auto_reconnect: bool,
+    /// A TOTP code for the first attempt, when the relay has
+    /// `relay.network.totp_secret` set. A code lasts only ~30 s, so a reconnect
+    /// goes without it and the relay's answer brings up the prompt again.
+    pub totp: Option<String>,
+}
+
+/// What a refused WebSocket upgrade says about TOTP: Some(false) when the relay
+/// wants a code we didn't send, Some(true) when it refused the one we sent.
+/// WeeChat answers 401 with `{"error":"Missing TOTP"}` or `{"error":"Invalid TOTP"}`.
+fn totp_refusal(status: u16, body: Option<&[u8]>) -> Option<bool> {
+    if status != 401 { return None; }
+    let body: serde_json::Value = serde_json::from_slice(body?).ok()?;
+    match body.get("error")?.as_str()? {
+        "Missing TOTP" => Some(false),
+        "Invalid TOTP" => Some(true),
+        _ => None,
+    }
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -126,6 +143,7 @@ impl BackendClient for WeeChatClient {
         let url_str = format!("{}://{}:{}/api", scheme, host_clean, config.port);
 
         tokio::spawn(async move {
+            let mut totp = config.totp.clone().filter(|c| !c.is_empty());
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(30);
             // Await outside a connection; a Disconnect meanwhile ends the task.
@@ -204,6 +222,12 @@ impl BackendClient for WeeChatClient {
                     request.headers_mut().insert("Origin", origin_v);
                     request.headers_mut().insert("Sec-WebSocket-Protocol", auth_proto_v);
                     request.headers_mut().insert("Authorization", basic_v);
+                    // Used once: see WeeChatConfig::totp.
+                    if let Some(code) = totp.take() {
+                        let totp_v = code.parse().map_err(|e: http::header::InvalidHeaderValue|
+                            format!("invalid TOTP code: {}", e))?;
+                        request.headers_mut().insert("x-weechat-totp", totp_v);
+                    }
                     Ok(())
                 })();
                 if let Err(e) = header_result {
@@ -336,6 +360,12 @@ impl BackendClient for WeeChatClient {
                         connected.store(false, Ordering::Relaxed);
                         // tungstenite returns Error::Http(resp) on a non-101 handshake response.
                         // Status 401/403 mean wrong password / forbidden — retrying won't help.
+                        if let tokio_tungstenite::tungstenite::Error::Http(resp) = &e {
+                            if let Some(invalid) = totp_refusal(resp.status().as_u16(), resp.body().as_deref()) {
+                                send!(BackendEvent::TotpRequired { invalid });
+                                return;
+                            }
+                        }
                         let is_auth_failure = match &e {
                             tokio_tungstenite::tungstenite::Error::Http(resp) => {
                                 let s = resp.status().as_u16();
@@ -470,7 +500,7 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let config = WeeChatConfig {
             host: "127.0.0.1".into(), port, password: "x".into(), use_ssl: false,
-            accept_invalid_certs: false, tunnel_port: None, auto_reconnect: true,
+            accept_invalid_certs: false, tunnel_port: None, auto_reconnect: true, totp: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut client = WeeChatClient::new(config, tx, EguiContext::default());
@@ -483,5 +513,44 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
         // The task has ended: the channel closes with nothing more sent.
         assert!(matches!(tokio::time::timeout(Duration::from_secs(3), rx.recv()).await, Ok(None) | Err(_)));
+    }
+
+    /// A relay with TOTP on: the code goes out as x-weechat-totp, and its refusal
+    /// comes back as TotpRequired instead of a password error or a retry.
+    #[tokio::test]
+    async fn totp_code_sent_and_refusal_reported() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            let body = r#"{"error":"Invalid TOTP"}"#;
+            sock.write_all(format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(), body).as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_lowercase()
+        });
+        let config = WeeChatConfig {
+            host: "127.0.0.1".into(), port, password: "x".into(), use_ssl: false,
+            accept_invalid_certs: false, tunnel_port: None, auto_reconnect: true,
+            totp: Some("123456".into()),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut client = WeeChatClient::new(config, tx, EguiContext::default());
+        client.connect();
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        assert!(matches!(ev, Ok(Some(BackendEvent::TotpRequired { invalid: true }))), "{:?}", ev);
+        assert!(server.await.unwrap().contains("x-weechat-totp: 123456"));
+    }
+
+    #[test]
+    fn totp_refusal_reads_weechat_errors() {
+        assert_eq!(totp_refusal(401, Some(br#"{"error":"Missing TOTP"}"#)), Some(false));
+        assert_eq!(totp_refusal(401, Some(br#"{"error":"Invalid TOTP"}"#)), Some(true));
+        assert_eq!(totp_refusal(401, Some(br#"{"error":"Invalid password"}"#)), None);
+        assert_eq!(totp_refusal(403, Some(br#"{"error":"Missing TOTP"}"#)), None);
+        assert_eq!(totp_refusal(401, None), None);
     }
 }

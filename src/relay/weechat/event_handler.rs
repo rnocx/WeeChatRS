@@ -115,6 +115,20 @@ impl WeeChatApp {
             BackendEvent::ChannelList { buffer_id, channels, done, error } => {
                 self.channel_list_received(&format!("{}/{}", conn_prefix, buffer_id), channels, done, error);
             }
+            BackendEvent::TotpRequired { invalid } => {
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
+                    conn.is_connecting = false;
+                    conn.connecting_pending = false;
+                    conn.status = "Waiting for TOTP code".into();
+                    conn.auth_error = None;
+                }
+                self.log_conn_for(conn_prefix, if invalid {
+                    "Relay refused the TOTP code"
+                } else {
+                    "Relay asks for a TOTP code (relay.network.totp_secret is set)"
+                });
+                self.open_totp_prompt(conn_prefix, invalid);
+            }
             BackendEvent::TunnelFailed(e) => {
                 if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
                     conn.client.disconnect();

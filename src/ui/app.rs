@@ -1191,6 +1191,10 @@ pub struct WeeChatApp {
     pub(crate) fset_state: crate::ui::fset::FsetState,
     /// The topic being edited, while its dialog is open.
     pub(crate) topic_editor: Option<crate::ui::topic_editor::TopicEditor>,
+    /// A WeeChat relay asking for a TOTP code, while its dialog is open.
+    pub(crate) totp_prompt: Option<crate::ui::totp_prompt::TotpPrompt>,
+    /// A TOTP code for the next do_connect of a connection, by prefix.
+    pub(crate) pending_totp: std::collections::HashMap<String, String>,
 }
 
 pub(crate) struct CompletionState {
@@ -1428,6 +1432,8 @@ impl WeeChatApp {
             editing_light_theme: None,
             fset_state: crate::ui::fset::FsetState::default(),
             topic_editor: None,
+            totp_prompt: None,
+            pending_totp: std::collections::HashMap::new(),
         };
 
         if app.spell_check {
@@ -1928,6 +1934,7 @@ impl WeeChatApp {
                     accept_invalid_certs: profile.accept_invalid_certs,
                     tunnel_port,
                     auto_reconnect: effective_auto_reconnect,
+                    totp: self.pending_totp.remove(&prefix),
                 };
                 Box::new(WeeChatClient::new(config, per_conn_tx.clone(), ctx.clone()))
             }
@@ -4202,6 +4209,7 @@ impl eframe::App for WeeChatApp {
         self.show_quick_switcher(ctx, accent_color, text_muted);
         self.show_paste_dialog(ctx, accent_color, text_muted);
         self.show_topic_editor(ctx);
+        self.show_totp_prompt(ctx);
         self.show_settings_window(ctx, accent_color, is_light);
         self.show_connections_window(ctx, accent_color, is_light);
 

@@ -7,6 +7,7 @@ pub(crate) mod wallpaper;
 pub(crate) mod ignore;
 pub(crate) mod spellcheck;
 pub(crate) mod topic_editor;
+pub(crate) mod totp_prompt;
 mod sysinfo;
 
 mod settings;

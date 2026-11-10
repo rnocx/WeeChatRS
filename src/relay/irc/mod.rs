@@ -412,6 +412,8 @@ fn network_event(
         }
         BackendEvent::Error(e) | BackendEvent::AuthError(e) | BackendEvent::TunnelFailed(e) => BackendEvent::ConnLog(format!("{}: {}", name, e)),
         BackendEvent::ConnLog(m) => BackendEvent::ConnLog(format!("{}: {}", name, m)),
+        // Only the WeeChat relay asks for one; IRC never sends this.
+        BackendEvent::TotpRequired { .. } => BackendEvent::ConnLog(format!("{}: TOTP code required", name)),
         BackendEvent::BufferOpened(mut buffer) => {
             buffers.lock().unwrap().insert(buffer.id.clone());
             buffer.id = id(buffer.id);

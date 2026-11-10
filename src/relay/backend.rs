@@ -14,6 +14,9 @@ pub enum BackendEvent {
     Error(String),
     /// Authentication failed (wrong password, rejected SASL, etc.).
     AuthError(String),
+    /// The WeeChat relay wants a TOTP code (`relay.network.totp_secret` is set).
+    /// `invalid` is true when the code we sent was refused, false when none was sent.
+    TotpRequired { invalid: bool },
     /// Informational message for the connection log only (not shown as an error).
     ConnLog(String),
     /// The SSH tunnel stopped for good (bad login, changed host key…): the

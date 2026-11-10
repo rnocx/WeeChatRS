@@ -69,6 +69,14 @@ For TLS, load a certificate and use a `tls.api` relay instead:
 > /set relay.network.websocket_allowed_origins "^weechatrs://app$"
 > ```
 
+Two-factor login works too. Set a TOTP secret on the relay and add it to your authenticator app:
+
+```
+/set relay.network.totp_secret "${sec.data.relay_totp}"
+```
+
+Nothing changes in the connection profile. When the relay asks for a code, WeeChatRS opens a prompt for the 6-digit code and connects with it. A code is only good for about 30 seconds, so after a dropped connection the prompt comes back for a new one.
+
 ### IRC servers
 
 Add an **IRC** connection with the server's host and port, your nick, and TLS on or off. A password is sent as the server password and, when the server offers SASL, used to log in with SASL PLAIN as *SASL username* (or your nick). It speaks a wide range of IRCv3: see [IRC protocol support](docs/irc.md).
