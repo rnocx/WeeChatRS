@@ -1549,7 +1549,7 @@ impl WeeChatApp {
 
     /// A panel toggle in the toolbar: an icon, accent coloured while its panel is open.
     fn draw_toggle_icon(painter: &Painter, rect: Rect, glyph: &str, color: Color32) {
-        painter.text(rect.center(), egui::Align2::CENTER_CENTER, glyph, FontId::proportional(18.0), color);
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, glyph, FontId::proportional(15.0), color);
     }
 
     pub(crate) fn is_twemoji_url(url: &str) -> bool {
@@ -2452,16 +2452,16 @@ impl eframe::App for WeeChatApp {
         self.draw_macos_titlebar(root_ui, surface_color, text_secondary, border_color);
 
         if self.show_toolbar { egui::Panel::top("top_panel")
-            .frame(Frame::NONE.fill(surface_color).inner_margin(Margin::symmetric(12, 8)))
+            .frame(Frame::NONE.fill(surface_color).inner_margin(Margin::symmetric(10, 3)))
             .show(root_ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-                    ui.spacing_mut().button_padding = egui::vec2(5.0, 3.0);
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().button_padding = egui::vec2(3.0, 1.0);
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     // Plain grey icons, as in the mockup, whatever colour the theme's text is.
-                    let icon = |glyph: &str| egui::RichText::new(glyph).size(15.0).color(text_secondary);
+                    let icon = |glyph: &str| egui::RichText::new(glyph).size(13.0).color(text_secondary);
 
-                    let icon_size = Vec2::splat(22.0);
+                    let icon_size = Vec2::splat(18.0);
 
                     let (rect, res) = ui.allocate_at_least(icon_size, egui::Sense::click());
                     if res.clicked() { self.show_buffers = !self.show_buffers; }
@@ -2479,7 +2479,7 @@ impl eframe::App for WeeChatApp {
                         let color = if buf_has_nicklist && self.show_nicklist { accent_color } else { text_muted.linear_multiply(if buf_has_nicklist { 1.0 } else { 0.4 }) };
                         Self::draw_toggle_icon(ui.painter(), rect, icons::USERS, color);
                         res.on_hover_text(if buf_has_nicklist { "Nick list" } else { "No nick list in this buffer" });
-                        ui.add_space(8.0);
+                        ui.add_space(4.0);
 
                         if ui.button(icon(icons::GEAR)).on_hover_text("Settings").clicked() {
                             self.open_settings(ui.ctx());
@@ -2487,7 +2487,7 @@ impl eframe::App for WeeChatApp {
                         let unseen = self.mentions.unseen;
                         if self.show_mentions {
                         let mentions_label = if unseen > 0 {
-                            egui::RichText::new(format!("{} {}", icons::AT, unseen)).size(15.0).color(Color32::from_rgb(220, 70, 70))
+                            egui::RichText::new(format!("{} {}", icons::AT, unseen)).size(13.0).color(Color32::from_rgb(220, 70, 70))
                         } else if self.mentions_selected() {
                             icon(icons::AT).color(accent_color)
                         } else {
@@ -2514,20 +2514,17 @@ impl eframe::App for WeeChatApp {
                             self.show_connection_log = !self.show_connection_log;
                             self.connection_log_unread = false;
                         }
-                        // Show status indicators for each active connection
+                        // A dot per active connection, its name on hover: the lag pill
+                        // already names the network on screen.
                         for conn in &self.connections {
                             if conn.client.is_connected() || conn.connecting_pending {
-                                let status_text = if conn.connecting_pending {
-                                    format!("● {}", conn.label)
+                                let (status_color, state) = if conn.connecting_pending {
+                                    (Color32::from_rgb(255, 165, 0), "connecting")
                                 } else {
-                                    format!("● {}", conn.label)
+                                    (Color32::from_rgb(50, 205, 50), "connected")
                                 };
-                                let status_color = if conn.connecting_pending {
-                                    Color32::from_rgb(255, 165, 0)
-                                } else {
-                                    Color32::from_rgb(50, 205, 50)
-                                };
-                                ui.label(egui::RichText::new(status_text).color(status_color).size(12.0));
+                                ui.label(egui::RichText::new("●").color(status_color).size(10.0))
+                                    .on_hover_text(format!("{}: {}", conn.label, state));
                             }
                         }
                         if self.show_lag {

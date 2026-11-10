@@ -135,10 +135,10 @@ fn level_color(level: Level, ui: &egui::Ui) -> Color32 {
 pub fn draw(ui: &mut egui::Ui, network: &str, reading: &Reading) -> egui::Response {
     let color = level_color(reading.level, ui);
     let name_color = ui.visuals().text_color();
-    let name = ui.painter().layout_no_wrap(network.to_string(), FontId::proportional(12.0), name_color);
-    let value = ui.painter().layout_no_wrap(reading.text.clone(), FontId::monospace(12.0), color);
-    let (pad, bars_w, gap) = (8.0, 12.0, 5.0);
-    let size = Vec2::new(pad + bars_w + gap + name.size().x + gap + value.size().x + pad, 22.0);
+    let name = ui.painter().layout_no_wrap(network.to_string(), FontId::proportional(11.0), name_color);
+    let value = ui.painter().layout_no_wrap(reading.text.clone(), FontId::monospace(11.0), color);
+    let (pad, bars_w, gap) = (7.0, 12.0, 4.0);
+    let size = Vec2::new(pad + bars_w + gap + name.size().x + gap + value.size().x + pad, 18.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     if !ui.is_rect_visible(rect) {
         return response;
@@ -148,7 +148,7 @@ pub fn draw(ui: &mut egui::Ui, network: &str, reading: &Reading) -> egui::Respon
         Level::Slow | Level::Bad => (color.gamma_multiply(0.12), color.gamma_multiply(0.45)),
         _ => (Color32::TRANSPARENT, ui.visuals().widgets.noninteractive.bg_stroke.color),
     };
-    painter.rect(rect, 11.0, fill, Stroke::new(1.0, border), StrokeKind::Inside);
+    painter.rect(rect, 9.0, fill, Stroke::new(1.0, border), StrokeKind::Inside);
 
     let lit = match reading.level {
         Level::Good => 4,
@@ -158,7 +158,7 @@ pub fn draw(ui: &mut egui::Ui, network: &str, reading: &Reading) -> egui::Respon
         Level::Unknown => 0,
     };
     let dim = ui.visuals().weak_text_color().gamma_multiply(0.5);
-    let base = rect.center().y + 5.0;
+    let base = rect.center().y + 4.5;
     for i in 0..4 {
         let x = rect.left() + pad + 1.0 + i as f32 * 3.4;
         let top = base - 3.0 - i as f32 * 2.4;
