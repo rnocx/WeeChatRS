@@ -1620,6 +1620,10 @@ impl WeeChatApp {
                 }
                 self.record_local_read(&prev_id);
             }
+            // Leaving a buffer ends its unread divider; the next visit sets a fresh one.
+            if prev_id != id {
+                if let Some(b) = self.buffer_by_id_mut(&prev_id) { b.visit_start_marker_id = None; }
+            }
         }
 
         if id == crate::ui::mentions::MENTIONS_ID {
@@ -3747,36 +3751,50 @@ impl eframe::App for WeeChatApp {
                                         let vid = vid.parse::<i64>().unwrap_or(0);
                                         lid > vid
                                     }).unwrap_or(false);
-                                    if !marker_shown && past_visit_marker {
+                                    // The divider goes away after half a minute in view.
+                                    let divider_expired = self.selected_view_since
+                                        .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(30));
+                                    if !marker_shown && past_visit_marker && !divider_expired {
                                         let elapsed = self.selected_view_since
                                             .map(|t| t.elapsed())
                                             .unwrap_or(std::time::Duration::from_secs(99));
-                                        let divider_color = Color32::from_rgb(200, 50, 50);
-                                        ui.add_space(8.0);
-                                        // Both forms take the same height, so the label fading to a
-                                        // plain line doesn't shift the lines below.
-                                        let divider_height = ui.spacing().interact_size.y
-                                            .max(ui.fonts_mut(|f| f.row_height(&FontId::proportional(10.0))));
-                                        if elapsed < std::time::Duration::from_secs(2) {
-                                            let remaining = std::time::Duration::from_secs(2) - elapsed;
-                                            ctx.request_repaint_after(remaining);
-                                            ui.allocate_ui_with_layout(
-                                                egui::vec2(ui.available_width(), divider_height),
-                                                egui::Layout::left_to_right(egui::Align::Center),
-                                                |ui| {
-                                                    ui.set_min_height(divider_height);
-                                                    ui.add_space(20.0);
-                                                    ui.separator();
-                                                    ui.label(egui::RichText::new(" NEW MESSAGES ").color(divider_color).size(10.0).strong());
-                                                    ui.separator();
-                                                },
-                                            );
+                                        // Orange when the divider first appears, red once it has
+                                        // been in view for a moment.
+                                        let fresh = elapsed < std::time::Duration::from_secs(2);
+                                        let divider_color = if fresh {
+                                            Color32::from_rgb(235, 140, 40)
                                         } else {
-                                            ui.scope(|ui| {
-                                                ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, divider_color);
-                                                ui.add_sized([ui.available_width(), divider_height], egui::Separator::default());
-                                            });
+                                            Color32::from_rgb(200, 50, 50)
+                                        };
+                                        if fresh {
+                                            ctx.request_repaint_after(std::time::Duration::from_secs(2) - elapsed);
+                                        } else {
+                                            ctx.request_repaint_after(std::time::Duration::from_secs(30).saturating_sub(elapsed));
                                         }
+                                        ui.add_space(8.0);
+                                        let font = FontId::proportional(10.0);
+                                        let divider_height = ui.spacing().interact_size.y
+                                            .max(ui.fonts_mut(|f| f.row_height(&font)));
+                                        // A short centred line with the label in the middle.
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(ui.available_width(), divider_height),
+                                            egui::Sense::hover(),
+                                        );
+                                        let painter = ui.painter();
+                                        let label = painter.layout_no_wrap("Unread messages".into(), font, divider_color);
+                                        let total = (rect.width() * 0.4).max(label.size().x + 60.0).min(rect.width());
+                                        let line_w = ((total - label.size().x - 16.0) / 2.0).max(0.0);
+                                        let cy = rect.center().y;
+                                        let left = rect.center().x - total / 2.0;
+                                        let stroke = egui::Stroke::new(1.0, divider_color);
+                                        painter.line_segment([egui::pos2(left, cy), egui::pos2(left + line_w, cy)], stroke);
+                                        painter.galley(
+                                            egui::pos2(left + line_w + 8.0, cy - label.size().y / 2.0),
+                                            label.clone(),
+                                            divider_color,
+                                        );
+                                        let right = left + total;
+                                        painter.line_segment([egui::pos2(right - line_w, cy), egui::pos2(right, cy)], stroke);
                                         ui.add_space(8.0);
                                         marker_shown = true;
                                         prev_shown = None; // a group never spans the unread divider
