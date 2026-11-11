@@ -440,9 +440,20 @@ fn make_presence_line(id: &str, (prefix, text): (String, String), ts: DateTime<U
 /// mIRC colour numbers 0–15 as the ANSI colour slots the theme draws them in.
 const MIRC_TO_ANSI: [u8; 16] = [15, 0, 4, 2, 9, 1, 5, 3, 11, 10, 6, 14, 12, 13, 8, 7];
 
+/// mIRC's extended colours 16–98 as RGB, which have no theme slot.
+const MIRC_EXTENDED: [u32; 83] = [
+    0x470000, 0x472100, 0x474700, 0x324700, 0x004700, 0x00472c, 0x004747, 0x002747, 0x000047, 0x2e0047, 0x470047, 0x47002a,
+    0x740000, 0x743a00, 0x747400, 0x517400, 0x007400, 0x007449, 0x007474, 0x004074, 0x000074, 0x4b0074, 0x740074, 0x740045,
+    0xb50000, 0xb56300, 0xb5b500, 0x7db500, 0x00b500, 0x00b571, 0x00b5b5, 0x0063b5, 0x0000b5, 0x7d00b5, 0xb500b5, 0xb5006b,
+    0xff0000, 0xff8c00, 0xffff00, 0xb2ff00, 0x00ff00, 0x00ffa0, 0x00ffff, 0x008cff, 0x0000ff, 0xa500ff, 0xff00ff, 0xff0098,
+    0xff5959, 0xffb459, 0xffff71, 0xcfff60, 0x6fff6f, 0x65ffc9, 0x6dffff, 0x59b4ff, 0x5959ff, 0xc459ff, 0xff66ff, 0xff59bc,
+    0xff9c9c, 0xffd39c, 0xffff9c, 0xe2ff9c, 0x9cff9c, 0x9cffdb, 0x9cffff, 0x9cd3ff, 0x9c9cff, 0xdc9cff, 0xff9cff, 0xff94d3,
+    0x000000, 0x131313, 0x282828, 0x363636, 0x4d4d4d, 0x656565, 0x818181, 0x9f9f9f, 0xbcbcbc, 0xe2e2e2, 0xffffff,
+];
+
 /// IRC formatting codes (bold, italic, underline, colours, reset) as the ANSI escapes
 /// the chat view draws; codes it can't draw (reverse, strikethrough, monospace) are
-/// dropped. Extended colours 16–98 have no theme slot and are left at the default.
+/// dropped. Extended colours 16–98 are drawn as their fixed RGB values; 99 is the default.
 pub(crate) fn irc_to_ansi(text: &str) -> String {
     if !text.contains(['\x02', '\x03', '\x04', '\x0F', '\x11', '\x16', '\x1D', '\x1E', '\x1F']) {
         return text.to_string();
@@ -456,6 +467,10 @@ pub(crate) fn irc_to_ansi(text: &str) -> String {
     let colour = |n: &str, base: u8| -> String {
         match n.parse::<usize>() {
             Ok(n) if n < 16 => format!("{};5;{}", base, MIRC_TO_ANSI[n]),
+            Ok(n) if (16..99).contains(&n) => {
+                let v = MIRC_EXTENDED[n - 16];
+                format!("{};2;{};{};{}", base, v >> 16, (v >> 8) & 0xff, v & 0xff)
+            }
             _ => format!("{}", base + 1),
         }
     };
@@ -2641,7 +2656,10 @@ mod tests {
         assert_eq!(irc_to_ansi("\x034red\x03 and \x0312,1blue on black\x0f!"),
             "\x1B[38;5;9mred\x1B[39;49m and \x1B[38;5;12m\x1B[48;5;0mblue on black\x1B[0m!");
         // A comma not followed by a colour is text; extended colours keep the default.
-        assert_eq!(irc_to_ansi("\x033,ok \x0345x"), "\x1B[38;5;2m,ok \x1B[39mx");
+        assert_eq!(irc_to_ansi("\x033,ok \x0345x"), "\x1B[38;5;2m,ok \x1B[38;2;0;181;113mx");
+        // 52 is the first of the bright row; 98 the last extended colour; 99 is the default.
+        assert_eq!(irc_to_ansi("\x0352,98x"), "\x1B[38;2;255;0;0m\x1B[48;2;255;255;255mx");
+        assert_eq!(irc_to_ansi("\x0399x"), "\x1B[39mx");
         assert_eq!(irc_to_ansi("\x04ff8000hex"), "\x1B[38;2;255;128;0mhex");
         // Unclosed styles end with the line; codes it can't draw disappear.
         assert_eq!(irc_to_ansi("\x1Dit \x16rev"), "\x1B[3mit rev\x1B[0m");

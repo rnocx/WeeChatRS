@@ -3895,8 +3895,24 @@ impl eframe::App for WeeChatApp {
                                             // tall: `horizontal_wrapped` centers items in an interact_size.y-tall
                                             // row, which drops the text below the timestamp and prefix columns.
                                             let row_size = egui::vec2(ui.available_width(), ui.text_style_height(&TextStyle::Body));
+                                            if crate::ui::ansi::looks_like_art(&line.plain_message) {
+                                                // One unwrapped row, every section butted against the next, so the
+                                                // columns stay where the author put them; wide art scrolls sideways.
+                                                let mut job = LayoutJob::default();
+                                                for s in msg_sections {
+                                                    job.append(&s.text, 0.0, s.style.to_format(font_id.clone(), &render_theme));
+                                                }
+                                                job.wrap.max_width = f32::INFINITY;
+                                                egui::ScrollArea::horizontal()
+                                                    .id_salt(("art", &line.id))
+                                                    .auto_shrink([false, true])
+                                                    .show(ui, |ui| {
+                                                        ui.add(Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
+                                                    });
+                                            } else {
                                             ui.allocate_ui_with_layout(row_size, egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true), |ui| {
-                                                ui.spacing_mut().item_spacing.x = 6.0;
+                                                // Sections touch: a coloured run mid-word must not gain a gap.
+                                                ui.spacing_mut().item_spacing.x = 0.0;
                                                 for s in msg_sections {
                                                     if let Some(url) = &s.url {
                                                         // Use hover-only sense so the row's context_menu (which needs
@@ -3922,6 +3938,7 @@ impl eframe::App for WeeChatApp {
                                                             ui.ctx().open_url(egui::OpenUrl::new_tab(url_for_click));
                                                         }
                                                         if self.show_inline_images && Self::is_image_url(url) && is_safe_public_url(url) {
+                                                            ui.add_space(6.0);
                                                             let is_expanded = self.image_expanded.contains(url);
                                                             let btn = if is_expanded { icons::IMAGE.to_string() } else { format!("{} preview", icons::IMAGE) };
                                                             if ui.small_button(btn).clicked() {
@@ -3944,6 +3961,7 @@ impl eframe::App for WeeChatApp {
                                                             }
                                                         }
                                                         if self.show_link_previews && !Self::is_image_url(url) && is_safe_public_url(url) {
+                                                            ui.add_space(6.0);
                                                             let is_expanded = self.preview_expanded.contains(url);
                                                             let btn = if is_expanded { icons::LINK.to_string() } else { format!("{} preview", icons::LINK) };
                                                             if ui.small_button(btn).clicked() {
@@ -4005,6 +4023,7 @@ impl eframe::App for WeeChatApp {
                                                     }
                                                 }
                                             });
+                                            }
 
                                             if self.show_inline_images {
                                                 for url in &image_urls_in_line {

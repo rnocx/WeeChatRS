@@ -186,6 +186,17 @@ impl ANSIParser {
     }
 }
 
+/// Whether a message looks like ASCII art: block, box-drawing or braille characters,
+/// or runs of spaces that carry the layout. Such lines are drawn on one row, spaces
+/// and all, instead of being wrapped and spaced like prose.
+pub fn looks_like_art(text: &str) -> bool {
+    if text.chars().any(|c| matches!(c, '\u{2500}'..='\u{259F}' | '\u{2800}'..='\u{28FF}')) {
+        return true;
+    }
+    let trimmed = text.trim_end();
+    trimmed.starts_with("  ") || trimmed.contains("   ")
+}
+
 fn apply_sgr(params: &str, state: &mut AnsiStyle) {
     let codes: Vec<u8> = if params.is_empty() {
         vec![0]
@@ -236,6 +247,16 @@ fn apply_sgr(params: &str, state: &mut AnsiStyle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn art_is_told_from_prose() {
+        assert!(looks_like_art("▄▄▄ ▀▀▀"));
+        assert!(looks_like_art("⣿⣿⣿"));
+        assert!(looks_like_art("   /\\_/\\"));
+        assert!(looks_like_art("a   b"));
+        assert!(!looks_like_art("hello there, how are you?"));
+        assert!(!looks_like_art("ends with spaces   "));
+    }
 
     #[test]
     fn extended_colours_fit_the_theme_only_when_asked() {
