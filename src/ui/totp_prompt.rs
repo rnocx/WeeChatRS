@@ -30,17 +30,23 @@ impl WeeChatApp {
             invalid,
             focused: false,
         });
+        // The connections window is its own OS window and would sit on top of
+        // this dialog, which lives in the main window.
+        self.totp_raise = true;
     }
 
     pub(crate) fn show_totp_prompt(&mut self, ctx: &egui::Context) {
         let Some(prompt) = self.totp_prompt.as_mut() else { return };
+        if std::mem::take(&mut self.totp_raise) {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
         let (enter, escape) = ctx.input_mut(|i| (
             i.consume_key(Modifiers::NONE, Key::Enter),
             i.consume_key(Modifiers::NONE, Key::Escape),
         ));
         let mut cancel = escape;
         let mut submit = false;
-        let modal = egui::Modal::new(egui::Id::unique("totp_prompt")).show(ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("totp_prompt")).show(ctx, |ui| {
             ui.set_width(320.0);
             ui.label(RichText::new(format!("Two-factor code for {}", prompt.label)).strong());
             ui.add_space(4.0);
@@ -78,7 +84,9 @@ impl WeeChatApp {
                 submit = true;
             }
         });
-        if cancel || modal.should_close() {
+        // A click outside the dialog doesn't dismiss it: that is how it got lost
+        // behind the connections window. Cancel or Escape closes it.
+        if cancel {
             let prompt = self.totp_prompt.take().expect("shown above");
             self.log_conn_for(&prompt.prefix, "TOTP code not entered, connection stopped");
         } else if submit {

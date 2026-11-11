@@ -1193,6 +1193,8 @@ pub struct WeeChatApp {
     pub(crate) topic_editor: Option<crate::ui::topic_editor::TopicEditor>,
     /// A WeeChat relay asking for a TOTP code, while its dialog is open.
     pub(crate) totp_prompt: Option<crate::ui::totp_prompt::TotpPrompt>,
+    /// Bring the main window forward so the TOTP dialog is seen.
+    pub(crate) totp_raise: bool,
     /// A TOTP code for the next do_connect of a connection, by prefix.
     pub(crate) pending_totp: std::collections::HashMap<String, String>,
 }
@@ -1433,6 +1435,7 @@ impl WeeChatApp {
             fset_state: crate::ui::fset::FsetState::default(),
             topic_editor: None,
             totp_prompt: None,
+            totp_raise: false,
             pending_totp: std::collections::HashMap::new(),
         };
 
