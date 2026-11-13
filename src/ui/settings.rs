@@ -451,6 +451,21 @@ impl WeeChatApp {
         });
         ui.checkbox(&mut self.monospace_ui, "Use the chat font for the whole interface");
 
+        section_heading(ui, "Density");
+        hint(ui, "Spacing in the buffer list, the chat and the nick list. Font size is separate.");
+        ui.horizontal(|ui| {
+            for (name, value) in crate::ui::app::DENSITY_STOPS {
+                if ui.selectable_label((self.density - value).abs() < 0.01, name).clicked() {
+                    self.density = value;
+                }
+            }
+        });
+        ui.add(
+            egui::Slider::new(&mut self.density, crate::ui::app::DENSITY_MIN..=crate::ui::app::DENSITY_MAX)
+                .show_value(false)
+                .step_by(0.05),
+        );
+
         section_heading(ui, "Window");
         ui.horizontal(|ui| {
             ui.label("Opacity:");

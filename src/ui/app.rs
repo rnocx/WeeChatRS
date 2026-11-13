@@ -314,6 +314,13 @@ fn continues_group(prev: Option<&Line>, line: &Line) -> bool {
             == prev.timestamp.with_timezone(&chrono::Local).date_naive()
 }
 
+/// Density setting: Compact, Normal (today's spacing) and Relaxed, with the range between.
+pub(crate) const DENSITY_MIN: f32 = 0.5;
+pub(crate) const DENSITY_MAX: f32 = 1.25;
+pub(crate) const DENSITY_STOPS: [(&str, f32); 3] = [("Compact", 0.5), ("Normal", 1.0), ("Relaxed", 1.25)];
+
+fn default_density() -> f32 { 1.0 }
+
 pub const INITIAL_LINES: usize = 300;
 const IMAGE_CACHE_MAX: usize = 200;
 const PREVIEW_CACHE_MAX: usize = 200;
@@ -705,6 +712,10 @@ pub struct AppSettings {
     pub group_nicklist: bool,
     pub theme: AppTheme,
     pub font_size: f32,
+    /// Spacing scale for the buffer list, chat and nick list: 1.0 is the standard
+    /// look, below it is tighter, above it roomier. See `density_label`.
+    #[serde(default = "default_density")]
+    pub density: f32,
     /// Use the chat font for the whole UI, not just chat content. Renamed from
     /// `use_monospace` (whose default was on) so older settings start with it off.
     #[serde(default)]
@@ -868,6 +879,7 @@ impl Default for AppSettings {
             group_nicklist: false,
             theme: crate::ui::theme::default_theme(),
             font_size: 14.0,
+            density: 1.0,
             monospace_ui: false,
             show_timestamps: true,
             show_buffers: true,
@@ -974,6 +986,8 @@ pub struct WeeChatApp {
     pub(crate) group_nicklist: bool,
     pub(crate) theme: AppTheme,
     pub(crate) font_size: f32,
+    /// Spacing scale, see `Settings::density`.
+    pub(crate) density: f32,
     pub(crate) monospace_ui: bool,
     pub(crate) show_timestamps: bool,
     pub(crate) auto_reconnect: bool,
@@ -1308,6 +1322,7 @@ impl WeeChatApp {
             group_nicklist: settings.group_nicklist,
             theme: settings.theme,
             font_size: settings.font_size,
+            density: settings.density.clamp(DENSITY_MIN, DENSITY_MAX),
             monospace_ui: settings.monospace_ui,
             show_timestamps: settings.show_timestamps,
             show_buffers: settings.show_buffers,
@@ -1616,6 +1631,11 @@ impl WeeChatApp {
             }
         }
         None
+    }
+
+    /// A spacing in pixels scaled by the density setting.
+    pub(crate) fn sp(&self, px: f32) -> f32 {
+        px * self.density
     }
 
     pub(crate) fn select_buffer(&mut self, id: String) {
@@ -2031,6 +2051,7 @@ impl eframe::App for WeeChatApp {
             group_nicklist: self.group_nicklist,
             theme: self.theme.clone(),
             font_size: self.font_size,
+            density: self.density,
             monospace_ui: self.monospace_ui,
             show_timestamps: self.show_timestamps,
             show_buffers: self.show_buffers,
@@ -2608,7 +2629,7 @@ impl eframe::App for WeeChatApp {
                     scroll.floating_allocated_width = scroll.bar_width + scroll.bar_inner_margin;
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
-                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.spacing_mut().item_spacing.y = self.sp(2.0);
                         if self.show_mentions && self.mentions_row(ui, accent_color, text_primary, text_muted) {
                             next_selected_buffer_id = Some(crate::ui::mentions::MENTIONS_ID.to_string());
                         }
@@ -2634,7 +2655,7 @@ impl eframe::App for WeeChatApp {
                             {
                                 let buf_conn_prefix = buffer.id.split('/').next().unwrap_or("").to_string();
                                 if last_conn_prefix.as_deref() != Some(&buf_conn_prefix) {
-                                    if last_conn_prefix.is_some() { ui.add_space(6.0); }
+                                    if last_conn_prefix.is_some() { ui.add_space(self.sp(6.0)); }
                                     if multi_conn && !is_root {
                                         let header_label = conn_label_map.get(&buf_conn_prefix)
                                             .cloned()
@@ -2645,7 +2666,7 @@ impl eframe::App for WeeChatApp {
                                                 .color(accent_color)
                                                 .size(10.0)
                                         );
-                                        ui.add_space(2.0);
+                                        ui.add_space(self.sp(2.0));
                                     }
                                     last_conn_prefix = Some(buf_conn_prefix);
                                 }
@@ -2654,7 +2675,7 @@ impl eframe::App for WeeChatApp {
                             // Space before each root header row (server/core), except at the
                             // very top (last_conn_prefix was just set, already has add_space).
                             if is_root {
-                                ui.add_space(4.0);
+                                ui.add_space(self.sp(4.0));
                             }
 
                             let is_muted = buffer.muted;
@@ -2680,7 +2701,7 @@ impl eframe::App for WeeChatApp {
                             // never expands beyond one line regardless of text length or font size.
                             let avail_w = ui.available_width();
                             let line_h  = ui.text_style_height(&TextStyle::Body);
-                            let row_h   = line_h + 8.0; // 4 px top + 4 px bottom padding
+                            let row_h   = line_h + self.sp(8.0); // 4 px top + 4 px bottom padding at Normal
 
                             // Chevron width reserved on the right for collapsible server groups.
                             let chevron_w = if is_root && !is_core { 14.0_f32 } else { 0.0_f32 };
@@ -2707,8 +2728,8 @@ impl eframe::App for WeeChatApp {
 
                             // Inner content rect — shrink by chevron on the right for root rows.
                             let inner_rect = egui::Rect::from_min_max(
-                                frame_rect.shrink2(Vec2::new(8.0, 4.0)).min,
-                                egui::pos2(frame_rect.max.x - chevron_w - 2.0, frame_rect.max.y - 4.0),
+                                frame_rect.shrink2(Vec2::new(8.0, self.sp(4.0))).min,
+                                egui::pos2(frame_rect.max.x - chevron_w - 2.0, frame_rect.max.y - self.sp(4.0)),
                             );
                             let clip_rect  = inner_rect.intersect(panel_clip);
 
@@ -3139,11 +3160,12 @@ impl eframe::App for WeeChatApp {
                     // As wide as the panel: shrunk to the nicks, the bar sat where the
                     // longest nick ended instead of at the panel's edge.
                     ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = self.sp(3.0);
                             if let Some(nicks) = &current_buffer_nicks {
                                 for (i, row) in crate::ui::nicklist::rows(nicks, self.group_nicklist, &render_theme).into_iter().enumerate() {
                                     let nick = match row {
                                         crate::ui::nicklist::Row::Heading(title, count, color) => {
-                                            if i > 0 { ui.add_space(6.0); }
+                                            if i > 0 { ui.add_space(self.sp(6.0)); }
                                             let color = color.unwrap_or(text_secondary);
                                             let heading = ui.label(egui::RichText::new(format!("{title} ({count})")).color(color).size(11.0));
                                             // Ruled across the whole panel, not only under the words.
@@ -3713,7 +3735,7 @@ impl eframe::App for WeeChatApp {
                         let msg_area_width = ui.available_width();
                         ui.set_min_width(msg_area_width);
                         ui.set_max_width(msg_area_width);
-                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.spacing_mut().item_spacing.y = self.sp(1.0);
                         Frame::NONE.inner_margin(Margin::same(16)).show(ui, |ui| {
                             if let (Some(buf_id), Some(messages)) = (current_buffer_id.as_ref(), current_buffer_messages.as_ref()) {
                                 if chat_start > 0 || messages.len() >= INITIAL_LINES {
@@ -3781,7 +3803,7 @@ impl eframe::App for WeeChatApp {
                                         } else {
                                             ctx.request_repaint_after(std::time::Duration::from_secs(30).saturating_sub(elapsed));
                                         }
-                                        ui.add_space(8.0);
+                                        ui.add_space(self.sp(8.0));
                                         let font = FontId::proportional(10.0);
                                         let divider_height = ui.spacing().interact_size.y
                                             .max(ui.fonts_mut(|f| f.row_height(&font)));
@@ -3805,7 +3827,7 @@ impl eframe::App for WeeChatApp {
                                         );
                                         let right = left + total;
                                         painter.line_segment([egui::pos2(right - line_w, cy), egui::pos2(right, cy)], stroke);
-                                        ui.add_space(8.0);
+                                        ui.add_space(self.sp(8.0));
                                         marker_shown = true;
                                         prev_shown = None; // a group never spans the unread divider
                                     }
@@ -3856,9 +3878,13 @@ impl eframe::App for WeeChatApp {
                                     let mut hidden_timestamp: Option<(Rect, String)> = None;
                                     ui.push_id(&line.id, |ui| {
                                     let mut row_hovered_url: Option<String> = None;
+                                    // Padding above and below a row only grows past Normal, where Compact
+                                    // already has the least text can have.
+                                    let row_pad = ((self.density - 1.0).max(0.0) * 8.0).round() as i8;
                                     let row_resp = Frame::NONE
                                         .fill(row_bg)
                                         .corner_radius(CornerRadius::same(3))
+                                        .inner_margin(Margin::symmetric(0, row_pad))
                                         .show(ui, |ui| {
                                     ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
