@@ -308,6 +308,9 @@ impl WeeChatApp {
         ui.checkbox(&mut self.show_nick_modes, "Show nick modes (@, %, +) in chat");
         hint(ui, "On IRC, soju, ZNC and Injected, from the nick list. WeeChat shows them by its own option, irc.look.nick_mode.");
         ui.checkbox(&mut self.show_channel_modes, "Show channel modes (such as [+nt]) before the topic");
+        ui.checkbox(&mut self.show_typing, "Show who is typing");
+        ui.checkbox(&mut self.send_typing, "Tell others when I'm typing");
+        hint(ui, "Shows or sends IRCv3 typing indicators. On IRC, soju and ZNC they need a server that takes message tags, Injected has its own. The WeeChat relay has none. Sending lets others see when you start and stop typing.");
         ui.checkbox(&mut self.show_filtered_lines, "Show filtered lines");
         hint(ui, "Joins, parts and quits the smart filter hides, lines from ignored nicks, and on WeeChat whatever its /filter rules hide. A buffer can differ: right-click it, Filtered lines.");
         ui.horizontal(|ui| {

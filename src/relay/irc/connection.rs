@@ -1,6 +1,6 @@
 use base64::Engine as _;
 use super::{parser::{parse_attributes, IrcMessage}, IrcConfig, Shared};
-use crate::relay::backend::{BackendEvent, ServerStatus, ZncNetwork};
+use crate::relay::backend::{BackendEvent, ServerStatus, TypingState, ZncNetwork};
 use crate::relay::presence;
 use crate::relay::models::{Buffer, BufferActivity, Line, Nick, PresenceKind};
 use chrono::{DateTime, Utc};
@@ -31,6 +31,8 @@ pub enum IrcCommand {
     /// LIST, for channels with at least `min_users` where the server can filter;
     /// answered with `ChannelList` for the status buffer.
     ListChannels { min_users: u32 },
+    /// Our typing state in a conversation, as a `+typing` TAGMSG.
+    Typing { buffer_id: String, state: crate::relay::backend::TypingState },
     Disconnect,
 }
 
@@ -132,6 +134,8 @@ struct Session {
     /// A LIST we asked for is coming in; its channels wait here to go out in parts.
     list_pending: bool,
     list_batch: Vec<crate::relay::models::ListedChannel>,
+    /// The server answered a typing TAGMSG with 421: it doesn't take client tags.
+    typing_unsupported: bool,
 }
 
 impl Session {
@@ -180,6 +184,7 @@ impl Session {
             elist: String::new(),
             list_pending: false,
             list_batch: Vec::new(),
+            typing_unsupported: false,
         }
     }
 
@@ -902,6 +907,13 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
         }
     }
 
+    // A server without message-tags answers our typing TAGMSG with 421. Stop sending
+    // and keep the error out of the status buffer, where it would repeat per keystroke.
+    if msg.command == "421" && msg.param(1).is_some_and(|c| c.eq_ignore_ascii_case("TAGMSG")) {
+        session.typing_unsupported = true;
+        return events;
+    }
+
     // msgid deduplication: drop any message we've already seen (bouncer replays, reconnects)
     if let Some(id) = msg.tag("msgid") {
         if !session.seen_msgids.insert(id.to_string()) {
@@ -1299,6 +1311,16 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                 *line_counter += 1;
                 events.push(BackendEvent::LineAdded { buffer_id: chan, line: make_presence_line(&line_counter.to_string(), presence::nick_change(&old_nick, &new_nick), timestamp_from_msg(msg), PresenceKind::Nick(new_nick.clone()), &old_nick) });
             }
+        }
+
+        "TAGMSG" => {
+            let target = msg.param(0).unwrap_or("");
+            let nick = msg.nick().unwrap_or("");
+            let Some(state) = msg.tag("+typing").and_then(TypingState::parse) else { return events };
+            if nick.is_empty() || nick.eq_ignore_ascii_case(&session.our_nick) { return events; }
+            // Same buffer a message from them would land in.
+            let buffer_id = if is_channel(target) { target.to_lowercase() } else { nick.to_lowercase() };
+            events.push(BackendEvent::Typing { buffer_id, nick: nick.to_string(), state });
         }
 
         "PRIVMSG" | "NOTICE" => {
@@ -2137,6 +2159,18 @@ pub fn spawn(
                                         let _ = write_half.write_all(format!("NAMES {}\r\n", buffer_id).as_bytes()).await;
                                     }
                                     Some(IrcCommand::FetchBufferList) => {}
+                                    Some(IrcCommand::Typing { buffer_id, state }) => {
+                                        // Only where the server takes client tags, and never to the
+                                        // server buffer or a bouncer's control nicks.
+                                        if session.negotiated_caps.contains("message-tags")
+                                            && !session.typing_unsupported
+                                            && buffer_id != "status"
+                                            && !buffer_id.starts_with('*')
+                                        {
+                                            let line = format!("@+typing={} TAGMSG {}\r\n", state.as_str(), buffer_id);
+                                            let _ = write_half.write_all(line.as_bytes()).await;
+                                        }
+                                    }
                                     Some(IrcCommand::MarkRead { buffer_id }) => {
                                         if let Some(cmd) = session.read_marker_cmd() {
                                             let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -2291,6 +2325,36 @@ mod tests {
             translate(&IrcMessage::parse(line).unwrap(), session, &mut counter, config);
         }
         take_write_queue(session)
+    }
+
+    #[test]
+    fn typing_tags_become_typing_events() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let mut typing = |line: &str| -> Vec<(String, String, TypingState)> {
+            translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config).into_iter()
+                .filter_map(|e| match e { BackendEvent::Typing { buffer_id, nick, state } => Some((buffer_id, nick, state)), _ => None })
+                .collect()
+        };
+        // In a channel: the channel's buffer. In a private chat: the sender's.
+        assert_eq!(typing("@+typing=active :Bob!b@h TAGMSG #Rust"), [("#rust".into(), "Bob".into(), TypingState::Active)]);
+        assert_eq!(typing("@+typing=paused :Bob!b@h TAGMSG sam"), [("bob".into(), "Bob".into(), TypingState::Paused)]);
+        assert_eq!(typing("@+typing=done :Bob!b@h TAGMSG #rust"), [("#rust".into(), "Bob".into(), TypingState::Done)]);
+        // Our own echo, other tags and unknown states are nothing.
+        assert!(typing("@+typing=active :sam!s@h TAGMSG #rust").is_empty());
+        assert!(typing("@+draft/react=x :Bob!b@h TAGMSG #rust").is_empty());
+        assert!(typing("@+typing=weird :Bob!b@h TAGMSG #rust").is_empty());
+    }
+
+    #[test]
+    fn a_421_for_tagmsg_stops_typing_without_a_status_line() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let events = translate(&IrcMessage::parse(":irc.test 421 sam TAGMSG :Unknown command").unwrap(), &mut session, &mut counter, &config);
+        assert!(events.is_empty());
+        assert!(session.typing_unsupported);
     }
 
     #[test]

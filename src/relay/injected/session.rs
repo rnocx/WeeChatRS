@@ -5,7 +5,7 @@ use super::{
 use crate::relay::irc::connection::{ctcp, ctcp_query_text, ctcp_reply_text, expand_irc_command, irc_to_ansi, list_command, nick_color_ansi, topic_set_by};
 use crate::relay::{
     presence,
-    backend::{BackendEvent, ServerStatus},
+    backend::{BackendEvent, ServerStatus, TypingState},
     models::{Buffer, BufferActivity, Line, ListedChannel, Nick, PresenceKind},
 };
 use chrono::{DateTime, Utc};
@@ -732,6 +732,16 @@ impl State {
                     );
                 }
             }
+            Command::Typing(id, state) => {
+                let Some((server, target)) = self.buffers.get(&id).cloned() else { return };
+                if target == "@status" { return; }
+                // Fire and forget, like the official client's volatile emit.
+                self.out.push_back(protocol::event(
+                    "irc:send-typing",
+                    json!({"serverId":server,"target":target,"state":state.as_str()}),
+                    None,
+                ));
+            }
             Command::Disconnect => {}
         }
     }
@@ -762,6 +772,16 @@ impl State {
                 let line=Line::new(format!("state-{}",self.sequence),Utc::now(),"--".into(),format!("Network {}{}",status,if v["error"].is_string() {" (server reported an error)"} else {""}),true,false);
                 self.sequence+=1;
                 self.emit(BackendEvent::LineAdded {buffer_id:id,line});
+            }
+            "irc:event:typing" => {
+                let (nick, target) = (string(&v, "nick"), string(&v, "target"));
+                let ours = self.nicks.get(&server).is_some_and(|n| casefold(n) == casefold(nick));
+                if nick.is_empty() || target.is_empty() || ours { return; }
+                // A channel's own buffer, or for a private message the sender's.
+                let conversation = if target.starts_with(['#', '&', '!', '+']) { target } else { nick };
+                // Anything but "active" means they stopped, as in the official client.
+                let state = if string(&v, "state") == "active" { TypingState::Active } else { TypingState::Done };
+                self.emit(BackendEvent::Typing { buffer_id: buffer_id(&server, conversation), nick: nick.into(), state });
             }
             // The server's own lines: the channel list we asked for, ELIST, and the
             // replies to a bare /topic.
@@ -1783,6 +1803,32 @@ mod tests {
             _ => None,
         }).collect();
         assert_eq!(lists, [(status, vec!["#rust".to_string(), "#linux".to_string()], true)]);
+    }
+
+    #[test]
+    fn typing_comes_in_as_events_and_goes_out_as_a_volatile_emit() {
+        let (mut s, mut rx) = state();
+        s.event("irc:event:connection-state", json!({"serverId":"net","status":"connected","nickname":"alice"}));
+        s.event("irc:event:channels-sync", json!({"serverId":"net","channels":["#rust"]}));
+        drain(&mut rx);
+        let typing = |rx: &mut mpsc::UnboundedReceiver<BackendEvent>| -> Vec<(String, String, TypingState)> {
+            drain(rx).into_iter().filter_map(|e| match e {
+                BackendEvent::Typing { buffer_id, nick, state } => Some((buffer_id, nick, state)),
+                _ => None,
+            }).collect()
+        };
+        s.event("irc:event:typing", json!({"serverId":"net","nick":"Bob","target":"#Rust","state":"active"}));
+        assert_eq!(typing(&mut rx), [(buffer_id("net", "#rust"), "Bob".into(), TypingState::Active)]);
+        // A private chat is the sender's buffer, and anything but active is done.
+        s.event("irc:event:typing", json!({"serverId":"net","nick":"Bob","target":"alice","state":"done"}));
+        assert_eq!(typing(&mut rx), [(buffer_id("net", "bob"), "Bob".into(), TypingState::Done)]);
+        // Our own echo is ignored.
+        s.event("irc:event:typing", json!({"serverId":"net","nick":"alice","target":"#rust","state":"active"}));
+        assert!(typing(&mut rx).is_empty());
+
+        s.command(Command::Typing(buffer_id("net", "#rust"), TypingState::Paused));
+        let sent = s.out.back().unwrap();
+        assert!(sent.contains("irc:send-typing") && sent.contains(r#""state":"paused""#) && sent.contains(r##""target":"#rust""##), "{sent}");
     }
 
     #[test]

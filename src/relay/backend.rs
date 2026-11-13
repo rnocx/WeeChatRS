@@ -118,6 +118,13 @@ pub enum BackendEvent {
         error: Option<String>,
     },
 
+    /// `nick` started, paused or stopped typing in the buffer.
+    Typing {
+        buffer_id: String,
+        nick: String,
+        state: TypingState,
+    },
+
     /// A lag check on the network whose server buffer is `buffer_id`, or with `None`
     /// on the connection itself (the WeeChat relay, Injected's server).
     Lag {
@@ -129,6 +136,40 @@ pub enum BackendEvent {
     /// is fully migrated to BackendEvent in Phase 3.
     #[doc(hidden)]
     _WeeChat(crate::relay::models::WeeChatResponse),
+}
+
+/// What someone is doing at the keyboard, as IRCv3's `+typing` tag says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypingState {
+    /// Typing right now. Counts for about 6 seconds without another.
+    Active,
+    /// Has text in the input but stopped. Counts for about 30 seconds.
+    Paused,
+    /// Cleared the input without sending it.
+    Done,
+    /// Sent the message. The message itself ends the indicator, so IRC says
+    /// nothing; only a WeeChat relay passes it on.
+    Sent,
+}
+
+impl TypingState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TypingState::Active => "active",
+            TypingState::Paused => "paused",
+            TypingState::Done => "done",
+            TypingState::Sent => "sent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(TypingState::Active),
+            "paused" => Some(TypingState::Paused),
+            "done" => Some(TypingState::Done),
+            _ => None,
+        }
+    }
 }
 
 /// One step of a lag check, for `BackendEvent::Lag`.
@@ -179,6 +220,10 @@ pub trait BackendClient: Send {
 
     /// True if the underlying connection is currently established.
     fn is_connected(&self) -> bool;
+
+    /// Tell the others in `buffer_id` that we are typing, paused or done. Backends
+    /// that can't carry it ignore the call.
+    fn send_typing(&self, _buffer_id: &str, _state: TypingState) {}
 
     /// Refresh backend-specific buffer metadata (topic, modes, type).
     /// IRC backends receive this passively via protocol events; default is a no-op.

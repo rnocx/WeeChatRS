@@ -30,9 +30,10 @@ If you only use Injected in a browser, you can paste the token by hand. Sign in 
 - Channel messages, private messages, notices and actions go both ways. `/query nick` opens an existing private conversation with its stored history.
 - *Load older messages* works, history isn't shown twice, dropped connections retry with backoff, and read positions sync through Injected's `lastseen` setting.
 - Commands: `/join`, `/part`, `/query`, `/msg`, `/me`, `/nick`, `/topic`, `/whois`, `/ctcp`, `/list`, `/away` and `/raw`. Any other command goes to the server as a raw line, so `/kick`, `/mode`, `/op`, `/invite`, `/notice`, `/who` and the operator commands work. Hide, unhide and close are in each buffer's right-click menu.
+- Typing indicators work both ways, with the same two settings as IRC.
 - In a network's server buffer, `/connect` connects a saved network that's offline, `/reconnect` retries it and `/disconnect` takes it offline upstream. Disconnecting the WeeChatRS profile only closes this client's session.
 
-Create and configure networks in the official Injected client. This backend has no account management, billing, scripting, voice, end-to-end encrypted private messages or typing indicators. Injected has no published, stable API, so the protocol comes from what the Injected 1.1.3 client does. Local tests against a mock service cover sign-in, the heartbeat, history, sending and a clean close. A check against a real account is still to do.
+Create and configure networks in the official Injected client. This backend has no account management, billing, scripting, voice or end-to-end encrypted private messages. Injected has no published, stable API, so the protocol comes from what the Injected 1.1.3 client does. Local tests against a mock service cover sign-in, the heartbeat, history, sending and a clean close. A check against a real account is still to do.
 
 ### Sharing text as a paste
 

@@ -454,6 +454,9 @@ impl WeeChatApp {
                     conn.server_status.insert(server, status);
                 }
             }
+            BackendEvent::Typing { buffer_id, nick, state } => {
+                self.typing_seen(format!("{}/{}", conn_prefix, buffer_id), nick, state);
+            }
             BackendEvent::Lag { buffer_id, lag } => {
                 let server = match buffer_id {
                     Some(id) => match self.buffer_by_id(&format!("{}/{}", conn_prefix, id)) {
@@ -521,6 +524,23 @@ impl WeeChatApp {
             match event.as_str() {
                 "buffer_line_added" => self.handle_line_added(conn_prefix, resp),
                 "buffer_line_data_changed" => self.handle_line_changed(conn_prefix, resp),
+                // WeeChat's typing plugin: a nick's state, or everyone's cleared.
+                "typing_set_nick" => {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        let body = resp.body.as_ref();
+                        let nick = body.and_then(|b| b.get("nick")).and_then(|v| v.as_str());
+                        let state = body.and_then(|b| b.get("state")).and_then(|v| v.as_str());
+                        let state = state.and_then(crate::relay::backend::TypingState::parse);
+                        if let (Some(nick), Some(state)) = (nick, state) {
+                            self.typing_seen(format!("{}/{}", conn_prefix, raw_id), nick.to_string(), state);
+                        }
+                    }
+                }
+                "typing_reset_buffer" => {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        self.typing.remove(&format!("{}/{}", conn_prefix, raw_id));
+                    }
+                }
                 "buffer_hidden" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);

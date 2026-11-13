@@ -731,6 +731,13 @@ pub struct AppSettings {
     /// and quick switcher.
     #[serde(default = "default_true")]
     pub show_mentions: bool,
+    /// Show who is typing above the input.
+    #[serde(default = "default_true")]
+    pub show_typing: bool,
+    /// Tell the others in a conversation when we are typing. Off by default: it
+    /// shows when you start and stop.
+    #[serde(default)]
+    pub send_typing: bool,
     pub show_server_headers: bool,
     pub show_inline_images: bool,
     pub show_link_previews: bool,
@@ -888,6 +895,8 @@ impl Default for AppSettings {
             show_titlebar: true,
             show_lag: true,
             show_mentions: true,
+            show_typing: true,
+            send_typing: false,
             show_server_headers: true,
             show_inline_images: true,
             show_link_previews: true,
@@ -995,6 +1004,16 @@ pub struct WeeChatApp {
     /// The lag readout in the toolbar.
     pub(crate) show_lag: bool,
     pub(crate) show_mentions: bool,
+    pub(crate) show_typing: bool,
+    pub(crate) send_typing: bool,
+    /// Who is typing, by buffer: nick and when it lapses.
+    pub(crate) typing: HashMap<String, Vec<(String, std::time::Instant)>>,
+    /// What we last told the others, and the input text and edit time it was based on.
+    pub(crate) typing_sent: Option<crate::ui::typing::TypingSent>,
+    pub(crate) typing_text: String,
+    pub(crate) typing_edit: std::time::Instant,
+    /// A message was just sent, so the emptied input is not a cleared one.
+    pub(crate) typing_submitted: bool,
     pub(crate) show_server_headers: bool,
     pub(crate) show_inline_images: bool,
     pub(crate) show_link_previews: bool,
@@ -1334,6 +1353,13 @@ impl WeeChatApp {
             show_titlebar: settings.show_titlebar,
             show_lag: settings.show_lag,
             show_mentions: settings.show_mentions,
+            show_typing: settings.show_typing,
+            send_typing: settings.send_typing,
+            typing: HashMap::new(),
+            typing_sent: None,
+            typing_text: String::new(),
+            typing_edit: std::time::Instant::now(),
+            typing_submitted: false,
             show_server_headers: settings.show_server_headers,
             show_inline_images: settings.show_inline_images,
             show_link_previews: settings.show_link_previews,
@@ -2063,6 +2089,8 @@ impl eframe::App for WeeChatApp {
             show_titlebar: self.show_titlebar,
             show_lag: self.show_lag,
             show_mentions: self.show_mentions,
+            show_typing: self.show_typing,
+            send_typing: self.send_typing,
             show_server_headers: self.show_server_headers,
             show_inline_images: self.show_inline_images,
             show_link_previews: self.show_link_previews,
@@ -3340,6 +3368,9 @@ impl eframe::App for WeeChatApp {
                             }
                         });
                     }
+                    if let Some(line) = current_buffer_id.clone().and_then(|id| self.typing_line(ctx, &id)) {
+                        ui.label(egui::RichText::new(line).small().italics().color(text_muted));
+                    }
                     self.paste_progress(ui, text_muted);
                     if let Some(err) = self.np_error.clone() {
                         ui.horizontal(|ui| {
@@ -4283,6 +4314,7 @@ impl eframe::App for WeeChatApp {
         self.show_paste_dialog(ctx, accent_color, text_muted);
         self.show_topic_editor(ctx);
         self.show_totp_prompt(ctx);
+        self.update_typing(ctx);
         self.show_settings_window(ctx, accent_color, is_light);
         self.show_connections_window(ctx, accent_color, is_light);
 

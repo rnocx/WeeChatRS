@@ -361,6 +361,7 @@ impl WeeChatApp {
 
         // Answering means you've caught up: drop the unread divider.
         if !is_command {
+            self.typing_submitted = true;
             if let Some(id) = self.selected_buffer_id.clone() {
                 if let Some(b) = self.buffer_by_id_mut(&id) { b.visit_start_marker_id = None; }
             }

@@ -8,6 +8,7 @@ pub(crate) mod ignore;
 pub(crate) mod spellcheck;
 pub(crate) mod topic_editor;
 pub(crate) mod totp_prompt;
+pub(crate) mod typing;
 mod sysinfo;
 
 mod settings;

@@ -32,6 +32,12 @@ IRC formatting codes in messages and topics are drawn: bold, italic, underline, 
 
 Messages that look like ASCII art stay on one row, spaces and all. Block, box-drawing and braille characters count, and so do runs of three spaces. Wide art scrolls sideways and never wraps.
 
+## Typing indicators
+
+With **Show who is typing** on, a line above the input says who is typing in the open conversation. It comes from IRCv3 `+typing` tags, and an indicator lapses after about 6 seconds without a refresh, or 30 seconds once paused.
+
+**Tell others when I'm typing** is off by default, because it shows when you start and stop. When it's on, WeeChatRS sends a `+typing` TAGMSG while you type, one every 3 seconds at most, and says paused after 5 seconds without a keystroke. Lines that start with `/` aren't announced. It only sends when the server agreed to `message-tags`, and stops for the session if the server answers a TAGMSG with an error. Injected has its own events for the same thing. Through a WeeChat relay both directions work when WeeChat has the `POST /api/typing` endpoint and its own typing options switched on (`typing.look.*` and `irc.look.typing_status_*`). A relay without the endpoint just ignores the requests.
+
 ## CTCP
 
 `/ctcp <nick> <command>` sends a CTCP, and the nick list's right-click menu has Version, Ping and Time. The query and the reply both show in the network's server buffer, a PING reply with its round trip in seconds. Requests from others show there too, and the app answers `PING`, `VERSION`, `TIME` and `CLIENTINFO`.

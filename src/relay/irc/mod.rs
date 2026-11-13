@@ -143,6 +143,14 @@ impl BackendClient for IrcClient {
         });
     }
 
+    fn send_typing(&self, buffer_id: &str, state: crate::relay::backend::TypingState) {
+        // The message itself ends the indicator, as WeeChat does it.
+        if state == crate::relay::backend::TypingState::Sent {
+            return;
+        }
+        self.route(buffer_id, |id| IrcCommand::Typing { buffer_id: id.to_string(), state });
+    }
+
     fn fetch_lines(&self, _buffer_id: &str, _count: usize) {
         // chathistory is requested automatically on JOIN
     }
@@ -470,6 +478,7 @@ fn network_event(
         BackendEvent::BouncerReply { command, lines } => BackendEvent::BouncerReply { command, lines },
         BackendEvent::ServerStatus { buffer_id, status } => BackendEvent::ServerStatus { buffer_id: id(buffer_id), status },
         BackendEvent::Lag { buffer_id, lag } => BackendEvent::Lag { buffer_id: buffer_id.map(id), lag },
+        BackendEvent::Typing { buffer_id, nick, state } => BackendEvent::Typing { buffer_id: id(buffer_id), nick, state },
         BackendEvent::_WeeChat(r) => BackendEvent::_WeeChat(r),
     }]
 }

@@ -36,6 +36,8 @@ pub(super) enum Command {
     Read(String),
     /// LIST on the server of this buffer, for channels with at least this many users.
     List(String, u32),
+    /// Our typing state in a conversation.
+    Typing(String, crate::relay::backend::TypingState),
 }
 
 pub struct InjectedClient {
@@ -116,6 +118,11 @@ impl BackendClient for InjectedClient {
     }
     fn mark_read(&self, buffer_id: &str) {
         self.command(Command::Read(buffer_id.into()));
+    }
+    fn send_typing(&self, buffer_id: &str, state: crate::relay::backend::TypingState) {
+        use crate::relay::backend::TypingState;
+        let state = if state == TypingState::Sent { TypingState::Done } else { state };
+        self.command(Command::Typing(buffer_id.into(), state));
     }
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)

@@ -484,7 +484,18 @@ impl BackendClient for WeeChatClient {
         self.send_api(
             "POST /api/sync",
             None,
-            Some(serde_json::json!({"colors": "ansi", "input": false})),
+            Some(serde_json::json!({"colors": "ansi", "input": false, "typing": true})),
+        );
+    }
+
+    /// `POST /api/typing` (relay API 0.8.0 and later). WeeChat only passes it on
+    /// to IRC when its own typing options are on, and older relays answer 404.
+    fn send_typing(&self, buffer_id: &str, state: crate::relay::backend::TypingState) {
+        let Ok(id) = buffer_id.parse::<i64>() else { return };
+        self.send_api(
+            "POST /api/typing",
+            None,
+            Some(json!({ "buffer_id": id, "state": state.as_str() })),
         );
     }
 }
