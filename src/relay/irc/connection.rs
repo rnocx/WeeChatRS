@@ -71,6 +71,8 @@ struct Session {
     cap_ls_done: bool,
     registered: bool,
     sasl_done: bool,
+    /// The SASL mechanism being tried: EXTERNAL (certfp) or PLAIN.
+    sasl_mech: &'static str,
     is_soju: bool,
     joined: HashSet<String>,
     next_number: i32,
@@ -142,6 +144,7 @@ impl Session {
             cap_ls_done: false,
             registered: false,
             sasl_done: false,
+            sasl_mech: "PLAIN",
             is_soju: false,
             joined: HashSet::new(),
             next_number: 1,
@@ -353,6 +356,61 @@ const LIST_BATCH: usize = 500;
 const LAG_CHECK: Duration = Duration::from_secs(30);
 /// A lag PING unanswered this long means the connection is dead.
 const DEAD_AFTER: Duration = Duration::from_secs(120);
+
+/// The TLS identity for certfp: the certificate chain and its PKCS#8 key from PEM
+/// files. The key may sit in the certificate file when `key_path` is empty.
+fn load_client_identity(cert_path: &str, key_path: &str) -> Result<native_tls::Identity, String> {
+    let read = |path: &str| {
+        let path = path.trim();
+        let path = match path.strip_prefix("~/") {
+            Some(rest) => std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(rest)).unwrap_or_else(|| path.into()),
+            None => path.into(),
+        };
+        std::fs::read_to_string(&path).map_err(|e| format!("can't read {}: {}", path.display(), e))
+    };
+    let cert_file = read(cert_path)?;
+    let key_file = if key_path.trim().is_empty() { cert_file.clone() } else { read(key_path)? };
+    identity_from_pem(&cert_file, &key_file)
+}
+
+fn identity_from_pem(cert_file: &str, key_file: &str) -> Result<native_tls::Identity, String> {
+    let certs = pem_blocks(cert_file, |label| label == "CERTIFICATE");
+    if certs.is_empty() {
+        return Err("no certificate (BEGIN CERTIFICATE) in the file".into());
+    }
+    let key = match pem_blocks(key_file, |label| label.ends_with("PRIVATE KEY")).into_iter().next() {
+        Some(key) => key,
+        None => return Err("no private key in the key file, or in the certificate file if no key file is set".into()),
+    };
+    if key.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----") {
+        return Err("the private key is encrypted; remove its passphrase first (openssl pkcs8 -topk8 -nocrypt)".into());
+    }
+    if !key.contains("-----BEGIN PRIVATE KEY-----") {
+        return Err("the private key must be PKCS#8 (BEGIN PRIVATE KEY); convert it with openssl pkcs8 -topk8 -nocrypt".into());
+    }
+    native_tls::Identity::from_pkcs8(certs.join("\n").as_bytes(), key.as_bytes())
+        .map_err(|e| format!("certificate and key don't work together: {}", e))
+}
+
+/// The PEM blocks in `text` whose label passes `wanted`, each with its BEGIN/END lines.
+fn pem_blocks(text: &str, wanted: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<(bool, String)> = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(label) = line.strip_prefix("-----BEGIN ").and_then(|l| l.strip_suffix("-----")) {
+            current = Some((wanted(label), String::new()));
+        }
+        if let Some((keep, block)) = &mut current {
+            block.push_str(line);
+            block.push('\n');
+            if line.starts_with("-----END ") {
+                if *keep { blocks.push(std::mem::take(block)); }
+                current = None;
+            }
+        }
+    }
+    blocks
+}
 
 /// LIST, asking only for channels with at least `min_users` when the server's ELIST
 /// has `U`; servers without it would take `>9` for a channel name.
@@ -827,7 +885,7 @@ fn translate(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, co
 
 fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut u64, config: &IrcConfig) -> Vec<BackendEvent> {
     let mut events = Vec::new();
-    let has_sasl_creds = !config.password.is_empty();
+    let has_sasl_creds = config.has_sasl_creds();
 
     // Lines of a search or context reply belong to the results, not the chat, and
     // have often been seen live already, so they skip deduplication.
@@ -902,7 +960,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                     }
                     // If SASL was negotiated, start authentication before CAP END
                     if session.negotiated_caps.contains("sasl") && !session.sasl_done {
-                        session.whois_lines.push("AUTHENTICATE PLAIN".to_string());
+                        session.sasl_mech = if config.has_client_cert() { "EXTERNAL" } else { "PLAIN" };
+                        session.whois_lines.push(format!("AUTHENTICATE {}", session.sasl_mech));
                     } else {
                         session.whois_lines.push("CAP END".to_string());
                     }
@@ -941,11 +1000,23 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
         "AUTHENTICATE" => {
             // Server is ready for our SASL payload
             if msg.param(0).unwrap_or("") == "+" {
-                let user = if config.sasl_username.is_empty() { &config.nick } else { &config.sasl_username };
-                let user = login_name(user, config);
-                let payload = format!("\0{}\0{}", user, config.password);
-                let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
-                session.whois_lines.push(format!("AUTHENTICATE {}", encoded));
+                if session.sasl_mech == "EXTERNAL" {
+                    // The certificate is the login; an empty authzid lets the server
+                    // use the account it belongs to, a SASL username asks for that one.
+                    let authzid = config.sasl_username.trim();
+                    let payload = if authzid.is_empty() {
+                        "+".to_string()
+                    } else {
+                        base64::engine::general_purpose::STANDARD.encode(login_name(authzid, config))
+                    };
+                    session.whois_lines.push(format!("AUTHENTICATE {}", payload));
+                } else {
+                    let user = if config.sasl_username.is_empty() { &config.nick } else { &config.sasl_username };
+                    let user = login_name(user, config);
+                    let payload = format!("\0{}\0{}", user, config.password);
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+                    session.whois_lines.push(format!("AUTHENTICATE {}", encoded));
+                }
             }
         }
 
@@ -961,6 +1032,12 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
 
         // 904/905 — SASL failure
         "904" | "905" => {
+            // The certificate wasn't accepted: log in with the password instead, if there is one.
+            if session.sasl_mech == "EXTERNAL" && !config.password.is_empty() {
+                session.sasl_mech = "PLAIN";
+                session.whois_lines.push("AUTHENTICATE PLAIN".to_string());
+                return events;
+            }
             let reason = msg.params.last().map(String::as_str).unwrap_or("SASL authentication failed");
             events.push(BackendEvent::AuthError(reason.to_string()));
             session.sasl_done = true;
@@ -2134,10 +2211,20 @@ pub fn spawn(
             }
 
             if config.use_ssl {
-                let tls_cx = match native_tls::TlsConnector::builder()
-                    .danger_accept_invalid_certs(config.accept_invalid_certs)
-                    .build()
-                {
+                let mut tls_builder = native_tls::TlsConnector::builder();
+                tls_builder.danger_accept_invalid_certs(config.accept_invalid_certs);
+                if config.has_client_cert() {
+                    match load_client_identity(&config.client_cert, &config.client_key) {
+                        Ok(identity) => { tls_builder.identity(identity); }
+                        Err(e) => {
+                            send!(BackendEvent::Error(format!("Client certificate: {}", e)));
+                            wait!(tokio::time::sleep(backoff));
+                            backoff = (backoff * 2).min(max_backoff);
+                            continue;
+                        }
+                    }
+                }
+                let tls_cx = match tls_builder.build() {
                     Ok(cx) => cx,
                     Err(e) => {
                         send!(BackendEvent::Error(format!("TLS setup failed: {}", e)));
@@ -2176,6 +2263,7 @@ mod tests {
             label: "bouncer".into(), host: "soju.test".into(), port: 6697,
             nick: "sam".into(), username: String::new(), sasl_username: String::new(),
             password: "secret".into(), use_ssl: true, accept_invalid_certs: false,
+            client_cert: String::new(), client_key: String::new(),
             channel: "#weechat".into(), tunnel_port: None, auto_reconnect: true,
             bind_netid: bind_netid.map(String::from), list_networks: bind_netid.is_none(),
         }
@@ -2507,6 +2595,110 @@ mod tests {
     #[test]
     fn search_attributes_are_escaped() {
         assert_eq!(escape_attribute("did it; work"), "did\\sit\\:\\swork");
+    }
+
+    fn certfp_config() -> IrcConfig {
+        IrcConfig { client_cert: "/tmp/me.pem".into(), password: String::new(), ..config(None) }
+    }
+
+    #[test]
+    fn certfp_logs_in_with_sasl_external() {
+        let config = certfp_config();
+        let mut session = Session::new("sam");
+        let sent = feed(&mut session, &config, &[":irc.test CAP * LS :sasl=PLAIN,EXTERNAL message-tags"]);
+        assert_eq!(sent, vec!["CAP REQ :sasl message-tags".to_string()]);
+        let sent = feed(&mut session, &config, &[":irc.test CAP sam ACK :sasl message-tags"]);
+        assert_eq!(sent, vec!["AUTHENTICATE EXTERNAL".to_string()]);
+        let sent = feed(&mut session, &config, &["AUTHENTICATE +"]);
+        assert_eq!(sent, vec!["AUTHENTICATE +".to_string()]);
+    }
+
+    #[test]
+    fn certfp_sasl_username_is_the_authzid() {
+        let config = IrcConfig { sasl_username: "sam".into(), ..certfp_config() };
+        let mut session = Session::new("sam");
+        session.sasl_mech = "EXTERNAL";
+        let sent = feed(&mut session, &config, &["AUTHENTICATE +"]);
+        assert_eq!(sent, vec!["AUTHENTICATE c2Ft".to_string()]);
+    }
+
+    #[test]
+    fn rejected_certificate_falls_back_to_the_password() {
+        let config = IrcConfig { password: "secret".into(), ..certfp_config() };
+        let mut session = Session::new("sam");
+        session.sasl_mech = "EXTERNAL";
+        let sent = feed(&mut session, &config, &[":irc.test 904 sam :SASL authentication failed"]);
+        assert_eq!(sent, vec!["AUTHENTICATE PLAIN".to_string()]);
+        // The password fails too: now it is an error.
+        let events = translate(&IrcMessage::parse(":irc.test 904 sam :SASL authentication failed").unwrap(), &mut session, &mut 0, &config);
+        assert!(events.iter().any(|e| matches!(e, BackendEvent::AuthError(_))));
+    }
+
+    #[test]
+    fn rejected_certificate_without_password_is_an_error() {
+        let config = certfp_config();
+        let mut session = Session::new("sam");
+        session.sasl_mech = "EXTERNAL";
+        let events = translate(&IrcMessage::parse(":irc.test 904 sam :SASL authentication failed").unwrap(), &mut session, &mut 0, &config);
+        assert!(events.iter().any(|e| matches!(e, BackendEvent::AuthError(_))));
+    }
+
+    #[test]
+    fn sasl_is_not_requested_without_password_or_certificate() {
+        let config = IrcConfig { password: String::new(), ..config(None) };
+        let mut session = Session::new("sam");
+        let sent = feed(&mut session, &config, &[":irc.test CAP * LS :sasl message-tags"]);
+        assert_eq!(sent, vec!["CAP REQ :message-tags".to_string()]);
+    }
+
+    #[test]
+    fn certificate_needs_tls() {
+        assert!(certfp_config().has_client_cert());
+        assert!(!IrcConfig { use_ssl: false, ..certfp_config() }.has_client_cert());
+    }
+
+    #[test]
+    fn pem_blocks_split_certificate_from_key() {
+        let file = "junk\n-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE-----\n";
+        assert_eq!(pem_blocks(file, |l| l == "CERTIFICATE").len(), 2);
+        let keys = pem_blocks(file, |l| l.ends_with("PRIVATE KEY"));
+        assert_eq!(keys, vec!["-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n".to_string()]);
+    }
+
+    #[test]
+    fn unusable_key_formats_say_how_to_convert() {
+        let cert = "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n";
+        let rsa = format!("{cert}-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n");
+        assert!(identity_from_pem(&rsa, &rsa).err().unwrap().contains("PKCS#8"));
+        let enc = format!("{cert}-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n");
+        assert!(identity_from_pem(&enc, &enc).err().unwrap().contains("encrypted"));
+        assert!(identity_from_pem("nothing", "nothing").err().unwrap().contains("no certificate"));
+    }
+
+    /// A real certificate and key, made with the openssl command; skipped without it.
+    #[test]
+    fn client_identity_loads_from_pem_files() {
+        let dir = std::env::temp_dir().join(format!("wcrs-certfp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+        let made = std::process::Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=certfp-test", "-keyout"])
+            .arg(&key).arg("-out").arg(&cert)
+            .output();
+        let usable = made.as_ref().is_ok_and(|o| o.status.success())
+            && std::fs::read_to_string(&key).is_ok_and(|k| k.contains("BEGIN PRIVATE KEY"));
+        if usable {
+            let (cert_s, key_s) = (cert.to_str().unwrap(), key.to_str().unwrap());
+            assert!(load_client_identity(cert_s, key_s).is_ok());
+            // Key and certificate in one file.
+            let both = dir.join("both.pem");
+            std::fs::write(&both, format!("{}{}", std::fs::read_to_string(&key).unwrap(), std::fs::read_to_string(&cert).unwrap())).unwrap();
+            assert!(load_client_identity(both.to_str().unwrap(), "").is_ok());
+            // The certificate alone has no key.
+            assert!(load_client_identity(cert_s, "").err().unwrap().contains("no private key"));
+            assert!(load_client_identity("/nonexistent/cert.pem", "").err().unwrap().contains("can't read"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

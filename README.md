@@ -79,7 +79,7 @@ Nothing changes in the connection profile. When the relay asks for a code, WeeCh
 
 ### IRC servers
 
-Add an **IRC** connection with the server's host and port, your nick, and TLS on or off. A password is sent as the server password and, when the server offers SASL, used to log in with SASL PLAIN as *SASL username* (or your nick). It speaks a wide range of IRCv3: see [IRC protocol support](docs/irc.md).
+Add an **IRC** connection with the server's host and port, your nick, and TLS on or off. A password is sent as the server password and, when the server offers SASL, used to log in with SASL PLAIN as *SASL username* (or your nick). For certfp, point *Client cert* at a PEM file with your TLS certificate. Separate key file? Set *Cert key*. The app then logs in with SASL EXTERNAL, and if the server rejects the certificate it tries your password instead. The key has to be unencrypted PKCS#8 (`BEGIN PRIVATE KEY`), and `openssl pkcs8 -topk8 -nocrypt -in key.pem -out key8.pem` converts an older one. Register the certificate's fingerprint with the network's services before the first connect, for example `/msg NickServ CERT ADD <fingerprint>` on Libera.Chat. It speaks a wide range of IRCv3: see [IRC protocol support](docs/irc.md).
 
 ### soju and ZNC
 
@@ -175,7 +175,7 @@ All of them can be rebound in **Settings → Keybinds**.
 
 ![IRC connection dialog](screenshots/connection_irc.png)
 
-*An IRC, soju or ZNC connection with server, port, nick, username (on ZNC, `user` for all networks or `user/network` for one), SASL and TLS*
+*An IRC, soju or ZNC connection with server, port, nick, username (on ZNC, `user` for all networks or `user/network` for one), SASL, a TLS client certificate for certfp, and TLS*
 
 </details>
 

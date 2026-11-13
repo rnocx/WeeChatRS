@@ -494,6 +494,12 @@ pub struct ConnectionProfile {
     pub sasl_username: String,
     pub use_ssl: bool,
     pub accept_invalid_certs: bool,
+    /// IRC: PEM file with the TLS client certificate, for certfp login (SASL EXTERNAL).
+    #[serde(default)]
+    pub client_cert: String,
+    /// IRC: PEM file with the certificate's private key, if it isn't in `client_cert`.
+    #[serde(default)]
+    pub client_key: String,
     pub auto_connect: bool,
     #[serde(default)]
     pub save_password: bool,
@@ -606,6 +612,8 @@ impl Default for ConnectionProfile {
             sasl_username: String::new(),
             use_ssl: true,
             accept_invalid_certs: false,
+            client_cert: String::new(),
+            client_key: String::new(),
             auto_connect: false,
             save_password: false,
             channel: String::new(),
@@ -1924,6 +1932,8 @@ impl WeeChatApp {
                     password: password.clone(),
                     use_ssl: profile.use_ssl,
                     accept_invalid_certs: profile.accept_invalid_certs,
+                    client_cert: profile.client_cert.trim().to_string(),
+                    client_key: profile.client_key.trim().to_string(),
                     channel: profile.channel.clone(),
                     tunnel_port,
                     auto_reconnect: effective_auto_reconnect,

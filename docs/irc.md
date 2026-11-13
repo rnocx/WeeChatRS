@@ -8,7 +8,7 @@ All capabilities are negotiated via `CAP LS 302` on connect and requested only w
 
 | Capability | Behaviour |
 | :--- | :--- |
-| `sasl` | SASL PLAIN login, requested only when a password is set |
+| `sasl` | SASL login, requested only when a password or a client certificate is set: PLAIN with the password, or EXTERNAL with the certificate (certfp) |
 | `message-tags` | Needed for `server-time`, `msgid` and the other tag-based features |
 | `server-time` | Accurate message timestamps from the `@time=` tag |
 | `multi-prefix` | All mode prefixes shown per nick (e.g. `@+`) in NAMES and WHO |

@@ -105,6 +105,21 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).small().color(ui.visuals().weak_text_color()));
 }
 
+/// A path field with a Browse button, for a PEM certificate or key file.
+fn pem_file_row(ui: &mut egui::Ui, path: &mut String, title: &str) {
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(path).desired_width(170.0).hint_text("/path/to/file.pem"));
+        if ui.button("Browse…").clicked() {
+            if let Some(file) = rfd::FileDialog::new().set_title(title).add_filter("PEM", &["pem", "crt", "cer", "key"]).pick_file() {
+                *path = file.to_string_lossy().into_owned();
+            }
+        }
+        if !path.is_empty() && ui.small_button("Clear").clicked() {
+            path.clear();
+        }
+    });
+}
+
 /// The colours the chat area uses when a theme leaves them unset.
 fn theme_bg_fg(theme: &AppTheme) -> (Color32, Color32) {
     (
@@ -1339,6 +1354,20 @@ impl WeeChatApp {
                                     hint(ui, "Leave blank to disable SASL");
                                 });
                                 ui.end_row();
+                                ui.label("Client cert:");
+                                ui.vertical(|ui| {
+                                    pem_file_row(ui, &mut self.editing_profile.client_cert, "Choose the TLS client certificate (PEM)");
+                                    hint(ui, "certfp: log in with a TLS certificate (SASL EXTERNAL). Needs SSL");
+                                });
+                                ui.end_row();
+                                if !self.editing_profile.client_cert.trim().is_empty() {
+                                    ui.label("Cert key:");
+                                    ui.vertical(|ui| {
+                                        pem_file_row(ui, &mut self.editing_profile.client_key, "Choose the client certificate's private key (PKCS#8 PEM)");
+                                        hint(ui, "Leave blank if the key is in the certificate file");
+                                    });
+                                    ui.end_row();
+                                }
                                 ui.label("Channel:");
                                 ui.add(egui::TextEdit::singleline(&mut self.editing_profile.channel).desired_width(240.0).hint_text("#channel (optional)"));
                                 ui.end_row();

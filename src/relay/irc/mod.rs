@@ -20,6 +20,12 @@ pub struct IrcConfig {
     pub password: String,
     pub use_ssl: bool,
     pub accept_invalid_certs: bool,
+    /// PEM file with the TLS client certificate (and its private key, when
+    /// `client_key` is empty). A server that knows the certificate's fingerprint
+    /// (certfp) logs us in with SASL EXTERNAL.
+    pub client_cert: String,
+    /// PEM file with the client certificate's private key, if it isn't in `client_cert`.
+    pub client_key: String,
     pub channel: String,
     pub tunnel_port: Option<u16>,
     pub auto_reconnect: bool,
@@ -29,6 +35,18 @@ pub struct IrcConfig {
     /// On a soju login without a network, list the networks and open a connection
     /// per network. Off for the per-network connections themselves.
     pub list_networks: bool,
+}
+
+impl IrcConfig {
+    /// A client certificate is set and there is TLS to present it in.
+    pub fn has_client_cert(&self) -> bool {
+        self.use_ssl && !self.client_cert.trim().is_empty()
+    }
+
+    /// SASL is worth asking for: there is a password or a certificate to log in with.
+    pub fn has_sasl_creds(&self) -> bool {
+        !self.password.is_empty() || self.has_client_cert()
+    }
 }
 
 /// What a profile's connections find out about the server, for `IrcClient`.
@@ -494,6 +512,7 @@ mod tests {
             label: "down".into(), host: "127.0.0.1".into(), port,
             nick: "sam".into(), username: String::new(), sasl_username: String::new(),
             password: String::new(), use_ssl: false, accept_invalid_certs: false,
+            client_cert: String::new(), client_key: String::new(),
             channel: String::new(), tunnel_port: None, auto_reconnect: true,
             bind_netid: None, list_networks: true,
         };
@@ -545,6 +564,7 @@ mod tests {
             label: "znc".into(), host: host.into(), port: port.parse().unwrap(),
             nick: "tester".into(), username: "test".into(), sasl_username: String::new(),
             password: "test".into(), use_ssl: false, accept_invalid_certs: false,
+            client_cert: String::new(), client_key: String::new(),
             channel: String::new(), tunnel_port: None, auto_reconnect: false,
             bind_netid: None, list_networks: true,
         };
