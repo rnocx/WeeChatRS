@@ -684,7 +684,12 @@ impl State {
                     }
                 }
             }
-            _ => self.emit(BackendEvent::Error("Unsupported Injected command. Use /join, /part, /query, /msg, /me, /nick, /topic, /whois, /ctcp, /away, /connect, /reconnect, /disconnect, or /raw.".into())),
+            // Anything else goes to the server as a raw line, as on the IRC backend:
+            // /kick, /mode, /op, /invite, /notice, /who, /oper, /spamfilter and so on.
+            _ => {
+                let wire = expand_irc_command(&target, text).unwrap_or_else(|| text[1..].to_string());
+                self.request("irc:send-raw", json!({"serverId":server,"raw":wire}), Request::Action);
+            }
         }
     }
     fn command(&mut self, command: Command) {
@@ -1778,6 +1783,22 @@ mod tests {
             _ => None,
         }).collect();
         assert_eq!(lists, [(status, vec!["#rust".to_string(), "#linux".to_string()], true)]);
+    }
+
+    #[test]
+    fn other_commands_go_to_the_server_as_raw_lines() {
+        let (mut s, mut rx) = state();
+        s.event("irc:event:channels-sync",json!({"serverId":"net","channels":["#rust"]}));
+        drain(&mut rx);
+        let sent = |s: &mut State, text: &str| {
+            s.command(Command::Send(buffer_id("net", "#rust"), text.into()));
+            s.out.back().unwrap().clone()
+        };
+        assert!(sent(&mut s, "/kick bob flooding").contains(r#""raw":"KICK #rust bob :flooding""#));
+        assert!(sent(&mut s, "/op bob").contains(r#""raw":"MODE #rust +o bob""#));
+        assert!(sent(&mut s, "/mode #rust +m").contains(r#""raw":"mode #rust +m""#));
+        assert!(sent(&mut s, "/spamfilter").contains(r#""raw":"spamfilter""#));
+        assert!(sent(&mut s, "/notice bob hi").contains(r#""raw":"notice bob hi""#));
     }
 
     #[test]
