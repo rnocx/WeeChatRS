@@ -28,7 +28,9 @@ All capabilities are negotiated via `CAP LS 302` on connect and requested only w
 
 ## Formatting
 
-IRC formatting codes in messages and topics are drawn: bold, italic, underline, colours 0–15 (in the theme's colours), `\x04` hex colours, and reset. Reverse, strikethrough and monospace are dropped. Colours 16–98 keep the default colour.
+IRC formatting codes in messages and topics are drawn: bold, italic, underline, colours 0–15 (in the theme's colours), colours 16–98 (their fixed RGB values), `\x04` hex colours, and reset. Reverse, strikethrough and monospace are dropped.
+
+Messages that look like ASCII art stay on one row, spaces and all. Block, box-drawing and braille characters count, and so do runs of three spaces. Wide art scrolls sideways and never wraps.
 
 ## CTCP
 

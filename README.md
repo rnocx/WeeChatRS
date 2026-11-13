@@ -161,6 +161,18 @@ All of them can be rebound in **Settings → Keybinds**.
 
 *fset, for browsing and editing WeeChat options. Enums get dropdowns, booleans checkboxes, and changed options a reset button*
 
+![Mentions](screenshots/mentions.png)
+
+*Mentions: every line that named you, from every buffer on every connection. A click goes to that line*
+
+![Channel list](screenshots/channel_list.png)
+
+*`/list`: a network's channels with search, a minimum user count, sorting and a Join button. The names and counts here are sample data*
+
+![Spell check](screenshots/spell_check.png)
+
+*Spell check underlines misspelled words in the input line as you type*
+
 ![Settings window](screenshots/settings_chat.png)
 
 *Settings, with chat options, nick column alignment, and inline image and link previews*
