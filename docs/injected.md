@@ -30,6 +30,7 @@ If you only use Injected in a browser, you can paste the token by hand. Sign in 
 - Channel messages, private messages, notices and actions go both ways. `/query nick` opens an existing private conversation with its stored history.
 - *Load older messages* works, history isn't shown twice, dropped connections retry with backoff, and read positions sync through Injected's `lastseen` setting.
 - Commands: `/join`, `/part`, `/query`, `/msg`, `/me`, `/nick`, `/topic`, `/whois`, `/ctcp`, `/list`, `/away` and `/raw`. Any other command goes to the server as a raw line, so `/kick`, `/mode`, `/op`, `/invite`, `/notice`, `/who` and the operator commands work. Hide, unhide and close are in each buffer's right-click menu.
+- A message shows as soon as you send it. If Injected rejects it, the connection log says so and the line stays in the buffer.
 - Typing indicators work both ways, with the same two settings as IRC.
 - In a network's server buffer, `/connect` connects a saved network that's offline, `/reconnect` retries it and `/disconnect` takes it offline upstream. Disconnecting the WeeChatRS profile only closes this client's session.
 

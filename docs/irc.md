@@ -17,7 +17,7 @@ All capabilities are negotiated via `CAP LS 302` on connect and requested only w
 | `extended-join` | JOIN carries the account name, which shows in the join message |
 | `batch` | Used to deliver `chathistory` replies as a single atomic batch |
 | `chathistory` | `CHATHISTORY LATEST` on join, and `CHATHISTORY BEFORE` for older lines |
-| `echo-message` | The server echoes what you send, so the app doesn't echo it a second time |
+| `echo-message` | Your message shows as soon as you press Enter, and the server's copy of it is dropped when it arrives. Messages over 400 bytes wait for that copy, since a server may cut them |
 | `invite-notify` | Receive `INVITE` events for other users in shared channels |
 | `chghost` | Host changes for nicks in shared channels shown as a channel notice |
 | `userhost-in-names` | `nick!user@host` entries in NAMES are read down to the nick |

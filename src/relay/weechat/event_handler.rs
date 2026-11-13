@@ -67,6 +67,7 @@ impl WeeChatApp {
             BackendEvent::Disconnected => {
                 if let Some(conn) = self.connections.iter_mut().find(|c| c.prefix == conn_prefix) {
                     conn.server_status.clear();
+                    self.pending_echoes.clear_connection(conn_prefix);
                     conn.lag.clear();
                     conn.link_lag = Default::default();
                     conn.is_connecting = false;
@@ -1346,6 +1347,16 @@ impl WeeChatApp {
                     let is_selected = self.selected_buffer_id.as_deref() == Some(&buffer_id);
                     let mut notify_data: Option<(String, String, String)> = None;
                     let mut new_mention = false;
+                    // Our own message coming back: it takes the place of the local line.
+                    if is_self_msg {
+                        if let Some(idx) = self.buffer_idx_of(&buffer_id) {
+                            let buffer = &mut self.buffers[idx];
+                            if self.pending_echoes.reconcile(&buffer_id, Arc::make_mut(&mut buffer.messages), &line) {
+                                if is_selected { buffer.last_read_id = Some(line.id.clone()); }
+                                continue;
+                            }
+                        }
+                    }
                     if let Some(idx) = self.buffer_idx_of(&buffer_id) {
                         let buffer = &mut self.buffers[idx];
                         if let Some(pos) = buffer.messages.iter().rposition(|m| m.id == line.id) {

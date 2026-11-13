@@ -478,6 +478,7 @@ impl WeeChatApp {
                     client.fetch_buffer_list();
                 }
             }
+            self.echo_locally(&buffer_id, &msg);
             if opens_fset(&msg) {
                 // Show fset like /join shows the channel: now if it's open, else once it is.
                 let prefix = buffer_id.split('/').next().unwrap_or("").to_string();

@@ -136,7 +136,8 @@ struct Pending {
 }
 enum Request {
     History { id: String },
-    Echo { id: String, line: Line },
+    /// A message we sent and already show.
+    Echo { id: String },
     Sync,
     Action,
 }
@@ -422,28 +423,6 @@ impl State {
             self.local_echoes.remove(i);
             return false;
         }
-        // A server echo may beat its send acknowledgement. In that case the
-        // received message is authoritative and the later ACK must not echo it again.
-        let echo = self
-            .pending
-            .iter()
-            .filter_map(|(ack, p)| match &p.request {
-                Request::Echo {
-                    id: buffer,
-                    line: pending,
-                } if buffer == id
-                    && pending.prefix == line.prefix
-                    && pending.message == line.message
-                    && pending.timestamp.timestamp_millis().abs_diff(ts) <= 5000 =>
-                {
-                    Some(*ack)
-                }
-                _ => None,
-            })
-            .min();
-        if let Some(ack) = echo {
-            self.pending.remove(&ack);
-        }
         let records = self.read_lines.entry(id.into()).or_default();
         records.push_back((ts, line.notify));
         while records.len() > 2000 {
@@ -461,7 +440,12 @@ impl State {
         if failed {
             // Do not log arbitrary server text: errors can contain credentials
             // from an IRC command such as IDENTIFY or PASS.
-            self.emit(BackendEvent::Error("Injected rejected the request. Check the network connection and account permissions.".into()));
+            let message = if matches!(pending.request, Request::Echo { .. }) {
+                "Injected rejected a message you sent, so it was not delivered. Its line stays in the buffer."
+            } else {
+                "Injected rejected the request. Check the network connection and account permissions."
+            };
+            self.emit(BackendEvent::Error(message.into()));
             if let Request::History { id } = pending.request {
                 self.history_inflight.remove(&id);
                 self.emit(BackendEvent::LinesLoaded {
@@ -491,24 +475,8 @@ impl State {
                     is_prepend: true,
                 });
             }
-            Request::Echo { id, line } => {
-                // The shipped client echoes successful sends locally.
-                if self.remember(&id, &line) {
-                    self.local_echoes.push_back((
-                        id.clone(),
-                        line.prefix.clone(),
-                        line.message.clone(),
-                        line.timestamp.timestamp_millis(),
-                    ));
-                    while self.local_echoes.len() > 256 {
-                        self.local_echoes.pop_front();
-                    }
-                    self.emit(BackendEvent::LineAdded {
-                        buffer_id: id,
-                        line,
-                    });
-                }
-            }
+            // Shown when sent, and the server's copy of it was dropped as a duplicate.
+            Request::Echo { .. } => {}
             Request::Sync => {
                 self.merge_seen(&value["lastseen"]);
                 self.sync_ready = true;
@@ -607,6 +575,17 @@ impl State {
         let id = self.open(server, target);
         let who = self.nicks.get(server).cloned().unwrap_or_default();
         let line=self.line(&id,&json!({"nick":who,"message":text,"isAction":action,"timestamp":Utc::now().timestamp_millis()}),false);
+        // Show it now. The server's copy of it is dropped when it arrives, whether that
+        // is before or after the acknowledgement.
+        if self.remember(&id, &line) {
+            let now = line.timestamp.timestamp_millis();
+            self.local_echoes.retain(|(_, _, _, when)| now.abs_diff(*when) < 10_000);
+            self.local_echoes.push_back((id.clone(), line.prefix.clone(), line.message.clone(), now));
+            while self.local_echoes.len() > 256 {
+                self.local_echoes.pop_front();
+            }
+            self.emit(BackendEvent::LineAdded { buffer_id: id.clone(), line });
+        }
         self.request(
             if action {
                 "irc:send-action"
@@ -614,7 +593,7 @@ impl State {
                 "irc:send-message"
             },
             json!({"serverId":server,"target":target,"message":text}),
-            Request::Echo { id, line },
+            Request::Echo { id },
         );
     }
     fn send(&mut self, id: &str, text: &str) {
@@ -1455,28 +1434,56 @@ mod tests {
         drain(&mut rx);
     }
     #[test]
-    fn failed_send_is_not_echoed_and_error_text_is_redacted() {
+    fn a_sent_message_shows_at_once_and_a_rejection_is_reported_without_server_text() {
         let (mut s, mut rx) = state();
         let id = s.open("net", "#rust");
         drain(&mut rx);
+        let shown = |rx: &mut mpsc::UnboundedReceiver<BackendEvent>, text: &str| {
+            drain(rx).iter().filter(|e| matches!(e, BackendEvent::LineAdded { line, .. } if line.plain_prefix == "alice" && line.message == text)).count()
+        };
         s.send(&id, "hello");
         let ack = s.next_ack;
-        assert!(!drain(&mut rx)
-            .iter()
-            .any(|e| matches!(e, BackendEvent::LineAdded { .. })));
+        // Before any acknowledgement.
+        assert_eq!(shown(&mut rx, "hello"), 1);
         s.ack(ack, json!({"error":"secret-token"}));
         let events = drain(&mut rx);
-        assert!(!events
-            .iter()
-            .any(|e| matches!(e, BackendEvent::LineAdded { .. })));
+        // The line stays, and the error says it was not delivered.
+        assert!(!events.iter().any(|e| matches!(e, BackendEvent::LineAdded { .. })));
+        assert!(events.iter().any(|e| matches!(e, BackendEvent::Error(m) if m.contains("not delivered"))));
         assert!(!format!("{:?}", events).contains("secret-token"));
         s.send(&id, "hello again");
-        s.ack(s.next_ack, json!({"ok":true}));
-        assert!(drain(&mut rx).iter().any(|e|matches!(e,BackendEvent::LineAdded{line,..} if line.plain_prefix=="alice" && line.message=="hello again")));
+        assert_eq!(shown(&mut rx, "hello again"), 1);
         s.send(&id, "bad\r\nPRIVMSG #else :oops");
         assert!(drain(&mut rx)
             .iter()
             .any(|e| matches!(e, BackendEvent::Error(_))));
+    }
+    #[test]
+    fn the_server_copy_of_a_shown_message_is_dropped_before_or_after_the_acknowledgement() {
+        let (mut s, mut rx) = state();
+        let id = s.open("net", "#rust");
+        drain(&mut rx);
+        let lines = |rx: &mut mpsc::UnboundedReceiver<BackendEvent>| drain(rx).iter().filter(|e| matches!(e, BackendEvent::LineAdded { .. })).count();
+        let ts = Utc::now().timestamp_millis();
+        // Echo first.
+        s.send(&id, "one");
+        let ack = s.next_ack;
+        s.event("irc:event:message",json!({"serverId":"net","channel":"#rust","id":"e1","nick":"alice","message":"one","timestamp":ts}));
+        s.ack(ack, json!({"ok":true}));
+        assert_eq!(lines(&mut rx), 1);
+        // Acknowledgement first.
+        s.send(&id, "two");
+        s.ack(s.next_ack, json!({"ok":true}));
+        s.event("irc:event:message",json!({"serverId":"net","channel":"#rust","id":"e2","nick":"alice","message":"two","timestamp":ts}));
+        assert_eq!(lines(&mut rx), 1);
+        // Two identical messages: both server copies are dropped, a third is new.
+        s.send(&id, "same");
+        std::thread::sleep(Duration::from_millis(3));
+        s.send(&id, "same");
+        for n in 0..3 {
+            s.event("irc:event:message",json!({"serverId":"net","channel":"#rust","id":format!("s{n}"),"nick":"alice","message":"same","timestamp":ts + n}));
+        }
+        assert_eq!(lines(&mut rx), 3);
     }
     #[test]
     fn network_disconnect_is_explicit_and_buffer_ids_do_not_collide() {

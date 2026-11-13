@@ -1014,6 +1014,8 @@ pub struct WeeChatApp {
     pub(crate) typing_edit: std::time::Instant,
     /// A message was just sent, so the emptied input is not a cleared one.
     pub(crate) typing_submitted: bool,
+    /// Sent messages shown before the WeeChat relay echoes them.
+    pub(crate) pending_echoes: crate::ui::pending::PendingEchoes,
     pub(crate) show_server_headers: bool,
     pub(crate) show_inline_images: bool,
     pub(crate) show_link_previews: bool,
@@ -1360,6 +1362,7 @@ impl WeeChatApp {
             typing_text: String::new(),
             typing_edit: std::time::Instant::now(),
             typing_submitted: false,
+            pending_echoes: Default::default(),
             show_server_headers: settings.show_server_headers,
             show_inline_images: settings.show_inline_images,
             show_link_previews: settings.show_link_previews,
@@ -1851,6 +1854,32 @@ impl WeeChatApp {
         let now = chrono::Utc::now();
         let id = format!("local-{}", now.timestamp_nanos_opt().unwrap_or_default());
         let line = Line::new(id, now, "--".into(), text.into(), true, false);
+        if let Some(b) = self.buffer_by_id_mut(buffer_id) {
+            std::sync::Arc::make_mut(&mut b.messages).push_back(line);
+        }
+    }
+
+    /// Show a message we just sent to a WeeChat buffer without waiting for the relay's
+    /// echo. `handle_line_added` swaps the relay's line in for it.
+    pub(crate) fn echo_locally(&mut self, buffer_id: &str, msg: &str) {
+        let (text, action) = match msg.strip_prefix("/me ") {
+            Some(rest) => (rest, true),
+            None if msg.starts_with('/') => return,
+            None => (msg, false),
+        };
+        if text.trim().is_empty() || text.len() > crate::ui::pending::MAX_EARLY_ECHO_BYTES { return; }
+        let Some(conn) = self.connections.iter().find(|c| buffer_id.starts_with(&format!("{}/", c.prefix))) else { return };
+        if conn.backend_type != BackendType::WeeChat || !conn.client.is_connected() { return; }
+        let Some(buffer) = self.buffer_by_id(buffer_id) else { return };
+        // IRC buffers only: script buffers (Matrix, Slack…) may not tag their own lines.
+        if buffer.plugin != "irc" || !matches!(buffer.kind.as_str(), "channel" | "private") { return; }
+        let nick = conn.server_status.get(&buffer.server).map(|s| s.nick.clone()).unwrap_or_default();
+        if nick.is_empty() { return; }
+        let colored = format!("{}{}\x1B[0m", crate::relay::irc::connection::nick_color_ansi(&nick), nick);
+        let body = crate::relay::irc::connection::irc_to_ansi(text);
+        let (prefix, message) = if action { (" *".to_string(), format!("{} {}", colored, body)) } else { (colored, body) };
+        let mut line = Line::new(String::new(), chrono::Utc::now(), prefix, message, true, false);
+        line.id = self.pending_echoes.add(buffer_id, &line.plain_message, std::time::Instant::now());
         if let Some(b) = self.buffer_by_id_mut(buffer_id) {
             std::sync::Arc::make_mut(&mut b.messages).push_back(line);
         }
@@ -4315,6 +4344,7 @@ impl eframe::App for WeeChatApp {
         self.show_topic_editor(ctx);
         self.show_totp_prompt(ctx);
         self.update_typing(ctx);
+        self.pending_echoes.expire(std::time::Instant::now(), crate::ui::pending::PENDING_TTL);
         self.show_settings_window(ctx, accent_color, is_light);
         self.show_connections_window(ctx, accent_color, is_light);
 

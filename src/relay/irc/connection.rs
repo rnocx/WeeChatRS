@@ -109,6 +109,9 @@ struct Session {
     /// Commands we sent to ZNC modules ourselves, as (module, text): their
     /// echo-message copies are dropped.
     znc_echoes: Vec<(String, String)>,
+    /// Messages we showed when sent and expect back from an echo-message server, as
+    /// (lowercase target, text, when). Each echo is dropped, since the line is there.
+    pending_echoes: VecDeque<(String, String, std::time::Instant)>,
     /// A new `*status ListNetworks` result, for `Shared`.
     znc_network_list: Option<Vec<ZncNetwork>>,
     /// We hold user mode +o or +O.
@@ -172,6 +175,7 @@ impl Session {
             is_znc: false,
             znc_queries: VecDeque::new(),
             znc_echoes: Vec::new(),
+            pending_echoes: VecDeque::new(),
             znc_network_list: None,
             oper: false,
             software: String::new(),
@@ -218,6 +222,25 @@ impl Session {
             "znc.in/self-message",
             "znc.in/playback",
         ]
+    }
+
+    /// A message we are showing before its echo arrives. Entries the server never
+    /// echoed (lost, or cut short) are forgotten after `PENDING_ECHO_TTL`.
+    fn expect_echo(&mut self, target: &str, text: &str) {
+        let now = std::time::Instant::now();
+        self.pending_echoes.retain(|(_, _, sent)| now.duration_since(*sent) < PENDING_ECHO_TTL);
+        self.pending_echoes.push_back((target.to_lowercase(), text.to_string(), now));
+    }
+
+    /// Whether our own `text` to `target` is the echo of one we already show. The
+    /// oldest match goes, so identical messages pair up in the order sent.
+    fn take_echo(&mut self, target: &str, text: &str) -> bool {
+        let now = std::time::Instant::now();
+        self.pending_echoes.retain(|(_, _, sent)| now.duration_since(*sent) < PENDING_ECHO_TTL);
+        match self.pending_echoes.iter().position(|(t, x, _)| t.eq_ignore_ascii_case(target) && x == text) {
+            Some(i) => { self.pending_echoes.remove(i); true }
+            None => false,
+        }
     }
 
     /// Send `text` to a ZNC module without it showing in the chat: its echo is
@@ -361,6 +384,19 @@ const LIST_BATCH: usize = 500;
 const LAG_CHECK: Duration = Duration::from_secs(30);
 /// A lag PING unanswered this long means the connection is dead.
 const DEAD_AFTER: Duration = Duration::from_secs(120);
+
+/// With echo-message, messages longer than this wait for the server's copy: it may split
+/// or cut them, and then it would not match the line shown early.
+const EARLY_ECHO_MAX_BYTES: usize = 400;
+
+/// Whether a message we send is shown at once. Without echo-message it always is. With
+/// it, short ones are, and the server's copy of them is dropped.
+fn shows_early(echo_message: bool, text: &str) -> bool {
+    !echo_message || text.len() <= EARLY_ECHO_MAX_BYTES
+}
+
+/// How long a sent message waits for its echo before it is forgotten.
+const PENDING_ECHO_TTL: Duration = Duration::from_secs(10);
 
 /// The TLS identity for certfp: the certificate chain and its PKCS#8 key from PEM
 /// files. The key may sit in the certificate file when `key_path` is empty.
@@ -1336,6 +1372,12 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                     return events;
                 }
             }
+            // Our own message, echoed back by echo-message: the line is on screen already.
+            if msg.command == "PRIVMSG" && msg.tag("batch").is_none() && nick.eq_ignore_ascii_case(&session.our_nick)
+                && session.take_echo(&target, &text)
+            {
+                return events;
+            }
             // Output of a module command we sent; replayed lines come in a batch.
             if nick.starts_with('*') && msg.tag("batch").is_none() {
                 if let Some(query) = session.znc_queries.front_mut() {
@@ -2138,16 +2180,21 @@ pub fn spawn(
                                                 let buf = session.alloc_buffer(&buffer_id, &buffer_id, "private");
                                                 send!(BackendEvent::BufferOpened(buf));
                                             }
-                                            // Only self-echo when echo-message is not negotiated;
-                                            // with it the server sends our message back as a PRIVMSG.
-                                            if !session.negotiated_caps.contains("echo-message") {
+                                            // Show it now. With echo-message the server sends it back
+                                            // as a PRIVMSG, which take_echo drops. A long one may come
+                                            // back cut, so it waits for that copy instead.
+                                            let echo_message = session.negotiated_caps.contains("echo-message");
+                                            if shows_early(echo_message, &text) {
                                                 line_counter += 1;
                                                 let display = if let Some(inner) = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')) {
-                                                    format!("* {} {}", session.our_nick, inner)
+                                                    format!("* {} {}", session.our_nick, irc_to_ansi(inner))
                                                 } else {
-                                                    text.clone()
+                                                    irc_to_ansi(&text)
                                                 };
                                                 let colored_nick = format!("{}{}\x1B[0m", nick_color_ansi(&session.our_nick), &session.our_nick);
+                                                if echo_message {
+                                                    session.expect_echo(&buffer_id, &text);
+                                                }
                                                 send!(BackendEvent::LineAdded {
                                                     buffer_id,
                                                     line: make_line(&line_counter.to_string(), &colored_nick, &display, Utc::now(), false),
@@ -2659,6 +2706,71 @@ mod tests {
     #[test]
     fn search_attributes_are_escaped() {
         assert_eq!(escape_attribute("did it; work"), "did\\sit\\:\\swork");
+    }
+
+    fn lines_in(events: &[BackendEvent]) -> usize {
+        events.iter().filter(|e| matches!(e, BackendEvent::LineAdded { .. })).count()
+    }
+
+    #[test]
+    fn the_echo_of_a_shown_message_is_dropped_once() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        session.expect_echo("#Rust", "hello");
+        let mut feed = |line: &str| lines_in(&translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config));
+        assert_eq!(feed(":sam!s@h PRIVMSG #rust :hello"), 0);
+        // The same words again are a new message, and so is someone else's.
+        assert_eq!(feed(":sam!s@h PRIVMSG #rust :hello"), 1);
+        assert_eq!(feed(":bob!b@h PRIVMSG #rust :hello"), 1);
+    }
+
+    #[test]
+    fn identical_messages_sent_together_are_each_dropped_once() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        session.expect_echo("#rust", "ok");
+        session.expect_echo("#rust", "again");
+        session.expect_echo("#rust", "ok");
+        let mut feed = |line: &str| lines_in(&translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config));
+        assert_eq!(feed(":sam!s@h PRIVMSG #rust :ok"), 0);
+        assert_eq!(feed(":sam!s@h PRIVMSG #rust :again"), 0);
+        assert_eq!(feed(":sam!s@h PRIVMSG #rust :ok"), 0);
+        assert_eq!(feed(":sam!s@h PRIVMSG #rust :ok"), 1);
+    }
+
+    #[test]
+    fn an_action_echo_matches_and_other_targets_do_not() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        session.expect_echo("#rust", "\x01ACTION waves\x01");
+        let mut feed = |line: &str| lines_in(&translate(&IrcMessage::parse(line).unwrap(), &mut session, &mut counter, &config));
+        assert_eq!(feed(":sam!s@h PRIVMSG #other :\x01ACTION waves\x01"), 1);
+        assert_eq!(feed(":sam!s@h PRIVMSG #rust :\x01ACTION waves\x01"), 0);
+    }
+
+    #[test]
+    fn a_lost_echo_is_forgotten_after_the_timeout() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let Some(long_ago) = std::time::Instant::now().checked_sub(PENDING_ECHO_TTL + Duration::from_secs(1)) else { return };
+        session.pending_echoes.push_back(("#rust".into(), "late".into(), long_ago));
+        let events = translate(&IrcMessage::parse(":sam!s@h PRIVMSG #rust :late").unwrap(), &mut session, &mut counter, &config);
+        assert_eq!(lines_in(&events), 1);
+        assert!(session.pending_echoes.is_empty());
+    }
+
+    #[test]
+    fn long_messages_wait_for_the_servers_copy_under_echo_message() {
+        let long = "x".repeat(EARLY_ECHO_MAX_BYTES + 1);
+        assert!(shows_early(true, "short"));
+        assert!(shows_early(true, &"x".repeat(EARLY_ECHO_MAX_BYTES)));
+        assert!(!shows_early(true, &long));
+        // Without echo-message nothing else will show it.
+        assert!(shows_early(false, &long));
     }
 
     fn certfp_config() -> IrcConfig {
