@@ -95,7 +95,7 @@ The details of both, from soju's read markers and search to ZNC's playback modul
 
 ### Chat
 - **ANSI and IRC colours**: 16-color, 256-color and TrueColor, IRC formatting codes, and nick colours from the chat in the nick list.
-- **Read position**: the unread divider shows where you left off, and read markers sync with WeeChat and soju.
+- **Read position**: the unread divider shows where you left off, and read markers sync with WeeChat and soju. On a WeeChat relay the sync runs both ways: what you read here leaves WeeChat's hotlist, and a buffer read in WeeChat is read here. *Follow in WeeChat* (Settings, General) makes WeeChat switch to the buffer you open.
 - **Inline images**: a `🖼 preview` button on image links (`.png` `.jpg` `.gif` `.webp`) loads them into the chat.
 - **Link previews**: a `🔗 preview` button on other links shows the page's title, description and image.
 - **Search**: `⌘/Ctrl + F` filters the buffer. On soju it searches the server's history too.

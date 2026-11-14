@@ -655,6 +655,9 @@ impl WeeChatApp {
                     self.handle_hotlist(conn_prefix, resp);
                 }
                 "buffer_hotlist_removed" => {
+                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
+                        self.read_in_weechat(&format!("{}/{}", conn_prefix, raw_id));
+                    }
                     if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
                         conn.client.fetch_hotlist();
                     }
@@ -1411,6 +1414,9 @@ impl WeeChatApp {
                                 }
                             }
                         }
+                    }
+                    if is_selected {
+                        self.read_sync_soon();
                     }
                     if new_mention {
                         self.count_mention(&buffer_id);

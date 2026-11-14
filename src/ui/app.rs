@@ -738,6 +738,12 @@ pub struct AppSettings {
     /// shows when you start and stop.
     #[serde(default)]
     pub send_typing: bool,
+    /// On a WeeChat relay: what is read here is read in WeeChat, and the other way.
+    #[serde(default = "default_true")]
+    pub sync_read_weechat: bool,
+    /// On a WeeChat relay: WeeChat switches to the buffer opened here.
+    #[serde(default)]
+    pub follow_weechat: bool,
     pub show_server_headers: bool,
     pub show_inline_images: bool,
     pub show_link_previews: bool,
@@ -897,6 +903,8 @@ impl Default for AppSettings {
             show_mentions: true,
             show_typing: true,
             send_typing: false,
+            sync_read_weechat: true,
+            follow_weechat: false,
             show_server_headers: true,
             show_inline_images: true,
             show_link_previews: true,
@@ -1006,6 +1014,11 @@ pub struct WeeChatApp {
     pub(crate) show_mentions: bool,
     pub(crate) show_typing: bool,
     pub(crate) send_typing: bool,
+    pub(crate) sync_read_weechat: bool,
+    pub(crate) follow_weechat: bool,
+    /// When WeeChat is next told the open buffer was read, and when it last was.
+    pub(crate) read_sync_due: Option<std::time::Instant>,
+    pub(crate) read_synced_at: Option<std::time::Instant>,
     /// Who is typing, by buffer: nick and when it lapses.
     pub(crate) typing: HashMap<String, Vec<(String, std::time::Instant)>>,
     /// What we last told the others, and the input text and edit time it was based on.
@@ -1362,6 +1375,10 @@ impl WeeChatApp {
             show_mentions: settings.show_mentions,
             show_typing: settings.show_typing,
             send_typing: settings.send_typing,
+            sync_read_weechat: settings.sync_read_weechat,
+            follow_weechat: settings.follow_weechat,
+            read_sync_due: None,
+            read_synced_at: None,
             typing: HashMap::new(),
             typing_sent: None,
             typing_text: String::new(),
@@ -1679,9 +1696,10 @@ impl WeeChatApp {
             // A channel list is the app's own: nothing to tell the server about it.
             let is_list = self.buffer_by_id(&prev_id).is_some_and(|b| b.kind == crate::ui::channel_list::KIND);
             if prev_id != id && !is_list {
-                if let Some((client, raw_id)) = self.client_for_buffer(&prev_id) {
+                if let Some((client, raw_id)) = self.client_for_buffer(&prev_id).filter(|_| self.syncs_read(&prev_id)) {
                     client.mark_read(&raw_id);
                 }
+                self.read_sync_left(&prev_id);
                 self.record_local_read(&prev_id);
             }
             // Leaving a buffer ends its unread divider; the next visit sets a fresh one.
@@ -1709,6 +1727,7 @@ impl WeeChatApp {
                 b.messages.len().checked_sub(INITIAL_LINES).map(|i| b.messages[i].id.clone())
             }),
         };
+        let sync_read = self.syncs_read(&id);
         if let Some(buffer) = self.buffer_by_id_mut(&id) {
             buffer.activity = BufferActivity::None;
             buffer.unread_count = 0;
@@ -1729,9 +1748,12 @@ impl WeeChatApp {
                 if fetch_nicks {
                     client.fetch_nicks(&raw_id);
                 }
-                client.mark_read(&raw_id);
+                if sync_read {
+                    client.mark_read(&raw_id);
+                }
             }
         }
+        self.follow_in_weechat(&id);
         self.record_local_read(&id);
     }
 
@@ -2128,6 +2150,8 @@ impl eframe::App for WeeChatApp {
             show_mentions: self.show_mentions,
             show_typing: self.show_typing,
             send_typing: self.send_typing,
+            sync_read_weechat: self.sync_read_weechat,
+            follow_weechat: self.follow_weechat,
             show_server_headers: self.show_server_headers,
             show_inline_images: self.show_inline_images,
             show_link_previews: self.show_link_previews,
@@ -4372,6 +4396,8 @@ impl eframe::App for WeeChatApp {
         self.show_topic_editor(ctx);
         self.show_totp_prompt(ctx);
         self.update_typing(ctx);
+        let focused = ctx.input(|i| i.focused);
+        self.read_sync_tick(ctx, focused);
         self.pending_echoes.expire(std::time::Instant::now(), crate::ui::pending::PENDING_TTL);
         self.show_settings_window(ctx, accent_color, is_light);
         self.show_connections_window(ctx, accent_color, is_light);

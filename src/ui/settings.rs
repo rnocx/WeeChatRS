@@ -284,6 +284,12 @@ impl WeeChatApp {
         ui.checkbox(&mut self.show_lag, "Show lag in the toolbar");
         hint(ui, "For the network of the buffer you're reading. Orange from 1 second, red from 5.");
 
+        section_heading(ui, "WeeChat relay");
+        ui.checkbox(&mut self.sync_read_weechat, "Sync read state with WeeChat");
+        hint(ui, "Reading a buffer here clears it from WeeChat's hotlist and moves its read marker, and a buffer read in WeeChat is read here.");
+        ui.checkbox(&mut self.follow_weechat, "Follow in WeeChat");
+        hint(ui, "WeeChat switches to the buffer you open here, so its own screen shows the same one.");
+
         section_heading(ui, "Buffer list");
         ui.checkbox(&mut self.show_server_headers, "Show server group headers");
         ui.checkbox(&mut self.show_hidden_buffers, "Show hidden buffers");
