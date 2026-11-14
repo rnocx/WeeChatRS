@@ -309,7 +309,7 @@ impl WeeChatApp {
                     }
                 }
                 if new_mention {
-                    self.count_mention();
+                    self.count_mention(&full_id);
                 }
                 if should_notify {
                     self.notify_highlight(&full_id, &buf_name, &notify_prefix, &notify_message);
@@ -1371,7 +1371,8 @@ impl WeeChatApp {
                                 Arc::make_mut(&mut buffer.messages).pop_front();
                             }
                             new_mention = is_highlight && displayed && !is_self_msg && !is_selected
-                                && !buffer.muted && buffer.name != "highmon";
+                                && !buffer.muted && buffer.name != "highmon"
+                                && !crate::ui::app::is_highmon_buffer(&buffer.full_name);
 
                             if is_selected {
                                 buffer.last_read_id = Some(line.id.clone());
@@ -1412,7 +1413,7 @@ impl WeeChatApp {
                         }
                     }
                     if new_mention {
-                        self.count_mention();
+                        self.count_mention(&buffer_id);
                     }
                     if let Some((name, p, m)) = notify_data {
                         self.notify_highlight(&buffer_id, &name, &p, &m);

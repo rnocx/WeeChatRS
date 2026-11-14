@@ -22,6 +22,8 @@ pub(crate) struct MentionsState {
     cleared_at: Option<DateTime<Utc>>,
     /// Mentions since Mentions was last viewed, for its badge.
     pub unseen: usize,
+    /// The same count per buffer: opening a buffer takes its share off the badge.
+    unseen_in: std::collections::HashMap<String, usize>,
     /// The buffer to go back to when Mentions is toggled off.
     return_to: Option<String>,
 }
@@ -93,19 +95,30 @@ impl WeeChatApp {
                 self.leave_mentions();
             }
             self.mentions.unseen = 0;
+            self.mentions.unseen_in.clear();
         }
     }
 
     /// Called when Mentions is selected.
     pub(crate) fn mentions_viewed(&mut self) {
         self.mentions.unseen = 0;
+        self.mentions.unseen_in.clear();
         self.mentions.query.clear();
     }
 
-    /// A new mention for the badge, unless Mentions is on screen.
-    pub(crate) fn count_mention(&mut self) {
-        if self.show_mentions && !self.mentions_selected() {
+    /// A new mention in `buffer_id` for the badge, unless Mentions or that buffer is
+    /// on screen: a mention read where it was said isn't news.
+    pub(crate) fn count_mention(&mut self, buffer_id: &str) {
+        if self.show_mentions && !self.mentions_selected() && self.selected_buffer_id.as_deref() != Some(buffer_id) {
             self.mentions.unseen += 1;
+            *self.mentions.unseen_in.entry(buffer_id.to_string()).or_default() += 1;
+        }
+    }
+
+    /// Called when a buffer is opened: its mentions have been seen there.
+    pub(crate) fn mentions_seen_in(&mut self, buffer_id: &str) {
+        if let Some(seen) = self.mentions.unseen_in.remove(buffer_id) {
+            self.mentions.unseen = self.mentions.unseen.saturating_sub(seen);
         }
     }
 

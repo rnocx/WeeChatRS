@@ -1091,6 +1091,11 @@ pub struct WeeChatApp {
 
     // Tracks when the current buffer was selected; drives the unread divider transition.
     pub(crate) selected_view_since: Option<std::time::Instant>,
+    /// The unread divider's time is up, and it waits for this newest line to be
+    /// followed by another before it goes: taking it away moves the chat.
+    pub(crate) divider_held: Option<Option<String>>,
+    /// The chat's height last frame, to draw again at once when it changes.
+    pub(crate) chat_content_height: f32,
 
     // Muted buffers (stored by full_name, stable across WeeChat restarts).
     pub(crate) muted_buffer_names: HashSet<String>,
@@ -1406,6 +1411,8 @@ impl WeeChatApp {
             applied_font: (settings.font_path, settings.font_index),
             available_fonts,
             selected_view_since: None,
+            divider_held: None,
+            chat_content_height: 0.0,
             muted_buffer_names: settings.muted_buffer_names,
             buffer_notify: settings.buffer_notify,
             highlight_words_text: settings.highlight_words.join(", "),
@@ -1693,6 +1700,7 @@ impl WeeChatApp {
         self.selected_view_since = Some(std::time::Instant::now());
         if id != crate::ui::mentions::MENTIONS_ID {
             self.cleared_buffer_ids.insert(id.clone());
+            self.mentions_seen_in(&id);
         }
         // Back where it was if it was scrolled up, else the newest lines.
         self.chat_view_start = match self.chat_positions.get(&id) {
@@ -3397,8 +3405,11 @@ impl eframe::App for WeeChatApp {
                             }
                         });
                     }
-                    if let Some(line) = current_buffer_id.clone().and_then(|id| self.typing_line(ctx, &id)) {
-                        ui.label(egui::RichText::new(line).small().italics().color(text_muted));
+                    // The typing row is there whether anyone is typing or not: a row
+                    // that came and went would move the whole chat each time.
+                    let typing = current_buffer_id.clone().and_then(|id| self.typing_line(ctx, &id));
+                    if self.show_typing && (current_buffer_kind == "channel" || current_buffer_kind == "private") {
+                        ui.label(egui::RichText::new(typing.unwrap_or_else(|| " ".to_string())).small().italics().color(text_muted));
                     }
                     self.paste_progress(ui, text_muted);
                     if let Some(err) = self.np_error.clone() {
@@ -3831,6 +3842,18 @@ impl eframe::App for WeeChatApp {
                                 } else {
                                     Some(self.search_text.to_lowercase())
                                 };
+                                // The divider goes away after half a minute in view. Taking it
+                                // away moves every line above it, so it waits for the next new
+                                // line, which moves them anyway.
+                                let newest_id = messages.back().map(|l| l.id.clone());
+                                let timed_out = self.selected_view_since
+                                    .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(30));
+                                let divider_expired = if timed_out {
+                                    *self.divider_held.get_or_insert_with(|| newest_id.clone()) != newest_id
+                                } else {
+                                    self.divider_held = None;
+                                    false
+                                };
                                 for line in messages.iter().skip(chat_start) {
                                     if !show_filtered_here && !line.displayed { continue; }
 
@@ -3843,9 +3866,6 @@ impl eframe::App for WeeChatApp {
                                         let vid = vid.parse::<i64>().unwrap_or(0);
                                         lid > vid
                                     }).unwrap_or(false);
-                                    // The divider goes away after half a minute in view.
-                                    let divider_expired = self.selected_view_since
-                                        .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(30));
                                     if !marker_shown && past_visit_marker && !divider_expired {
                                         let elapsed = self.selected_view_since
                                             .map(|t| t.elapsed())
@@ -3860,8 +3880,8 @@ impl eframe::App for WeeChatApp {
                                         };
                                         if fresh {
                                             ctx.request_repaint_after(std::time::Duration::from_secs(2) - elapsed);
-                                        } else {
-                                            ctx.request_repaint_after(std::time::Duration::from_secs(30).saturating_sub(elapsed));
+                                        } else if !timed_out {
+                                            ctx.request_repaint_after(std::time::Duration::from_secs(30) - elapsed);
                                         }
                                         ui.add_space(self.sp(8.0));
                                         let font = FontId::proportional(10.0);
@@ -4255,6 +4275,14 @@ impl eframe::App for WeeChatApp {
                             }
                         });
                     }); // ScrollArea
+
+                    // The scroll area puts a chat that grew or shrank back at its bottom
+                    // one frame late. That frame is drawn now, not at the next tick, or
+                    // the chat sits out of place until then.
+                    if (chat_scroll.content_size.y - self.chat_content_height).abs() > 0.5 {
+                        self.chat_content_height = chat_scroll.content_size.y;
+                        ctx.request_repaint();
+                    }
 
                     let at_bottom = chat_scroll.state.clamped_offset().y + chat_scroll.inner_rect.height()
                         >= chat_scroll.content_size.y - 2.0;
