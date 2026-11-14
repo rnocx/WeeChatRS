@@ -2,6 +2,11 @@
 //! buffer clears its entry in WeeChat's hotlist, leaving it moves WeeChat's read
 //! marker to its end, and a buffer read in WeeChat is read here. WeeChat can also
 //! follow along, switching to the buffer that is opened here.
+//!
+//! The relay says when a buffer enters the hotlist but not when it leaves, so the
+//! hotlist is asked for every few seconds and a buffer that was in it and no longer
+//! is was read in WeeChat. A buffer that never entered it (the one WeeChat itself
+//! has open) is left alone: its lines are counted here as they arrive.
 
 use std::time::{Duration, Instant};
 
@@ -11,6 +16,8 @@ use crate::ui::app::WeeChatApp;
 const EVERY: Duration = Duration::from_secs(5);
 /// And never sooner than this after a line, so a burst is one request.
 const SETTLE: Duration = Duration::from_millis(1500);
+/// How often WeeChat's hotlist is asked for.
+const POLL: Duration = Duration::from_secs(10);
 
 impl WeeChatApp {
     fn on_weechat(&self, buffer_id: &str) -> bool {
@@ -61,6 +68,17 @@ impl WeeChatApp {
     /// Called every frame. `visible` is whether the user can see the chat: lines
     /// that arrive behind another window haven't been read.
     pub(crate) fn read_sync_tick(&mut self, ctx: &egui::Context, visible: bool) {
+        if self.sync_read_weechat && self.hotlist_polled_at.is_none_or(|at| at.elapsed() >= POLL) {
+            let mut asked = false;
+            for conn in self.connections.iter().filter(|c| c.backend_type == crate::ui::app::BackendType::WeeChat && c.client.is_connected()) {
+                conn.client.poll_hotlist();
+                asked = true;
+            }
+            self.hotlist_polled_at = Some(Instant::now());
+            if asked {
+                ctx.request_repaint_after(POLL);
+            }
+        }
         let Some(due) = self.read_sync_due else { return };
         let now = Instant::now();
         if now < due {
@@ -77,6 +95,21 @@ impl WeeChatApp {
                 client.mark_read(&raw_id);
                 self.read_synced_at = Some(now);
             }
+        }
+    }
+
+    /// WeeChat's whole hotlist for a connection came in: the buffers that were in the
+    /// last one and aren't in this one were read in WeeChat.
+    pub(crate) fn hotlist_listed(&mut self, conn_prefix: &str, listed: std::collections::HashSet<String>) {
+        let ours = format!("{conn_prefix}/");
+        let gone: Vec<String> = self.weechat_hotlist.iter()
+            .filter(|id| id.starts_with(&ours) && !listed.contains(*id))
+            .cloned()
+            .collect();
+        self.weechat_hotlist.retain(|id| !id.starts_with(&ours));
+        self.weechat_hotlist.extend(listed);
+        for id in gone {
+            self.read_in_weechat(&id);
         }
     }
 

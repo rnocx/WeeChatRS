@@ -503,7 +503,7 @@ impl WeeChatApp {
             if id == "_list_buffers" {
                 self.handle_buffer_list(conn_prefix, resp);
                 return;
-            } else if id == "_hotlist" {
+            } else if id == "_hotlist" || id == "_hotlist_poll" {
                 self.handle_hotlist(conn_prefix, resp);
                 return;
             } else if id.starts_with("_buffer_lines:") {
@@ -1019,6 +1019,9 @@ impl WeeChatApp {
     fn handle_hotlist(&mut self, conn_prefix: &str, resp: WeeChatResponse) {
         let body = Self::body_as_vec(&resp);
         let is_initial = resp.request_id.as_deref() == Some("_hotlist");
+        // The whole hotlist, not one entry of it from an event.
+        let whole = is_initial || resp.request_id.as_deref() == Some("_hotlist_poll");
+        let mut listed = std::collections::HashSet::new();
         let entry_count = body.len();
         if is_initial {
             self.log_conn_for(conn_prefix, format!("← GET /api/hotlist  {} active entr{}", entry_count, if entry_count == 1 { "y" } else { "ies" }));
@@ -1032,6 +1035,7 @@ impl WeeChatApp {
 
                 if let Some(raw_buffer_id) = raw_buffer_id {
                     let buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
+                    listed.insert(buffer_id.clone());
                     if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
                         continue;
                     }
@@ -1056,6 +1060,9 @@ impl WeeChatApp {
                     }
                 }
             }
+        }
+        if whole {
+            self.hotlist_listed(conn_prefix, listed);
         }
     }
 

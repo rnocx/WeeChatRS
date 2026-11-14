@@ -237,6 +237,10 @@ pub trait BackendClient: Send {
     /// client-side; default is a no-op.
     fn fetch_hotlist(&self) {}
 
+    /// The same request, asked again while connected to see what was read on the
+    /// server's side. Only WeeChat has one; default is a no-op.
+    fn poll_hotlist(&self) {}
+
     /// Subscribe to server-push events. WeeChat uses POST /api/sync; IRC has
     /// no equivalent; default is a no-op.
     fn sync_subscriptions(&self) {}

@@ -1019,6 +1019,9 @@ pub struct WeeChatApp {
     /// When WeeChat is next told the open buffer was read, and when it last was.
     pub(crate) read_sync_due: Option<std::time::Instant>,
     pub(crate) read_synced_at: Option<std::time::Instant>,
+    /// The buffers in WeeChat's hotlist when it was last asked for, and when that was.
+    pub(crate) weechat_hotlist: HashSet<String>,
+    pub(crate) hotlist_polled_at: Option<std::time::Instant>,
     /// Who is typing, by buffer: nick and when it lapses.
     pub(crate) typing: HashMap<String, Vec<(String, std::time::Instant)>>,
     /// What we last told the others, and the input text and edit time it was based on.
@@ -1379,6 +1382,8 @@ impl WeeChatApp {
             follow_weechat: settings.follow_weechat,
             read_sync_due: None,
             read_synced_at: None,
+            weechat_hotlist: HashSet::new(),
+            hotlist_polled_at: None,
             typing: HashMap::new(),
             typing_sent: None,
             typing_text: String::new(),

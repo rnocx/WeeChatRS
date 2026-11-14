@@ -480,6 +480,10 @@ impl BackendClient for WeeChatClient {
         self.send_api("GET /api/hotlist", Some("_hotlist"), None);
     }
 
+    fn poll_hotlist(&self) {
+        self.send_api("GET /api/hotlist", Some("_hotlist_poll"), None);
+    }
+
     fn sync_subscriptions(&self) {
         self.send_api(
             "POST /api/sync",
