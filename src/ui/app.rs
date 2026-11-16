@@ -3029,7 +3029,7 @@ impl eframe::App for WeeChatApp {
                                     if let Some(standing) = &standing {
                                         let entries = match buf_kind.as_str() {
                                             _ if !standing.oper => Vec::new(),
-                                            "server" => crate::ui::oper::server_actions(&standing.nick),
+                                            "server" => crate::ui::oper::server_actions(standing.ircd, &standing.nick),
                                             _ => crate::ui::oper::channel_actions(standing.ircd, &buf_name, &standing.nick),
                                         };
                                         if !entries.is_empty() {
