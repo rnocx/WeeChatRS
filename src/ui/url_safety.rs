@@ -109,6 +109,8 @@ pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
                 || v4.is_multicast()
                 || v4.is_unspecified()
                 || v4.is_documentation()
+                // IETF protocol assignments 192.0.0.0/24
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
                 // Carrier-grade NAT 100.64.0.0/10
                 || (o[0] == 100 && (o[1] & 0xC0) == 64)
                 // Benchmarking 198.18.0.0/15
@@ -118,6 +120,21 @@ pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
                 || o[0] >= 240)
         }
         IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // An IPv4 address carried in an IPv6 one is judged as that IPv4 address:
+            // NAT64 64:ff9b::/96, 6to4 2002::/16 and the old IPv4-compatible ::a.b.c.d.
+            let embedded = if s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+                Some((s[6], s[7]))
+            } else if s[0] == 0x2002 {
+                Some((s[1], s[2]))
+            } else if s[..6] == [0, 0, 0, 0, 0, 0] && (s[6], s[7]) != (0, 0) && (s[6], s[7]) != (0, 1) {
+                Some((s[6], s[7]))
+            } else {
+                None
+            };
+            if let Some((hi, lo)) = embedded {
+                return is_public_ip(IpAddr::V4(std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)));
+            }
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
@@ -125,6 +142,9 @@ pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
                 // Link-local fe80::/10
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // Site-local fec0::/10 (deprecated) and documentation 2001:db8::/32
+                || (s[0] & 0xffc0) == 0xfec0
+                || (s[0] == 0x2001 && s[1] == 0x0db8)
                 // IPv4-mapped — check the embedded v4
                 || v6.to_ipv4_mapped().map(|v4| !is_public_ip(IpAddr::V4(v4))).unwrap_or(false))
         }
@@ -148,6 +168,17 @@ mod tests {
         assert!(!is_safe_public_url("http://[::1]/"));
         assert!(!is_safe_public_url("http://[fc00::1]/"));
         assert!(!is_safe_public_url("http://[fe80::1]/"));
+    }
+
+    #[test]
+    fn blocks_private_ipv4_carried_in_ipv6() {
+        for url in ["http://[64:ff9b::a00:1]/", "http://[2002:c0a8:101::1]/", "http://[::127.0.0.1]/",
+            "http://[fec0::1]/", "http://[2001:db8::1]/", "http://192.0.0.8/"] {
+            assert!(!is_safe_public_url(url), "{url}");
+        }
+        // The same forms with a public IPv4 address inside are fine.
+        assert!(is_safe_public_url("http://[64:ff9b::101:101]/"));
+        assert!(is_safe_public_url("http://[2002:101:101::1]/"));
     }
 
     #[test]

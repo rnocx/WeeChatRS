@@ -62,6 +62,12 @@ mod backend {
         }).clone()
     }
 
+    /// The body as the notification service reads it: it takes markup there, so text
+    /// someone else wrote must not be read as tags, and a bare `&` or `<` is invalid.
+    fn markup_escaped(text: &str) -> String {
+        text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
     pub fn deliver(notif: &Notification) -> Result<(), String> {
         let conn = Connection::session().map_err(|e| format!("dbus session: {}", e))?;
         if std::env::var_os("FLATPAK_ID").is_some() {
@@ -96,7 +102,7 @@ mod backend {
                 replaces_id,
                 app_icon,
                 notif.title.as_str(),
-                notif.body.as_str(),
+                markup_escaped(&notif.body).as_str(),
                 actions,
                 hints,
                 expire_timeout,

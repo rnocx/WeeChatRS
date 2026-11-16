@@ -111,7 +111,11 @@ pub fn normalize_base_url(input: &str) -> Result<String, String> {
     if url.is_empty() {
         return Err("No Jirafeau server set".to_string());
     }
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
+    // The passwords and the file go to this server: only over TLS, unless it is on
+    // this computer.
+    let local = url::Url::parse(&url).ok()
+        .is_some_and(|u| u.scheme() == "http" && u.host_str().is_some_and(crate::ui::url_safety::is_loopback_host));
+    if !(url.starts_with("https://") || local) {
         return Err(format!("Server address must start with https:// (got \"{url}\")"));
     }
     Ok(url)
@@ -220,8 +224,11 @@ async fn upload_jirafeau(
     let hash = lines.next().unwrap_or_default();
     let _delete_code = lines.next();
     let crypt_key = lines.next().unwrap_or_default();
-    if hash.is_empty() {
-        return Err(format!("Unexpected reply from server: {end}"));
+    // These go into the link that is sent to the chat: nothing but what a link holds.
+    let hash_ok = !hash.is_empty() && hash.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+    let key_ok = crypt_key.chars().all(|c| c.is_ascii_alphanumeric() || "-_.~%+/=".contains(c));
+    if !hash_ok || !key_ok {
+        return Err("Unexpected reply from server".to_string());
     }
     Ok(jirafeau_link(&base, hash, crypt_key, &filename, mime, !opts.download_password.is_empty()))
 }
@@ -285,12 +292,18 @@ fn jirafeau_error(reply: &str) -> String {
 
 async fn upload_litterbox(path: &Path, duration: &str, progress: &Arc<UploadProgress>) -> Result<String, String> {
     let filename = file_name_of(path);
-    let bytes = tokio::fs::read(path).await.map_err(|e| format!("Cannot read file: {e}"))?;
-    progress.start(&filename, bytes.len() as u64);
+    let len = tokio::fs::metadata(path).await.map_err(|e| format!("Cannot read file: {e}"))?.len();
+    if len == 0 {
+        return Err("The file is empty".to_string());
+    }
+    if len > LITTERBOX_MAX_BYTES {
+        return Err(format!("{filename} is {}; Litterbox accepts up to 1 GB", human_size(len)));
+    }
+    progress.start(&filename, len);
     let time = if LITTERBOX_TIMES.iter().any(|(v, _)| *v == duration) { duration } else { "24h" };
-    let len = bytes.len() as u64;
+    let file = tokio::fs::File::open(path).await.map_err(|e| format!("Cannot read file: {e}"))?;
 
-    let file_part = reqwest::multipart::Part::stream_with_length(counted_body(bytes, progress.clone()), len)
+    let file_part = reqwest::multipart::Part::stream_with_length(file_body(file, progress.clone()), len)
         .file_name(filename.clone())
         .mime_str(mime_for(&filename))
         .map_err(|e| format!("MIME error: {e}"))?;
@@ -317,8 +330,11 @@ async fn upload_litterbox(path: &Path, duration: &str, progress: &Arc<UploadProg
         });
     }
     let url = resp.text().await.map_err(|e| format!("Failed to read response: {e}"))?.trim().to_string();
-    if url.is_empty() || url.starts_with("err") {
-        return Err(format!("Server error: {url}"));
+    // It is sent to the chat as it is: it has to be a link and nothing else.
+    let is_link = !url.contains(char::is_whitespace)
+        && url::Url::parse(&url).is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some());
+    if !is_link {
+        return Err(format!("Server error: {}", url.chars().take(200).collect::<String>()));
     }
     Ok(url)
 }
@@ -334,6 +350,34 @@ fn http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> 
         .timeout(timeout)
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))
+}
+
+/// Litterbox's size limit.
+const LITTERBOX_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// A file as a request body, read a piece at a time as it is sent, so a large file is
+/// never held in memory. Reports progress, and stops if cancelled.
+fn file_body(file: tokio::fs::File, progress: Arc<UploadProgress>) -> reqwest::Body {
+    let stream = futures_util::stream::unfold(Some(file), move |file| {
+        let progress = progress.clone();
+        async move {
+            let mut file = file?;
+            if progress.is_cancelled() {
+                return Some((Err(std::io::Error::new(std::io::ErrorKind::Interrupted, CANCELLED)), None));
+            }
+            let mut piece = vec![0u8; STREAM_PIECE];
+            match file.read(&mut piece).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    piece.truncate(n);
+                    progress.sent.fetch_add(n as u64, Ordering::Relaxed);
+                    Some((Ok(piece), Some(file)))
+                }
+                Err(e) => Some((Err(e), None)),
+            }
+        }
+    });
+    reqwest::Body::wrap_stream(stream)
 }
 
 /// A request body that reports progress as it's sent, and aborts if cancelled.

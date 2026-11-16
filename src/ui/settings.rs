@@ -164,6 +164,56 @@ const SETTINGS_SIZE: [f32; 2] = [760.0, 560.0];
 const CONNECTIONS_SIZE: [f32; 2] = [620.0, 600.0];
 
 impl WeeChatApp {
+    /// Saves the connection being edited, with its passwords in the keychain when
+    /// asked to. A password under the connection's old name, or one no longer to be
+    /// kept, is removed. Fails when another connection would get the same prefix
+    /// (the label in lower case, other characters as `_`), which names its buffers.
+    fn save_edited_profile(&mut self) -> Result<(), String> {
+        self.profile_save_error = None;
+        let profile = self.editing_profile.clone();
+        let prefix = profile.prefix();
+        let taken = self.profiles.iter().enumerate()
+            .any(|(i, other)| Some(i) != self.editing_profile_idx && other.prefix() == prefix);
+        if taken {
+            return Err(if profile.label.trim().is_empty() {
+                "Give the connection a label: another one is without a label too.".to_string()
+            } else {
+                format!("Another connection is called almost the same as \"{}\". Choose a different label.", profile.label)
+            });
+        }
+        let old = self.editing_profile_idx.and_then(|i| self.profiles.get(i)).cloned();
+        let secrets = [
+            (profile.keyring_host_key(), profile.save_password, &self.editing_password,
+                old.as_ref().map(|o| o.keyring_host_key())),
+            (profile.ssh_keyring_key(), profile.ssh_save_password, &self.editing_ssh_password,
+                old.as_ref().map(|o| o.ssh_keyring_key())),
+        ];
+        for (key, keep, secret, old_key) in secrets {
+            if keep && !secret.is_empty() {
+                crate::ui::secure_storage::save_by_key(&key, secret)
+                    .map_err(|e| format!("The keychain didn't take the password: {e}"))?;
+            } else if !keep {
+                let _ = crate::ui::secure_storage::delete_by_key(&key);
+            }
+            // Not when the password couldn't be read to move it: it would be lost.
+            if let Some(old_key) = old_key.filter(|k| *k != key && (!keep || !secret.is_empty())) {
+                let _ = crate::ui::secure_storage::delete_by_key(&old_key);
+            }
+        }
+        // Cache passwords for the session so connect skips prompts.
+        if !self.editing_password.is_empty() {
+            self.session_passwords.insert(prefix.clone(), self.editing_password.clone());
+        }
+        if !self.editing_ssh_password.is_empty() {
+            self.session_ssh_passwords.insert(prefix, self.editing_ssh_password.clone());
+        }
+        match self.editing_profile_idx {
+            Some(idx) if idx < self.profiles.len() => self.profiles[idx] = profile,
+            _ => self.profiles.push(profile),
+        }
+        Ok(())
+    }
+
     fn settings_viewport_id() -> ViewportId { ViewportId::from_hash_of("weechatrs_settings") }
     fn connections_viewport_id() -> ViewportId { ViewportId::from_hash_of("weechatrs_connections") }
 
@@ -1375,7 +1425,13 @@ impl WeeChatApp {
                                 ui.label("SASL username:");
                                 ui.vertical(|ui| {
                                     ui.add(egui::TextEdit::singleline(&mut self.editing_profile.sasl_username).desired_width(240.0).hint_text("leave blank to use nick"));
-                                    hint(ui, "Leave blank to disable SASL");
+                                    hint(ui, "The account SASL logs in to, with the password above");
+                                });
+                                ui.end_row();
+                                ui.label("");
+                                ui.vertical(|ui| {
+                                    ui.checkbox(&mut self.editing_profile.sasl_optional, "Stay connected if the login fails");
+                                    hint(ui, "Off: a refused SASL login ends the connection, so your host isn't shown without your account");
                                 });
                                 ui.end_row();
                                 ui.label("Client cert:");
@@ -1456,35 +1512,18 @@ impl WeeChatApp {
                                 egui::Button::new(RichText::new("Save").strong().color(Color32::WHITE))
                                     .fill(accent_color).min_size(Vec2::new(80.0, 28.0))
                             ).clicked() {
-                                if self.editing_profile.save_password && !self.editing_password.is_empty() {
-                                    let key = self.editing_profile.keyring_host_key();
-                                    let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_password);
+                                match self.save_edited_profile() {
+                                    Ok(()) => {
+                                        self.injected_import = Default::default();
+                                        self.conn_show_add = false;
+                                        self.editing_profile = ConnectionProfile::default();
+                                        self.editing_password.clear();
+                                        self.editing_ssh_password.clear();
+                                        self.editing_profile_idx = None;
+                                        if let Ok(mut t) = self.ssh_test.lock() { *t = None; }
+                                    }
+                                    Err(e) => self.profile_save_error = Some(e),
                                 }
-                                if self.editing_profile.ssh_save_password && !self.editing_ssh_password.is_empty() {
-                                    let key = self.editing_profile.ssh_keyring_key();
-                                    let _ = crate::ui::secure_storage::save_by_key(&key, &self.editing_ssh_password);
-                                }
-                                // Cache passwords for the session so connect skips prompts.
-                                let pfx = self.editing_profile.prefix();
-                                if !self.editing_password.is_empty() {
-                                    self.session_passwords.insert(pfx.clone(), self.editing_password.clone());
-                                }
-                                if !self.editing_ssh_password.is_empty() {
-                                    self.session_ssh_passwords.insert(pfx, self.editing_ssh_password.clone());
-                                }
-                                let profile = self.editing_profile.clone();
-                                if let Some(idx) = self.editing_profile_idx {
-                                    if idx < self.profiles.len() { self.profiles[idx] = profile; }
-                                } else {
-                                    self.profiles.push(profile);
-                                }
-                                self.injected_import = Default::default();
-                                self.conn_show_add = false;
-                                self.editing_profile = ConnectionProfile::default();
-                                self.editing_password.clear();
-                                self.editing_ssh_password.clear();
-                                self.editing_profile_idx = None;
-                                if let Ok(mut t) = self.ssh_test.lock() { *t = None; }
                             }
                             if ui.button("Cancel").clicked() {
                                 self.injected_import = Default::default();
@@ -1493,9 +1532,13 @@ impl WeeChatApp {
                                 self.editing_password.clear();
                                 self.editing_ssh_password.clear();
                                 self.editing_profile_idx = None;
+                                self.profile_save_error = None;
                                 if let Ok(mut t) = self.ssh_test.lock() { *t = None; }
                             }
                         });
+                        if let Some(error) = &self.profile_save_error {
+                            ui.label(RichText::new(format!("{} {error}", icons::WARNING)).small().color(Color32::from_rgb(230, 150, 40)));
+                        }
                     });
             } else {
                 if self.profiles.is_empty() {
@@ -1634,7 +1677,15 @@ impl WeeChatApp {
         }
         if let Some(idx) = do_delete {
             if idx < self.profiles.len() {
-                self.profiles.remove(idx);
+                let gone = self.profiles.remove(idx);
+                // Its passwords go with it.
+                for key in [gone.keyring_host_key(), gone.ssh_keyring_key()] {
+                    if let Err(e) = crate::ui::secure_storage::delete_by_key(&key) {
+                        log::warn!("removing a deleted connection's password from the keychain: {e}");
+                    }
+                }
+                self.session_passwords.remove(&gone.prefix());
+                self.session_ssh_passwords.remove(&gone.prefix());
                 if self.conn_connect_idx == Some(idx) { self.conn_connect_idx = None; }
             }
         }

@@ -162,7 +162,7 @@ impl WeeChatApp {
             self.input_text.clear();
         }
 
-        let pos = self.input_text.len();
+        let pos = self.input_text.chars().count();
         if let Some(mut state) = TextEditState::load(ctx, id) {
             state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
             state.store(ctx, id);
@@ -502,10 +502,9 @@ impl WeeChatApp {
     }
 
     pub(crate) fn send_command(&mut self, command: &str) {
-        if command.starts_with("/query ") {
-            self.pending_buffer_switch = Some(command[7..].trim().to_string());
-        } else if command.starts_with("/join ") {
-            self.pending_buffer_switch = Some(command[6..].trim().to_string());
+        // The buffer to show is the first word: a channel key may follow it.
+        if let Some(rest) = command.strip_prefix("/query ").or_else(|| command.strip_prefix("/join ")) {
+            self.pending_buffer_switch = rest.split_whitespace().next().map(str::to_string);
         }
 
         if let Some(buffer_id) = self.selected_buffer_id.clone() {

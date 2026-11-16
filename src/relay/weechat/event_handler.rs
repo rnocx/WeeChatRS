@@ -994,7 +994,14 @@ impl WeeChatApp {
             self.rebuild_buffer_idx();
 
             if let Some(target) = self.pending_buffer_switch.take() {
-                if let Some(found) = self.buffers.iter().find(|b| b.name == target || b.full_name.ends_with(&target)) {
+                // The buffer of that name: its short name, or the last part of its full
+                // name (`irc.libera.#chan`). Not any name that merely ends the same way.
+                let named = |b: &Buffer| b.name.eq_ignore_ascii_case(&target)
+                    || b.full_name.len() > target.len()
+                        && b.full_name.is_char_boundary(b.full_name.len() - target.len())
+                        && b.full_name[b.full_name.len() - target.len()..].eq_ignore_ascii_case(&target)
+                        && b.full_name[..b.full_name.len() - target.len()].ends_with(['.', '/']);
+                if let Some(found) = self.buffers.iter().find(|b| b.id.starts_with(&format!("{conn_prefix}/")) && named(b)) {
                     let id = found.id.clone();
                     self.select_buffer(id);
                 } else {
@@ -1282,7 +1289,8 @@ impl WeeChatApp {
         self.request_attention = true;
 
         let sender = Self::strip_ansi(prefix);
-        let body = Self::strip_ansi(message);
+        // A long message is cut: a notification shows a few lines at most.
+        let body: String = Self::strip_ansi(message).chars().take(300).collect();
 
         // Channel buffers in IRC start with #/&/!, WeeChat passes the same. If
         // the buffer name looks like a channel, prefix the title with it; for

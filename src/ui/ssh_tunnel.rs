@@ -172,9 +172,13 @@ impl TunnelSpec {
         let (target, port) = parse_server(&self.server)?;
         let exe = askpass_exe().map_err(|e| format!("Can't find this app's program for ssh's prompts: {e}"))?;
         let mut cmd = std::process::Command::new("ssh");
+        cmd.arg("-N");
+        // ssh can't ask about a new host key here, so one is accepted and remembered,
+        // unless the user's own ssh config has decided otherwise.
+        if asks_about_new_host_keys(&target, port) {
+            cmd.args(["-o", "StrictHostKeyChecking=accept-new"]);
+        }
         cmd.args([
-            "-N",
-            "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=10",
             "-o", "ServerAliveCountMax=3",
@@ -228,6 +232,32 @@ impl TunnelSpec {
         }
         Ok(cmd)
     }
+}
+
+/// Whether ssh would ask the user about a host key it hasn't seen (its default,
+/// `StrictHostKeyChecking ask`), going by `ssh -G`, which reads the configuration
+/// without connecting. A config that says `yes`, `no` or `accept-new` is the user's
+/// choice and is left alone. When ssh can't say, it is taken to ask.
+fn asks_about_new_host_keys(target: &str, port: Option<u16>) -> bool {
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.arg("-G");
+    if let Some(port) = port {
+        cmd.args(["-p", &port.to_string()]);
+    }
+    cmd.arg("--").arg(target).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let Ok(out) = cmd.output() else { return true };
+    host_key_policy_asks(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn host_key_policy_asks(ssh_g_output: &str) -> bool {
+    ssh_g_output.lines()
+        .find_map(|l| l.trim().strip_prefix("stricthostkeychecking "))
+        .is_none_or(|value| value.trim() == "ask")
 }
 
 /// The program ssh runs for its prompts: this app. Tests run as another program, so
@@ -484,6 +514,15 @@ mod tests {
         drop(tunnel);
         std::thread::sleep(Duration::from_millis(500));
         assert!(!listening(), "ssh still running after drop");
+    }
+
+    #[test]
+    fn only_the_default_host_key_policy_is_replaced() {
+        assert!(host_key_policy_asks("user bob\nstricthostkeychecking ask\nport 22\n"));
+        assert!(host_key_policy_asks(""));
+        for chosen in ["true", "yes", "false", "no", "accept-new", "off"] {
+            assert!(!host_key_policy_asks(&format!("stricthostkeychecking {chosen}\n")), "{chosen}");
+        }
     }
 
     #[test]

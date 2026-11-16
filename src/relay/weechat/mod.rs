@@ -119,8 +119,21 @@ impl WeeChatClient {
     }
 }
 
+/// One line of input for WeeChat: line breaks in it would be read as further commands.
+fn one_line(text: &str) -> String {
+    text.chars().map(|c| if matches!(c, '\r' | '\n' | '\0') { ' ' } else { c }).collect()
+}
+
+impl Drop for WeeChatClient {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(ClientCommand::Disconnect);
+    }
+}
+
 impl BackendClient for WeeChatClient {
     fn connect(&mut self) {
+        // A connection this client already has ends when its sender is replaced.
+        let _ = self.cmd_tx.send(ClientCommand::Disconnect);
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ClientCommand>();
         self.cmd_tx = cmd_tx;
 
@@ -255,10 +268,9 @@ impl BackendClient for WeeChatClient {
                         let mut clean = false;
                         let mut last_received = std::time::Instant::now();
 
-                        // Check for dead connection every 60 s; disconnect if silent for 5 min.
-                        // We do NOT send WebSocket Ping frames because many relay setups (nginx
-                        // proxies, WeeChat itself) close the connection on receiving an
-                        // application-initiated Ping, causing spurious reconnect loops.
+                        // Check for a dead connection every 60 s: one that has been silent
+                        // for 5 minutes is dropped. A quiet relay is pinged below, so its
+                        // pong keeps a live connection from looking dead.
                         let mut idle_check = tokio::time::interval(Duration::from_secs(60));
                         idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                         idle_check.tick().await; // skip the immediate first tick
@@ -311,14 +323,16 @@ impl BackendClient for WeeChatClient {
                                     }
                                     _ => {}
                                 },
-                                Some(cmd) = cmd_rx.recv() => match cmd {
-                                    ClientCommand::Text(t) => {
+                                cmd = cmd_rx.recv() => match cmd {
+                                    Some(ClientCommand::Text(t)) => {
                                         if let Err(e) = ws_tx.send(Message::Text(t)).await {
                                             send!(BackendEvent::Error(format!("Send error: {}", e)));
                                             break;
                                         }
                                     }
-                                    ClientCommand::Disconnect => {
+                                    // The client was dropped (a new connection took its
+                                    // place): the same as being asked to disconnect.
+                                    None | Some(ClientCommand::Disconnect) => {
                                         let _ = ws_tx.send(Message::Close(None)).await;
                                         connected.store(false, Ordering::Relaxed);
                                         send!(BackendEvent::Disconnected);
@@ -354,6 +368,8 @@ impl BackendClient for WeeChatClient {
                             }
                         }
 
+                        // However it ended: a failed send leaves this set.
+                        connected.store(false, Ordering::Relaxed);
                         if clean { return; }
                     }
                     Err(e) => {
@@ -395,10 +411,17 @@ impl BackendClient for WeeChatClient {
     }
 
     fn send_message(&self, buffer_id: &str, text: &str) {
+        let Ok(id) = buffer_id.parse::<i64>() else { return };
+        if !self.is_connected() {
+            // It would be dropped while the connection is retried: say so in the log.
+            let _ = self.event_tx.send(BackendEvent::ConnLog(format!("Not connected, so this was not sent: {}", one_line(text).chars().take(80).collect::<String>())));
+            self.ctx.request_repaint();
+            return;
+        }
         self.send_api(
             "POST /api/input",
             None,
-            Some(json!({ "buffer_id": buffer_id.parse::<i64>().unwrap_or(0), "command": text })),
+            Some(json!({ "buffer_id": id, "command": one_line(text) })),
         );
     }
 
@@ -420,11 +443,12 @@ impl BackendClient for WeeChatClient {
     }
 
     fn complete(&self, buffer_id: &str, text: &str, position: usize, tag: &str) {
+        let Ok(id) = buffer_id.parse::<i64>() else { return };
         self.send_api(
             "POST /api/completion",
             Some(&format!("_completion:{}", tag)),
             Some(json!({
-                "buffer_id": buffer_id.parse::<i64>().unwrap_or(0),
+                "buffer_id": id,
                 "command": text,
                 "position": position,
             })),

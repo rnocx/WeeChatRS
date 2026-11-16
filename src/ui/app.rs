@@ -105,15 +105,61 @@ async fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
     if !is_safe_public_url(url) {
         return Err("blocked: non-public URL".to_string());
     }
-    // Many hosts (e.g. Wikimedia) answer 403 to requests without a User-Agent.
-    let client = crate::ui::url_safety::public_client(
-        std::time::Duration::from_secs(15),
-        concat!("Mozilla/5.0 (compatible; WeeChatRS/", env!("CARGO_PKG_VERSION"), ")"),
-    ).map_err(|e| e.to_string())?;
+    let client = image_client()?;
     // Fail on 4xx/5xx instead of trying to decode the error page as an image.
     let resp = client.get(url).send().await.map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?;
     read_capped(resp, MAX_IMAGE_BYTES).await
+}
+
+/// The client all images are fetched with, so connections and the TLS setup are reused.
+fn image_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| crate::ui::url_safety::public_client(
+        std::time::Duration::from_secs(15),
+        // Many hosts (e.g. Wikimedia) answer 403 to requests without a User-Agent.
+        concat!("Mozilla/5.0 (compatible; WeeChatRS/", env!("CARGO_PKG_VERSION"), ")"),
+    ).map_err(|e| e.to_string())).as_ref().map_err(Clone::clone)
+}
+
+/// The same for link previews.
+fn preview_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| crate::ui::url_safety::public_client(
+        std::time::Duration::from_secs(10),
+        concat!("Mozilla/5.0 WeeChatRS/", env!("CARGO_PKG_VERSION"), " (link preview)"),
+    ).map_err(|e| e.to_string())).as_ref().map_err(Clone::clone)
+}
+
+/// Inline images are drawn at most 500 px wide; the texture is kept well under the
+/// GPU's size limit.
+const IMAGE_MAX_SIDE: u32 = 2048;
+/// Largest picture decoded, a side: one that declares more is refused before any of it
+/// is allocated.
+const IMAGE_MAX_DECODE_SIDE: u32 = 12_000;
+/// Most memory the decoder may use for one picture.
+const IMAGE_MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// An image someone linked to, fetched and decoded off the UI thread.
+async fn fetch_image(url: &str) -> Result<egui::ColorImage, String> {
+    let bytes = fetch_image_bytes(url).await?;
+    tokio::task::spawn_blocking(move || decode_image(&bytes)).await.map_err(|e| e.to_string())?
+}
+
+fn decode_image(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format().map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(IMAGE_MAX_DECODE_SIDE);
+    limits.max_image_height = Some(IMAGE_MAX_DECODE_SIDE);
+    limits.max_alloc = Some(IMAGE_MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let mut img = reader.decode().map_err(|e| e.to_string())?;
+    if img.width() > IMAGE_MAX_SIDE || img.height() > IMAGE_MAX_SIDE {
+        img = img.thumbnail(IMAGE_MAX_SIDE, IMAGE_MAX_SIDE);
+    }
+    let rgba = img.to_rgba8();
+    Ok(egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
 }
 
 /// A response body, or an error as soon as it passes `max` bytes. The length header is
@@ -178,13 +224,10 @@ async fn fetch_link_preview(url: String) -> Result<LinkPreview, String> {
     if !is_safe_public_url(&url) {
         return Err("blocked: non-public URL".to_string());
     }
-    let client = crate::ui::url_safety::public_client(
-        std::time::Duration::from_secs(10),
-        "Mozilla/5.0 WeeChatRS/0.1 (link preview)",
-    ).map_err(|e| e.to_string())?;
+    let client = preview_client()?;
 
     if is_youtube_url(&url) {
-        if let Ok(preview) = fetch_youtube_preview(&client, &url).await {
+        if let Ok(preview) = fetch_youtube_preview(client, &url).await {
             return Ok(preview);
         }
     }
@@ -533,6 +576,9 @@ pub struct ConnectionProfile {
     pub ssh_save_password: bool,
     #[serde(default = "default_true")]
     pub auto_reconnect: bool,
+    /// IRC: stay connected, without an account, when the SASL login fails.
+    #[serde(default)]
+    pub sasl_optional: bool,
 }
 
 
@@ -632,6 +678,7 @@ impl Default for ConnectionProfile {
             ssh_key_file: String::new(),
             ssh_save_password: false,
             auto_reconnect: true,
+            sasl_optional: false,
         }
     }
 }
@@ -971,6 +1018,8 @@ pub struct WeeChatApp {
     pub(crate) editing_password: String,
     pub(crate) injected_import: crate::relay::injected::login::ImportState,
     pub(crate) editing_ssh_password: String,
+    /// Why the connection being edited couldn't be saved.
+    pub(crate) profile_save_error: Option<String>,
     pub(crate) editing_profile_idx: Option<usize>,
     pub(crate) show_connections: bool,      // connections manager window
     pub(crate) conn_show_add: bool,         // add/edit form inside connections window
@@ -1050,8 +1099,8 @@ pub struct WeeChatApp {
     // Image preview state
     pub(crate) image_cache: HashMap<String, ImageState>,
     pub(crate) image_expanded: HashSet<String>,
-    pub(crate) image_tx: mpsc::UnboundedSender<(String, Result<Vec<u8>, String>)>,
-    pub(crate) image_rx: mpsc::UnboundedReceiver<(String, Result<Vec<u8>, String>)>,
+    pub(crate) image_tx: mpsc::UnboundedSender<(String, Result<egui::ColorImage, String>)>,
+    pub(crate) image_rx: mpsc::UnboundedReceiver<(String, Result<egui::ColorImage, String>)>,
 
     // Link preview state
     pub(crate) preview_cache: HashMap<String, PreviewState>,
@@ -1341,6 +1390,7 @@ impl WeeChatApp {
             editing_password: String::new(),
             injected_import: Default::default(),
             editing_ssh_password: String::new(),
+            profile_save_error: None,
             editing_profile_idx: None,
             show_connections: false,
             conn_show_add: false,
@@ -2049,6 +2099,7 @@ impl WeeChatApp {
                     auto_reconnect: effective_auto_reconnect,
                     bind_netid: None,
                     list_networks: true,
+                    sasl_optional: profile.sasl_optional,
                 };
                 Box::new(crate::relay::irc::IrcClient::new(config, per_conn_tx.clone(), ctx.clone()))
             }
@@ -2260,29 +2311,13 @@ impl eframe::App for WeeChatApp {
         let mut got_image = false;
         while let Ok((url, result)) = self.image_rx.try_recv() {
             match result {
-                Ok(bytes) => {
-                    match image::load_from_memory(&bytes) {
-                        Ok(mut img) => {
-                            // Inline previews render ≤500px wide; cap the texture well
-                            // below GPU texture-size limits.
-                            const MAX_SIDE: u32 = 2048;
-                            if img.width() > MAX_SIDE || img.height() > MAX_SIDE {
-                                img = img.thumbnail(MAX_SIDE, MAX_SIDE);
-                            }
-                            let rgba = img.to_rgba8();
-                            let size = [rgba.width() as usize, rgba.height() as usize];
-                            let color_img = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                            let handle = ctx.load_texture(&url, color_img, egui::TextureOptions::default());
-                            self.image_cache.insert(url, ImageState::Loaded(handle));
-                        }
-                        Err(e) => {
-                            log::warn!("image decode failed for {url}: {e}");
-                            self.image_cache.insert(url, ImageState::Failed);
-                        }
-                    }
+                // Decoded and scaled by the task that fetched it.
+                Ok(color_img) => {
+                    let handle = ctx.load_texture(&url, color_img, egui::TextureOptions::default());
+                    self.image_cache.insert(url, ImageState::Loaded(handle));
                 }
                 Err(e) => {
-                    log::warn!("image fetch failed for {url}: {e}");
+                    log::warn!("image failed for {url}: {e}");
                     self.image_cache.insert(url, ImageState::Failed);
                 }
             }
@@ -2302,7 +2337,7 @@ impl eframe::App for WeeChatApp {
                             let img_url_owned = img_url.clone();
                             let ctx2 = ctx.clone();
                             tokio::spawn(async move {
-                                let result = fetch_image_bytes(&img_url_owned).await;
+                                let result = fetch_image(&img_url_owned).await;
                                 let _ = tx.send((img_url_owned, result));
                                 ctx2.request_repaint();
                             });
@@ -4097,10 +4132,12 @@ impl eframe::App for WeeChatApp {
                                                         }
                                                         let url_for_click = url.clone();
                                                         let link_rect = link_resp.rect;
-                                                        if ui.input(|i| {
-                                                            i.pointer.primary_clicked()
-                                                            && i.pointer.interact_pos().map_or(false, |p| link_rect.contains(p))
-                                                        }) {
+                                                        // Raw input sees a click whatever is drawn on top, so
+                                                        // it only counts when the chat is the top layer there:
+                                                        // not under a menu or a dialog.
+                                                        let click_at = ui.input(|i| i.pointer.interact_pos()
+                                                            .filter(|p| i.pointer.primary_clicked() && link_rect.contains(*p)));
+                                                        if click_at.is_some_and(|p| ui.ctx().layer_id_at(p) == Some(ui.layer_id())) {
                                                             ui.ctx().open_url(egui::OpenUrl::new_tab(url_for_click));
                                                         }
                                                         if self.show_inline_images && Self::is_image_url(url) && is_safe_public_url(url) {
@@ -4118,7 +4155,7 @@ impl eframe::App for WeeChatApp {
                                                                         let url_owned = url.clone();
                                                                         let ctx2 = ctx.clone();
                                                                         tokio::spawn(async move {
-                                                                            let result = fetch_image_bytes(&url_owned).await;
+                                                                            let result = fetch_image(&url_owned).await;
                                                                             let _ = tx.send((url_owned, result));
                                                                             ctx2.request_repaint();
                                                                         });
@@ -4169,7 +4206,7 @@ impl eframe::App for WeeChatApp {
                                                                         let tx = self.image_tx.clone();
                                                                         let url_owned = eurl.clone();
                                                                         tokio::spawn(async move {
-                                                                            let result = fetch_image_bytes(&url_owned).await;
+                                                                            let result = fetch_image(&url_owned).await;
                                                                             let _ = tx.send((url_owned, result));
                                                                         });
                                                                     }

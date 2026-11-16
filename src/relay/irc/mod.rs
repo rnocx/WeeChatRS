@@ -35,6 +35,8 @@ pub struct IrcConfig {
     /// On a soju login without a network, list the networks and open a connection
     /// per network. Off for the per-network connections themselves.
     pub list_networks: bool,
+    /// Go on without an account when the SASL login fails, instead of disconnecting.
+    pub sasl_optional: bool,
 }
 
 impl IrcConfig {
@@ -346,7 +348,6 @@ impl Router {
         let config = IrcConfig {
             label: name.clone(),
             channel: String::new(),
-            auto_reconnect: true,
             username: if znc { format!("{}/{}", user, name) } else { self.config.username.clone() },
             bind_netid: (!znc).then(|| netid.clone()),
             list_networks: false,
@@ -523,7 +524,7 @@ mod tests {
             password: String::new(), use_ssl: false, accept_invalid_certs: false,
             client_cert: String::new(), client_key: String::new(),
             channel: String::new(), tunnel_port: None, auto_reconnect: true,
-            bind_netid: None, list_networks: true,
+            bind_netid: None, list_networks: true, sasl_optional: false,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut client = IrcClient::new(config, tx, EguiContext::default());
@@ -575,7 +576,7 @@ mod tests {
             password: "test".into(), use_ssl: false, accept_invalid_certs: false,
             client_cert: String::new(), client_key: String::new(),
             channel: String::new(), tunnel_port: None, auto_reconnect: false,
-            bind_netid: None, list_networks: true,
+            bind_netid: None, list_networks: true, sasl_optional: false,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut client = IrcClient::new(config, tx, EguiContext::default());

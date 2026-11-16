@@ -126,13 +126,25 @@ pub async fn download(code: &str) -> Result<(), String> {
     let entry = CATALOGUE.iter().find(|d| d.code == code).ok_or("Unknown dictionary")?;
     let dir = app_dict_dir().ok_or("No folder for dictionaries")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // A stalled download ends, and nothing far larger than a dictionary is kept.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Download failed: {e}"))?;
+    const MAX_BYTES: usize = 64 * 1024 * 1024;
     for ext in ["aff", "dic"] {
         let url = format!("{LO_BASE}/{}.{ext}", entry.path);
-        let bytes = reqwest::get(&url).await
+        let mut resp = client.get(&url).send().await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| format!("Download failed: {e}"))?
-            .bytes().await
             .map_err(|e| format!("Download failed: {e}"))?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("Download failed: {e}"))? {
+            if bytes.len() + chunk.len() > MAX_BYTES {
+                return Err("Download failed: the file is too large to be a dictionary".to_string());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         std::fs::write(dir.join(format!("{code}.{ext}")), &bytes).map_err(|e| format!("Couldn't save it: {e}"))?;
     }
     Ok(())

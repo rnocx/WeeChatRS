@@ -75,6 +75,10 @@ struct Session {
     sasl_done: bool,
     /// The SASL mechanism being tried: EXTERNAL (certfp) or PLAIN.
     sasl_mech: &'static str,
+    /// The login was refused and the connection is not to go on without it.
+    login_failed: bool,
+    /// `sasl` was asked for again on its own, after a refused request for all caps.
+    sasl_retried: bool,
     is_soju: bool,
     joined: HashSet<String>,
     next_number: i32,
@@ -152,6 +156,8 @@ impl Session {
             registered: false,
             sasl_done: false,
             sasl_mech: "PLAIN",
+            login_failed: false,
+            sasl_retried: false,
             is_soju: false,
             joined: HashSet::new(),
             next_number: 1,
@@ -986,7 +992,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                             session.is_znc = true;
                         }
                     }
-                    let is_continuation = msg.param(1).map(|p| p == "*").unwrap_or(false);
+                    // `CAP * LS * :caps` has more lines to come; the last has no `*`.
+                    let is_continuation = msg.params.len() > 3 && msg.param(2) == Some("*");
                     if !is_continuation {
                         session.cap_ls_done = true;
                         let req = session.cap_req(has_sasl_creds);
@@ -1014,7 +1021,21 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                         session.whois_lines.push("CAP END".to_string());
                     }
                 }
-                "NAK" => { session.whois_lines.push("CAP END".to_string()); }
+                "NAK" => {
+                    // The server refuses the whole request when one cap is wrong. The
+                    // login matters most: ask for it alone before giving up on it.
+                    let wants_sasl = has_sasl_creds && session.available_caps.contains("sasl") && !session.sasl_done;
+                    if wants_sasl && !session.sasl_retried {
+                        session.sasl_retried = true;
+                        session.whois_lines.push("CAP REQ :sasl".to_string());
+                    } else if wants_sasl && !config.sasl_optional {
+                        events.push(BackendEvent::AuthError("The server refused SASL, so there is no login. Not connecting without it.".to_string()));
+                        session.login_failed = true;
+                        session.whois_lines.push("QUIT".to_string());
+                    } else {
+                        session.whois_lines.push("CAP END".to_string());
+                    }
+                }
                 // cap-notify: server advertises a new cap mid-session — request it if wanted
                 "NEW" => {
                     let caps_str = msg.params.last().map(String::as_str).unwrap_or("");
@@ -1087,9 +1108,17 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                 return events;
             }
             let reason = msg.params.last().map(String::as_str).unwrap_or("SASL authentication failed");
-            events.push(BackendEvent::AuthError(reason.to_string()));
             session.sasl_done = true;
-            session.whois_lines.push("CAP END".to_string());
+            if config.sasl_optional {
+                events.push(BackendEvent::AuthError(reason.to_string()));
+                session.whois_lines.push("CAP END".to_string());
+            } else {
+                // Going on would join channels without the account, and on networks
+                // that cloak by account that shows the real host.
+                events.push(BackendEvent::AuthError(format!("{reason}. Not connecting without the login.")));
+                session.login_failed = true;
+                session.whois_lines.push("QUIT".to_string());
+            }
         }
 
         "001" => {
@@ -1908,6 +1937,16 @@ fn take_write_queue(session: &mut Session) -> Vec<String> {
 
 // ── Main connection task ──────────────────────────────────────────────────────
 
+/// Text as it may go into one IRC line: a line break in it would start another command.
+fn one_line(text: &str) -> String {
+    text.chars().filter(|c| !matches!(c, '\r' | '\n' | '\0')).collect()
+}
+
+/// How long a TCP connect or a TLS handshake may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the server has to finish registration (001) once connected.
+const REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// `fut`'s output, or None if the UI asks to disconnect first. Used while there is no
 /// session, so Disconnect isn't stuck behind a connect attempt or a retry delay;
 /// other commands need a session and are dropped.
@@ -1962,22 +2001,22 @@ pub fn spawn(
             if let Some(tport) = config.tunnel_port {
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
                 loop {
-                    match wait!(TcpStream::connect(("127.0.0.1", tport))) {
-                        Ok(_) => break,
-                        Err(_) => {
-                            if tokio::time::Instant::now() >= deadline {
-                                send!(BackendEvent::Error("SSH tunnel did not become ready within 15 s".to_string()));
-                                break;
-                            }
-                            wait!(tokio::time::sleep(Duration::from_millis(500)));
-                        }
+                    // ssh is listening when the port can't be bound. Connecting to it
+                    // instead would be forwarded to the IRC server as a connection.
+                    if std::net::TcpListener::bind(("127.0.0.1", tport)).is_err() { break; }
+                    if tokio::time::Instant::now() >= deadline {
+                        send!(BackendEvent::Error("SSH tunnel did not become ready within 15 s".to_string()));
+                        break;
                     }
+                    wait!(tokio::time::sleep(Duration::from_millis(500)));
                 }
             }
 
             let addr = format!("{}:{}", config.host.trim(), config.port);
 
-            let tcp = match wait!(TcpStream::connect(&addr)) {
+            let tcp = match wait!(tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)))
+                .unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "no answer from the server")))
+            {
                 Ok(s) => s,
                 Err(e) => {
                     connected.store(false, Ordering::Relaxed);
@@ -2004,15 +2043,16 @@ pub fn spawn(
                     // IRC handshake
                     let _ = write_half.write_all(b"CAP LS 302\r\n").await;
                     if !config.password.is_empty() {
-                        let _ = write_half.write_all(format!("PASS :{}\r\n", config.password).as_bytes()).await;
+                        let _ = write_half.write_all(format!("PASS :{}\r\n", one_line(&config.password)).as_bytes()).await;
                     }
-                    let _ = write_half.write_all(format!("NICK {}\r\n", config.nick).as_bytes()).await;
+                    let nick = one_line(&config.nick);
+                    let _ = write_half.write_all(format!("NICK {}\r\n", nick).as_bytes()).await;
                     let user = if config.username.is_empty() { &config.nick } else { &config.username };
-                    let user = login_name(user, &config);
-                    let _ = write_half.write_all(format!("USER {} 0 * :{}\r\n", user, config.nick).as_bytes()).await;
+                    let user = one_line(&login_name(user, &config));
+                    let _ = write_half.write_all(format!("USER {} 0 * :{}\r\n", user, nick).as_bytes()).await;
 
                     connected.store(true, Ordering::Relaxed);
-                    backoff = Duration::from_secs(1);
+                    let session_started = std::time::Instant::now();
 
                     // A PING every LAG_CHECK times the lag and shows the connection is
                     // alive; the first goes out once registration has had time to finish.
@@ -2025,7 +2065,9 @@ pub fn spawn(
                     'conn: loop {
                         // Flush outbound queue populated by translate()
                         for line in take_write_queue(&mut session) {
-                            if write_half.write_all(format!("{}\r\n", line).as_bytes()).await.is_err() {
+                            if write_half.write_all(format!("{}\r\n", one_line(&line)).as_bytes()).await.is_err() {
+                                connected.store(false, Ordering::Relaxed);
+                                send!(BackendEvent::Error("Connection lost while sending".to_string()));
                                 break 'conn;
                             }
                         }
@@ -2058,9 +2100,22 @@ pub fn spawn(
                                                 if let Some(tx) = &network_tx { let _ = tx.send(update); }
                                             }
                                             for line in take_write_queue(&mut session) {
-                                                if write_half.write_all(format!("{}\r\n", line).as_bytes()).await.is_err() {
-                                                    break 'conn;
+                                                if write_half.write_all(format!("{}\r\n", one_line(&line)).as_bytes()).await.is_err() {
+                                                    connected.store(false, Ordering::Relaxed);
+                                send!(BackendEvent::Error("Connection lost while sending".to_string()));
+                                break 'conn;
                                                 }
+                                            }
+                                            // Registered: the next reconnect starts from a short wait
+                                            // again. A server that drops us before that is retried
+                                            // ever more slowly.
+                                            if session.registered { backoff = Duration::from_secs(1); }
+                                            if session.login_failed {
+                                                // Trying again would fail the same way.
+                                                connected.store(false, Ordering::Relaxed);
+                                                send!(BackendEvent::Disconnected);
+                                                clean = true;
+                                                break 'conn;
                                             }
                                         }
                                     }
@@ -2082,6 +2137,7 @@ pub fn spawn(
                                         break 'conn;
                                     }
                                     Some(IrcCommand::SendMessage { buffer_id, text }) => {
+                                        let (buffer_id, text) = (one_line(&buffer_id), one_line(&text));
                                         // `//text` sends "/text" as a message, as in WeeChat.
                                         let (text, literal) = match text.strip_prefix("//") {
                                             Some(rest) => (format!("/{rest}"), true),
@@ -2249,7 +2305,9 @@ pub fn spawn(
                                         let line = list_command(&session.elist, min_users);
                                         log::debug!("channel list asked: {line} (ELIST {:?})", session.elist);
                                         if write_half.write_all(format!("{line}\r\n").as_bytes()).await.is_err() {
-                                            break 'conn;
+                                            connected.store(false, Ordering::Relaxed);
+                                send!(BackendEvent::Error("Connection lost while sending".to_string()));
+                                break 'conn;
                                         }
                                     }
                                     Some(IrcCommand::ZncCommand { module, text }) => {
@@ -2264,6 +2322,11 @@ pub fn spawn(
                                 }
                             }
                             _ = ping_interval.tick() => {
+                                if !session.registered && session_started.elapsed() >= REGISTER_TIMEOUT {
+                                    connected.store(false, Ordering::Relaxed);
+                                    send!(BackendEvent::Error("The server didn't finish the login within 60 s".to_string()));
+                                    break 'conn;
+                                }
                                 match session.lag_ping {
                                     Some(sent) if sent.elapsed() >= DEAD_AFTER => {
                                         // No PONG for two minutes: the connection is dead.
@@ -2277,7 +2340,9 @@ pub fn spawn(
                                         let now = std::time::Instant::now();
                                         session.lag_ping = Some(now);
                                         if write_half.write_all(b"PING :wcrs-lag\r\n").await.is_err() {
-                                            break 'conn;
+                                            connected.store(false, Ordering::Relaxed);
+                                send!(BackendEvent::Error("Connection lost while sending".to_string()));
+                                break 'conn;
                                         }
                                         send!(BackendEvent::Lag {
                                             buffer_id: Some("status".to_string()),
@@ -2315,11 +2380,15 @@ pub fn spawn(
                     }
                 };
                 let cx = tokio_native_tls::TlsConnector::from(tls_cx);
-                match wait!(cx.connect(&config.host, tcp)) {
-                    Ok(tls_stream) => { run_session!(tls_stream); }
-                    Err(e) => {
+                match wait!(tokio::time::timeout(CONNECT_TIMEOUT, cx.connect(&config.host, tcp))) {
+                    Ok(Ok(tls_stream)) => { run_session!(tls_stream); }
+                    Ok(Err(e)) => {
                         connected.store(false, Ordering::Relaxed);
                         send!(BackendEvent::Error(format!("TLS handshake failed: {}", e)));
+                    }
+                    Err(_) => {
+                        connected.store(false, Ordering::Relaxed);
+                        send!(BackendEvent::Error("TLS handshake timed out".to_string()));
                     }
                 }
             } else {
@@ -2347,6 +2416,7 @@ mod tests {
             client_cert: String::new(), client_key: String::new(),
             channel: "#weechat".into(), tunnel_port: None, auto_reconnect: true,
             bind_netid: bind_netid.map(String::from), list_networks: bind_netid.is_none(),
+            sasl_optional: false,
         }
     }
 
@@ -2817,6 +2887,45 @@ mod tests {
         session.sasl_mech = "EXTERNAL";
         let events = translate(&IrcMessage::parse(":irc.test 904 sam :SASL authentication failed").unwrap(), &mut session, &mut 0, &config);
         assert!(events.iter().any(|e| matches!(e, BackendEvent::AuthError(_))));
+    }
+
+    #[test]
+    fn a_capability_list_in_two_lines_is_requested_once() {
+        let config = config(Some("1"));
+        let mut session = Session::new("sam");
+        let sent = feed(&mut session, &config, &[":irc.test CAP * LS * :message-tags server-time"]);
+        assert!(sent.is_empty(), "{sent:?}");
+        let sent = feed(&mut session, &config, &[":irc.test CAP * LS :sasl=PLAIN batch"]);
+        assert_eq!(sent, vec!["CAP REQ :sasl message-tags server-time batch".to_string()]);
+    }
+
+    #[test]
+    fn a_refused_login_ends_the_connection() {
+        let config = config(Some("1"));
+        let mut session = Session::new("sam");
+        let events = translate(&IrcMessage::parse(":irc.test 904 sam :SASL authentication failed").unwrap(), &mut session, &mut 0, &config);
+        assert!(events.iter().any(|e| matches!(e, BackendEvent::AuthError(_))));
+        assert!(session.login_failed);
+        assert_eq!(take_write_queue(&mut session), vec!["QUIT".to_string()]);
+
+        // Unless the profile says the login is optional.
+        let config = IrcConfig { sasl_optional: true, ..config };
+        let mut session = Session::new("sam");
+        let sent = feed(&mut session, &config, &[":irc.test 904 sam :SASL authentication failed"]);
+        assert_eq!(sent, vec!["CAP END".to_string()]);
+        assert!(!session.login_failed);
+    }
+
+    #[test]
+    fn a_refused_cap_request_asks_for_the_login_alone() {
+        let config = config(Some("1"));
+        let mut session = Session::new("sam");
+        feed(&mut session, &config, &[":irc.test CAP * LS :sasl message-tags"]);
+        let sent = feed(&mut session, &config, &[":irc.test CAP * NAK :sasl message-tags"]);
+        assert_eq!(sent, vec!["CAP REQ :sasl".to_string()]);
+        let sent = feed(&mut session, &config, &[":irc.test CAP * NAK :sasl"]);
+        assert_eq!(sent, vec!["QUIT".to_string()]);
+        assert!(session.login_failed);
     }
 
     #[test]
