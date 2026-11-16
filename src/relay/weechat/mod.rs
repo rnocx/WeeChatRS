@@ -20,8 +20,14 @@ use std::time::Duration;
 
 enum ClientCommand {
     Text(String),
+    /// Ask for the buffer list. Asks that come close together are one request.
+    FetchBufferList,
     Disconnect,
 }
+
+/// The buffer list is asked for at most this often: every buffer event asks, and a
+/// network that WeeChat reconnects sends several per channel.
+const BUFFER_LIST_EVERY: Duration = Duration::from_millis(500);
 
 /// `fut`'s output, or None if the UI asks to disconnect first. Used while there is no
 /// connection, so Disconnect isn't stuck behind a connect attempt or a retry delay;
@@ -283,6 +289,9 @@ impl BackendClient for WeeChatClient {
                         );
                         lag_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                         let mut lag_ping: Option<std::time::Instant> = None;
+                        // When the buffer list is next asked for, and when it last was.
+                        let mut list_due: Option<tokio::time::Instant> = None;
+                        let mut last_list = tokio::time::Instant::now() - BUFFER_LIST_EVERY;
 
                         loop {
                             tokio::select! {
@@ -324,6 +333,11 @@ impl BackendClient for WeeChatClient {
                                     _ => {}
                                 },
                                 cmd = cmd_rx.recv() => match cmd {
+                                    Some(ClientCommand::FetchBufferList) => {
+                                        if list_due.is_none() {
+                                            list_due = Some((last_list + BUFFER_LIST_EVERY).max(tokio::time::Instant::now()));
+                                        }
+                                    }
                                     Some(ClientCommand::Text(t)) => {
                                         if let Err(e) = ws_tx.send(Message::Text(t)).await {
                                             send!(BackendEvent::Error(format!("Send error: {}", e)));
@@ -340,6 +354,15 @@ impl BackendClient for WeeChatClient {
                                         break;
                                     }
                                 },
+                                _ = tokio::time::sleep_until(list_due.unwrap_or_else(tokio::time::Instant::now)), if list_due.is_some() => {
+                                    list_due = None;
+                                    last_list = tokio::time::Instant::now();
+                                    let request = r#"{"request":"GET /api/buffers","request_id":"_list_buffers"}"#;
+                                    if let Err(e) = ws_tx.send(Message::Text(request.to_string().into())).await {
+                                        send!(BackendEvent::Error(format!("Send error: {}", e)));
+                                        break;
+                                    }
+                                }
                                 _ = lag_check.tick(), if lag_ping.is_none() => {
                                     let now = std::time::Instant::now();
                                     if let Err(e) = ws_tx.send(Message::Ping(Vec::new().into())).await {
@@ -497,7 +520,7 @@ impl BackendClient for WeeChatClient {
     }
 
     fn fetch_buffer_list(&self) {
-        self.send_api("GET /api/buffers", Some("_list_buffers"), None);
+        let _ = self.cmd_tx.send(ClientCommand::FetchBufferList);
     }
 
     fn fetch_hotlist(&self) {

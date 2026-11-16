@@ -64,6 +64,9 @@ impl SmartFilter {
                 self.joins.remove(&nick);
                 line.displayed = true;
             }
+            PresenceKind::Account => {
+                line.displayed = ours || self.spoke_lately(&nick, at, delay);
+            }
             PresenceKind::Nick(new) => {
                 line.displayed = ours || self.spoke_lately(&nick, at, delay);
                 let new = new.to_lowercase();

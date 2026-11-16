@@ -81,6 +81,12 @@ struct Session {
     sasl_retried: bool,
     is_soju: bool,
     joined: HashSet<String>,
+    /// Who is in each joined channel, by lowercase channel and lowercase nick, from
+    /// NAMES and kept by JOIN, PART, KICK, QUIT and NICK. QUIT, NICK and the like
+    /// only go to the channels the nick is in.
+    members: HashMap<String, HashSet<String>>,
+    /// When each nick was last answered a CTCP request.
+    ctcp_answered: HashMap<String, std::time::Instant>,
     next_number: i32,
     names_buf: HashMap<String, Vec<Nick>>,
     batch_buf: HashMap<String, (String, Vec<Line>)>,
@@ -161,6 +167,8 @@ impl Session {
             is_soju: false,
             joined: HashSet::new(),
             next_number: 1,
+            members: HashMap::new(),
+            ctcp_answered: HashMap::new(),
             names_buf: HashMap::new(),
             batch_buf: HashMap::new(),
             who_buf: HashMap::new(),
@@ -370,6 +378,21 @@ fn parse_names_entry(entry: &str) -> Nick {
     // userhost-in-names: rest may be "nick!user@host" — keep only the nick part
     let name = rest.split('!').next().unwrap_or(rest);
     Nick { name: name.to_string(), prefix: prefix.to_string(), color_ansi: nick_color_ansi(name), away: false }
+}
+
+/// The buffers a nick's quit, nick change and the like belong in: the channels they
+/// are in, and the private buffer with them.
+fn buffers_with(session: &Session, nick: &str) -> Vec<String> {
+    let lower = nick.to_lowercase();
+    let mut buffers: Vec<String> = session.members.iter()
+        .filter(|(_, nicks)| nicks.contains(&lower))
+        .map(|(chan, _)| chan.clone())
+        .collect();
+    buffers.sort();
+    if !is_channel(&lower) && session.joined.contains(&lower) {
+        buffers.push(lower);
+    }
+    buffers
 }
 
 fn timestamp_from_msg(msg: &IrcMessage) -> DateTime<Utc> {
@@ -1294,6 +1317,7 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             let nick = msg.nick().unwrap_or("").to_string();
             if nick.eq_ignore_ascii_case(&session.our_nick) {
                 session.joined.insert(chan_lower.clone());
+                session.members.insert(chan_lower.clone(), HashSet::from([nick.to_lowercase()]));
                 let buf = session.alloc_buffer(&chan_lower, &channel, "channel");
                 events.push(BackendEvent::BufferOpened(buf));
                 session.whois_lines.push(format!("NAMES {}", channel));
@@ -1310,6 +1334,7 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                     session.whois_lines.push(format!("CHATHISTORY LATEST {} * 300", channel));
                 }
             } else if session.joined.contains(&chan_lower) {
+                session.members.entry(chan_lower.clone()).or_default().insert(nick.to_lowercase());
                 let new_nick = Nick { name: nick.clone(), prefix: String::new(), color_ansi: nick_color_ansi(&nick), away: false };
                 events.push(BackendEvent::NickAdded { buffer_id: chan_lower.clone(), nick: new_nick });
                 *line_counter += 1;
@@ -1328,8 +1353,10 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             let reason = msg.param(1).unwrap_or("").to_string();
             if nick.eq_ignore_ascii_case(&session.our_nick) {
                 session.joined.remove(&chan_lower);
+                session.members.remove(&chan_lower);
                 events.push(BackendEvent::BufferClosed { buffer_id: chan_lower });
             } else if session.joined.contains(&chan_lower) {
+                if let Some(nicks) = session.members.get_mut(&chan_lower) { nicks.remove(&nick.to_lowercase()); }
                 events.push(BackendEvent::NickRemoved { buffer_id: chan_lower.clone(), nick_name: nick.clone() });
                 *line_counter += 1;
                 let text = presence::part(&nick, &channel, &irc_to_ansi(&reason));
@@ -1345,8 +1372,10 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             let kicker = msg.nick().unwrap_or("").to_string();
             if target.eq_ignore_ascii_case(&session.our_nick) {
                 session.joined.remove(&chan_lower);
+                session.members.remove(&chan_lower);
                 events.push(BackendEvent::BufferClosed { buffer_id: chan_lower });
             } else if session.joined.contains(&chan_lower) {
+                if let Some(nicks) = session.members.get_mut(&chan_lower) { nicks.remove(&target.to_lowercase()); }
                 events.push(BackendEvent::NickRemoved { buffer_id: chan_lower.clone(), nick_name: target.clone() });
                 *line_counter += 1;
                 let text = presence::kick(&target, &channel, &kicker, &irc_to_ansi(&reason));
@@ -1358,7 +1387,9 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             let nick = msg.nick().unwrap_or("").to_string();
             if nick.eq_ignore_ascii_case(&session.our_nick) { return events; }
             let reason = msg.param(0).unwrap_or("").to_string();
-            for chan in session.joined.clone() {
+            let buffers = buffers_with(session, &nick);
+            for nicks in session.members.values_mut() { nicks.remove(&nick.to_lowercase()); }
+            for chan in buffers {
                 events.push(BackendEvent::NickRemoved { buffer_id: chan.clone(), nick_name: nick.clone() });
                 *line_counter += 1;
                 let text = presence::quit(&nick, &irc_to_ansi(&reason));
@@ -1370,7 +1401,11 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             let old_nick = msg.nick().unwrap_or("").to_string();
             let new_nick = msg.param(0).unwrap_or("").to_string();
             if old_nick.eq_ignore_ascii_case(&session.our_nick) { session.our_nick = new_nick.clone(); }
-            for chan in session.joined.clone() {
+            let buffers = buffers_with(session, &old_nick);
+            for nicks in session.members.values_mut() {
+                if nicks.remove(&old_nick.to_lowercase()) { nicks.insert(new_nick.to_lowercase()); }
+            }
+            for chan in buffers {
                 events.push(BackendEvent::NickRemoved { buffer_id: chan.clone(), nick_name: old_nick.clone() });
                 events.push(BackendEvent::NickAdded { buffer_id: chan.clone(), nick: Nick { name: new_nick.clone(), prefix: String::new(), color_ansi: nick_color_ansi(&new_nick), away: false } });
                 *line_counter += 1;
@@ -1434,8 +1469,14 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                 let line = if msg.command == "NOTICE" {
                     ctcp_reply_text(&nick, &kind, args, Utc::now())
                 } else {
-                    if let Some(answer) = ctcp_answer(&kind, args) {
-                        session.whois_lines.push(format!("NOTICE {} :{}", nick, answer));
+                    let now = std::time::Instant::now();
+                    let quiet = session.ctcp_answered.get(&nick.to_lowercase()).is_some_and(|at| now.duration_since(*at) < CTCP_COOLDOWN);
+                    if !quiet {
+                        if let Some(answer) = ctcp_answer(&kind, args) {
+                            session.ctcp_answered.retain(|_, at| now.duration_since(*at) < CTCP_COOLDOWN);
+                            session.ctcp_answered.insert(nick.to_lowercase(), now);
+                            session.whois_lines.push(format!("NOTICE {} :{}", nick, answer));
+                        }
                     }
                     format!("CTCP requested by {nick}: {kind}")
                 };
@@ -1485,6 +1526,9 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
         "366" => {
             let channel = msg.param(1).unwrap_or("").to_lowercase();
             if let Some(nicks) = session.names_buf.remove(&channel) {
+                if session.joined.contains(&channel) {
+                    session.members.insert(channel.clone(), nicks.iter().map(|n| n.name.to_lowercase()).collect());
+                }
                 events.push(BackendEvent::NicklistLoaded { buffer_id: channel, nicks });
             }
         }
@@ -1561,11 +1605,11 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             let new_host = msg.param(1).unwrap_or("").to_string();
             if !nick.eq_ignore_ascii_case(&session.our_nick) {
                 let text = format!("{} changed host to {}@{}", nick, new_user, new_host);
-                for chan in session.joined.clone() {
+                for chan in buffers_with(session, &nick) {
                     *line_counter += 1;
                     events.push(BackendEvent::LineAdded {
                         buffer_id: chan,
-                        line: make_line(&line_counter.to_string(), "--", &text, timestamp_from_msg(msg), false),
+                        line: make_presence_line(&line_counter.to_string(), ("--".to_string(), text.clone()), timestamp_from_msg(msg), PresenceKind::Account, &nick),
                     });
                 }
             }
@@ -1592,7 +1636,7 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             let nick = msg.nick().unwrap_or("").to_string();
             let away = !msg.params.is_empty(); // AWAY with no params = returned from away
             if !nick.eq_ignore_ascii_case(&session.our_nick) {
-                for chan in session.joined.clone() {
+                for chan in buffers_with(session, &nick) {
                     events.push(BackendEvent::NickAwayChanged {
                         buffer_id: chan,
                         nick_name: nick.clone(),
@@ -1611,11 +1655,11 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             } else {
                 format!("{} is now logged in as {}", nick, account)
             };
-            for chan in session.joined.clone() {
+            for chan in buffers_with(session, &nick) {
                 *line_counter += 1;
                 events.push(BackendEvent::LineAdded {
                     buffer_id: chan,
-                    line: make_line(&line_counter.to_string(), "--", &text, timestamp_from_msg(msg), false),
+                    line: make_presence_line(&line_counter.to_string(), ("--".to_string(), text.clone()), timestamp_from_msg(msg), PresenceKind::Account, &nick),
                 });
             }
         }
@@ -1928,6 +1972,55 @@ fn finish_znc_query(query: ZncQuery, session: &mut Session, config: &IrcConfig, 
 
 // ── Write queue — populated by translate(), flushed by the connection loop ───
 
+/// How many lines may go out at once, and how fast the allowance comes back. Servers
+/// drop a client that sends faster ("Excess Flood"), and the queue holds a burst of
+/// `NAMES`, `WHO`, `MODE` and `CHATHISTORY` for every channel on a join.
+const SEND_BURST: f64 = 10.0;
+const SEND_PER_SECOND: f64 = 2.0;
+/// One answer to a CTCP request per nick in this time.
+const CTCP_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// A token bucket in front of the socket.
+struct SendBucket {
+    tokens: f64,
+    at: std::time::Instant,
+}
+
+impl SendBucket {
+    fn new() -> Self {
+        Self { tokens: SEND_BURST, at: std::time::Instant::now() }
+    }
+
+    fn refill(&mut self) {
+        let now = std::time::Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.at).as_secs_f64() * SEND_PER_SECOND).min(SEND_BURST);
+        self.at = now;
+    }
+
+    /// Takes one token if there is one.
+    fn take(&mut self) -> bool {
+        self.refill();
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// How long until the next token.
+    fn wait(&self) -> Duration {
+        Duration::from_secs_f64(((1.0 - self.tokens) / SEND_PER_SECOND).max(0.0)) + Duration::from_millis(5)
+    }
+}
+
+/// Lines that must not wait behind the others: answering a PING keeps the
+/// connection alive, and QUIT ends it.
+fn skips_the_line(line: &str) -> bool {
+    let command = line.split(' ').next().unwrap_or("");
+    command.eq_ignore_ascii_case("PONG") || command.eq_ignore_ascii_case("PING") || command.eq_ignore_ascii_case("QUIT")
+}
+
 fn take_write_queue(session: &mut Session) -> Vec<String> {
     // We reused whois_lines as a general write queue in translate() for CAP/PING/NICK/NAMES/WHO.
     // For WHOIS display we always drain before 318 fires, so no collision in practice.
@@ -2062,9 +2155,16 @@ pub fn spawn(
                     );
                     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+                    let mut outbox: VecDeque<String> = VecDeque::new();
+                    let mut bucket = SendBucket::new();
+
                     'conn: loop {
-                        // Flush outbound queue populated by translate()
-                        for line in take_write_queue(&mut session) {
+                        // Flush outbound queue populated by translate(), as fast as the
+                        // bucket allows. The rest waits in `outbox` for the timer below.
+                        outbox.extend(take_write_queue(&mut session));
+                        while let Some(line) = outbox.front() {
+                            if !skips_the_line(line) && !bucket.take() { break; }
+                            let line = outbox.pop_front().unwrap_or_default();
                             if write_half.write_all(format!("{}\r\n", one_line(&line)).as_bytes()).await.is_err() {
                                 connected.store(false, Ordering::Relaxed);
                                 send!(BackendEvent::Error("Connection lost while sending".to_string()));
@@ -2099,13 +2199,7 @@ pub fn spawn(
                                             for update in session.network_updates.drain(..) {
                                                 if let Some(tx) = &network_tx { let _ = tx.send(update); }
                                             }
-                                            for line in take_write_queue(&mut session) {
-                                                if write_half.write_all(format!("{}\r\n", one_line(&line)).as_bytes()).await.is_err() {
-                                                    connected.store(false, Ordering::Relaxed);
-                                send!(BackendEvent::Error("Connection lost while sending".to_string()));
-                                break 'conn;
-                                                }
-                                            }
+                                            outbox.extend(take_write_queue(&mut session));
                                             // Registered: the next reconnect starts from a short wait
                                             // again. A server that drops us before that is retried
                                             // ever more slowly.
@@ -2195,6 +2289,7 @@ pub fn spawn(
                                             } else {
                                                 // DM/private buffer: close locally, no server message needed
                                                 session.joined.remove(&buffer_id);
+                                                session.members.remove(&buffer_id);
                                                 send!(BackendEvent::BufferClosed { buffer_id });
                                             }
                                         // /query <nick> — client-side command: open a DM buffer, nothing to send
@@ -2321,6 +2416,8 @@ pub fn spawn(
                                     }
                                 }
                             }
+                            // Wakes the loop when the bucket has a token for what is queued.
+                            _ = tokio::time::sleep(bucket.wait()), if !outbox.is_empty() => {}
                             _ = ping_interval.tick() => {
                                 if !session.registered && session_started.elapsed() >= REGISTER_TIMEOUT {
                                     connected.store(false, Ordering::Relaxed);
@@ -2442,6 +2539,83 @@ mod tests {
             translate(&IrcMessage::parse(line).unwrap(), session, &mut counter, config);
         }
         take_write_queue(session)
+    }
+
+    #[test]
+    fn quits_nicks_and_account_changes_go_where_the_nick_is() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let mut go = |session: &mut Session, line: &str| -> Vec<(String, &'static str)> {
+            translate(&IrcMessage::parse(line).unwrap(), session, &mut counter, &config).into_iter()
+                .filter_map(|e| match e {
+                    BackendEvent::LineAdded { buffer_id, .. } => Some((buffer_id, "line")),
+                    BackendEvent::NickRemoved { buffer_id, .. } => Some((buffer_id, "removed")),
+                    BackendEvent::NickAwayChanged { buffer_id, .. } => Some((buffer_id, "away")),
+                    _ => None,
+                })
+                .collect()
+        };
+        go(&mut session, ":sam!s@h JOIN #a");
+        go(&mut session, ":sam!s@h JOIN #b");
+        go(&mut session, ":irc.test 353 sam = #a :sam @bob carol");
+        go(&mut session, ":irc.test 366 sam #a :End of /NAMES list.");
+        go(&mut session, ":irc.test 353 sam = #b :sam dave");
+        go(&mut session, ":irc.test 366 sam #b :End of /NAMES list.");
+        go(&mut session, ":erin!e@h JOIN #b");
+        go(&mut session, ":carol!c@h PRIVMSG sam :hi");
+        assert!(session.joined.contains("carol"));
+
+        // Account, host and away changes reach only the channels the nick is in.
+        assert_eq!(go(&mut session, ":dave!d@h ACCOUNT dave2"), [("#b".to_string(), "line")]);
+        assert_eq!(go(&mut session, ":bob!b@h CHGHOST u newhost"), [("#a".to_string(), "line")]);
+        assert_eq!(go(&mut session, ":erin!e@h AWAY :gone"), [("#b".to_string(), "away")]);
+        // And the private buffer with them.
+        assert_eq!(go(&mut session, ":carol!c@h ACCOUNT *"), [("#a".to_string(), "line"), ("carol".to_string(), "line")]);
+
+        // A quit is shown in the channels the nick was in, and not in the others.
+        assert_eq!(go(&mut session, ":bob!b@h QUIT :bye"), [("#a".to_string(), "removed"), ("#a".to_string(), "line")]);
+        assert!(go(&mut session, ":bob!b@h QUIT :bye").is_empty());
+        assert!(go(&mut session, ":stranger!x@h QUIT :bye").is_empty());
+
+        // A nick change follows the nick, in the member list too.
+        assert_eq!(go(&mut session, ":dave!d@h NICK davey").len(), 2);
+        assert_eq!(go(&mut session, ":davey!d@h PART #b").len(), 2);
+        assert!(go(&mut session, ":davey!d@h QUIT :bye").is_empty());
+
+        // A kick drops the nick from the channel, and leaving drops the channel.
+        go(&mut session, ":op!o@h KICK #b erin :out");
+        assert!(go(&mut session, ":erin!e@h QUIT :bye").is_empty());
+        go(&mut session, ":sam!s@h PART #a");
+        assert!(!session.members.contains_key("#a"));
+    }
+
+    #[test]
+    fn the_send_bucket_allows_a_burst_and_then_a_trickle() {
+        let mut bucket = SendBucket::new();
+        for _ in 0..SEND_BURST as usize {
+            assert!(bucket.take());
+        }
+        assert!(!bucket.take());
+        let wait = bucket.wait();
+        assert!(wait > Duration::ZERO && wait <= Duration::from_secs(1), "{wait:?}");
+        assert!(skips_the_line("PONG :x") && skips_the_line("quit :bye") && !skips_the_line("WHO #a"));
+    }
+
+    #[test]
+    fn a_ctcp_flood_gets_one_answer() {
+        let config = config(None);
+        let mut session = Session::new("sam");
+        let mut counter = 0;
+        let mut answers = |session: &mut Session, line: &str| {
+            translate(&IrcMessage::parse(line).unwrap(), session, &mut counter, &config);
+            take_write_queue(session).into_iter().filter(|l| l.starts_with("NOTICE")).count()
+        };
+        assert_eq!(answers(&mut session, ":bob!b@h PRIVMSG sam :\x01VERSION\x01"), 1);
+        assert_eq!(answers(&mut session, ":bob!b@h PRIVMSG sam :\x01VERSION\x01"), 0);
+        assert_eq!(answers(&mut session, ":BOB!b@h PRIVMSG sam :\x01PING 1\x01"), 0);
+        // Another nick is answered.
+        assert_eq!(answers(&mut session, ":carol!c@h PRIVMSG sam :\x01VERSION\x01"), 1);
     }
 
     #[test]

@@ -954,15 +954,23 @@ impl WeeChatApp {
         }
 
         if !new_conn_buffers.is_empty() {
+            // The first list after connecting is logged. Later ones follow buffer
+            // events, which come in dozens when WeeChat reconnects a network.
+            let first_list = {
+                let pfx = format!("{}/", conn_prefix);
+                !self.buffers.iter().any(|b| b.id.starts_with(&pfx))
+            };
             let network_count = {
                 let mut seen = std::collections::HashSet::new();
                 new_conn_buffers.iter().filter(|b| b.kind != "core").for_each(|b| { seen.insert(&b.server); });
                 seen.len()
             };
-            self.log_conn_for(conn_prefix, format!(
-                "← GET /api/buffers  {} buffers, {} network(s)",
-                new_conn_buffers.len(), network_count
-            ));
+            if first_list {
+                self.log_conn_for(conn_prefix, format!(
+                    "← GET /api/buffers  {} buffers, {} network(s)",
+                    new_conn_buffers.len(), network_count
+                ));
+            }
             Self::sort_buffers(&mut new_conn_buffers);
 
             // Remove old buffers for this connection, then add new ones
@@ -1016,9 +1024,15 @@ impl WeeChatApp {
                 }
             }
 
-            self.log_conn_for(conn_prefix, "→ GET /api/hotlist");
+            if first_list {
+                self.log_conn_for(conn_prefix, "→ GET /api/hotlist");
+            }
             if let Some(conn) = self.connections.iter().find(|c| c.prefix == conn_prefix) {
-                conn.client.fetch_hotlist();
+                if first_list {
+                    conn.client.fetch_hotlist();
+                } else {
+                    conn.client.poll_hotlist();
+                }
             }
         }
     }

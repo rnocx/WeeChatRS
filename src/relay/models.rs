@@ -130,6 +130,8 @@ pub enum PresenceKind {
     Kick,
     /// A nick change, to this nick.
     Nick(String),
+    /// A host or services account change.
+    Account,
 }
 
 impl Line {
