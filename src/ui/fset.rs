@@ -394,9 +394,15 @@ pub struct FsetState {
     detail_value: std::string::String,
     /// Values shown right after a change, until fset reprints the line.
     pending: HashMap<std::string::String, (std::string::String, Instant)>,
+    /// The filter field. A plain one (part of a name) is matched here, as it is
+    /// typed; one in fset's syntax is sent to WeeChat after a short pause.
     filter: std::string::String,
-    /// When the filter was last typed; it is sent after a short pause.
+    /// When a filter for WeeChat was last typed and is still to be sent.
     filter_typed_at: Option<Instant>,
+    /// The filter WeeChat last reported in fset's title ("" for all options).
+    server_filter: Option<std::string::String>,
+    /// The filter last asked of WeeChat, and when.
+    asked_filter: Option<(std::string::String, Instant)>,
     files: BTreeSet<std::string::String>,
     quick: QuickFilters,
     /// Last revision seen, and when it changed (see `REDRAW_SETTLE`).
@@ -404,7 +410,74 @@ pub struct FsetState {
     changed_at: Option<Instant>,
 }
 
+/// Whether a filter is just part of an option's name, which is matched here. The
+/// rest of fset's syntax (`f:`, `t:`, `d`, `=`, `h=`, `c:`, `*` masks) is WeeChat's.
+fn is_plain_filter(filter: &str) -> bool {
+    !(filter == "d"
+        || filter.contains('*')
+        || filter.starts_with('=')
+        || ["f:", "t:", "d:", "d=", "h=", "c:"].iter().any(|p| filter.starts_with(p)))
+}
+
+/// After asking WeeChat for a filter, its answers are not copied into the field for
+/// this long: an answer to an earlier request would undo what was typed since.
+const FILTER_ANSWER: Duration = Duration::from_secs(3);
+
 impl FsetState {
+    /// The part of a name the rows are narrowed to here, lowercased.
+    fn local_filter(&self) -> Option<std::string::String> {
+        let filter = self.filter.trim();
+        (!filter.is_empty() && is_plain_filter(filter)).then(|| filter.to_lowercase())
+    }
+
+    /// The filter WeeChat should have for the field's text, when it isn't the one it
+    /// has: all options ("") for a plain filter unless what it lists already holds
+    /// every match, else the text itself.
+    fn wanted_server_filter(&self) -> Option<std::string::String> {
+        let filter = self.filter.trim();
+        let wanted = if is_plain_filter(filter) {
+            let covered = self.server_filter.as_deref().is_none_or(|server| {
+                server.is_empty() || (is_plain_filter(server) && filter.to_lowercase().contains(&server.to_lowercase()))
+            });
+            if covered {
+                return None;
+            }
+            std::string::String::new()
+        } else {
+            filter.to_string()
+        };
+        let have = self.server_filter.as_deref() == Some(wanted.as_str());
+        let asked = self.asked_filter.as_ref().is_some_and(|(f, at)| *f == wanted && at.elapsed() < FILTER_ANSWER);
+        (!have && !asked).then_some(wanted)
+    }
+
+    /// WeeChat's filter, read from fset's title. One set there (by `/fset xxx`, or in
+    /// WeeChat itself) goes into the field, but only when it changes: the field is
+    /// otherwise the user's, and writing over it would move the cursor under them.
+    fn follow_title(&mut self, title: &str) {
+        let Some(reported) = filter_from_title(title).map(|f| if f == "*" { std::string::String::new() } else { f }) else { return };
+        if self.server_filter.as_deref() == Some(reported.as_str()) {
+            return;
+        }
+        let first = self.server_filter.is_none();
+        self.server_filter = Some(reported.clone());
+        let ours = self.filter_typed_at.is_some()
+            || self.asked_filter.as_ref().is_some_and(|(_, at)| at.elapsed() < FILTER_ANSWER);
+        // All options listed says nothing about the field, unless it opens that way.
+        if !ours && (first || !reported.is_empty()) && self.filter.trim() != reported {
+            self.filter = reported;
+        }
+    }
+
+    /// Ask WeeChat for the filter the field needs, if it needs another one.
+    fn ask_filter(&mut self, actions: &mut Vec<FsetAction>) {
+        self.filter_typed_at = None;
+        if let Some(wanted) = self.wanted_server_filter() {
+            self.asked_filter = Some((wanted.clone(), Instant::now()));
+            actions.push(FsetAction::Filter(wanted));
+        }
+    }
+
     /// Parsed options of the buffer, re-parsed only when it changed.
     fn options(&mut self, ctx: &egui::Context, buffer_id: &str, lines: &VecDeque<Line>) -> (bool, &[FsetOption]) {
         if self.seen_revision != self.revision {
@@ -626,17 +699,11 @@ pub fn show_fset_panel(
 ) -> Vec<FsetAction> {
     let mut actions = Vec::new();
 
-    // Follow the filter fset reports, unless the user is typing one.
-    if state.filter_typed_at.is_none() {
-        let plain_title: std::string::String = crate::ui::ansi::ANSIParser::parse(title).iter().map(|s| s.text.as_str()).collect();
-        if let Some(filter) = filter_from_title(&plain_title) {
-            state.filter = if filter == "*" { std::string::String::new() } else { filter };
-        }
-    }
+    let plain_title: std::string::String = crate::ui::ansi::ANSIParser::parse(title).iter().map(|s| s.text.as_str()).collect();
+    state.follow_title(&plain_title);
     if let Some(at) = state.filter_typed_at {
-        if at.elapsed() >= Duration::from_millis(400) {
-            state.filter_typed_at = None;
-            actions.push(FsetAction::Filter(state.filter.clone()));
+        if at.elapsed() >= Duration::from_millis(300) {
+            state.ask_filter(&mut actions);
         } else {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
@@ -647,8 +714,15 @@ pub fn show_fset_panel(
     let row_height = font_size + 10.0;
 
     // The table borrows the options; actions on them are collected and applied after.
-    let (structured, _) = state.options(ui.ctx(), buffer_id, lines);
-    let mut options: Vec<FsetOption> = state.cache.as_ref().map(|c| c.options.clone()).unwrap_or_default();
+    let (structured, all) = state.options(ui.ctx(), buffer_id, lines);
+    let total = all.len();
+    let local = state.local_filter();
+    let mut options: Vec<FsetOption> = state.cache.as_ref().map(|c| {
+        c.options.iter()
+            .filter(|o| local.as_ref().is_none_or(|part| o.name.to_lowercase().contains(part)))
+            .cloned()
+            .collect()
+    }).unwrap_or_default();
     if let FsetSession::Active { saved, .. } = &state.session {
         for opt in options.iter_mut().filter(|o| o.name == FORMAT_NUMBER || o.name == FORMAT_OPTION2) {
             saved.present(opt);
@@ -666,11 +740,15 @@ pub fn show_fset_panel(
                 .desired_width((ui.available_width() * 0.45).clamp(180.0, 420.0));
             let res = ui.add(edit);
             if res.changed() {
-                state.filter_typed_at = Some(Instant::now());
+                if is_plain_filter(state.filter.trim()) {
+                    // Matched here. WeeChat is only asked to list more, at once.
+                    state.ask_filter(&mut actions);
+                } else {
+                    state.filter_typed_at = Some(Instant::now());
+                }
             }
             if res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                state.filter_typed_at = None;
-                actions.push(FsetAction::Filter(state.filter.clone()));
+                state.ask_filter(&mut actions);
             }
             res.on_hover_text(
                 "fset filter syntax:\n\
@@ -716,7 +794,6 @@ pub fn show_fset_panel(
         });
     });
 
-    let total = options.len();
     options.retain(|o| state.quick.matches(o));
     let changed = options.iter().filter(|o| o.is_changed).count();
 
@@ -1204,6 +1281,65 @@ mod tests {
         // Quiet for long enough: a smaller list (a narrower filter) is taken.
         state.changed_at = Some(Instant::now() - REDRAW_SETTLE);
         assert_eq!(state.options(&ctx, "b", &partial).1.len(), 1);
+    }
+
+    #[test]
+    fn plain_filters_are_matched_here() {
+        for plain in ["", "irc", "look.color", "day"] {
+            assert!(is_plain_filter(plain), "{plain}");
+        }
+        for fset in ["d", "f:irc", "t:bool", "d:irc", "d=on", "=on", "==on", "h=nick", "c:${value} == 1", "irc.*.nick"] {
+            assert!(!is_plain_filter(fset), "{fset}");
+        }
+    }
+
+    #[test]
+    fn weechat_is_asked_only_for_what_it_does_not_list() {
+        let mut state = FsetState { server_filter: Some(std::string::String::new()), ..Default::default() };
+        // Everything is listed: a name is matched here.
+        state.filter = "Irc.look".into();
+        assert_eq!(state.wanted_server_filter(), None);
+        assert_eq!(state.local_filter().as_deref(), Some("irc.look"));
+        // fset's own syntax is WeeChat's to apply.
+        state.filter = "f:irc".into();
+        assert_eq!(state.wanted_server_filter().as_deref(), Some("f:irc"));
+        assert_eq!(state.local_filter(), None);
+        // A narrower list holds every match of a longer name, not of a shorter one.
+        state.server_filter = Some("irc".into());
+        state.filter = "irc.look".into();
+        assert_eq!(state.wanted_server_filter(), None);
+        state.filter = "ir".into();
+        assert_eq!(state.wanted_server_filter().as_deref(), Some(""));
+        // Asked once, not again while the answer is on its way.
+        let mut actions = Vec::new();
+        state.ask_filter(&mut actions);
+        state.ask_filter(&mut actions);
+        assert_eq!(actions.len(), 1);
+    }
+
+    #[test]
+    fn the_field_is_not_written_over_while_it_is_used() {
+        let title = |f: &str| format!("1/2 | Filter: {f} | Sort: ~name");
+        let mut state = FsetState::default();
+        // Opened by `/fset irc`: the field shows it.
+        state.follow_title(&title("irc"));
+        assert_eq!(state.filter, "irc");
+        // The user types on and WeeChat is asked; a late answer to an earlier request
+        // leaves the field alone.
+        state.filter = "f:irc".into();
+        state.ask_filter(&mut Vec::new());
+        state.filter = "f:irc2".into();
+        state.follow_title(&title("f:irc"));
+        assert_eq!(state.filter, "f:irc2");
+        // A plain filter typed while everything is listed stays, title or not.
+        let mut state = FsetState::default();
+        state.follow_title(&title("*"));
+        state.filter = "nick".into();
+        state.follow_title(&title("*"));
+        assert_eq!(state.filter, "nick");
+        // A filter set in WeeChat later on is taken.
+        state.follow_title(&title("f:weechat"));
+        assert_eq!(state.filter, "f:weechat");
     }
 
     #[test]

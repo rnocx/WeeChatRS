@@ -1039,7 +1039,7 @@ impl WeeChatApp {
                     if self.selected_buffer_id.as_deref() == Some(&buffer_id) {
                         continue;
                     }
-                    if self.buffers.iter().any(|b| b.id == buffer_id && b.muted) {
+                    if self.buffers.iter().any(|b| b.id == buffer_id && (b.muted || crate::ui::fset::is_fset_buffer(&b.full_name))) {
                         continue;
                     }
                     if self.cleared_buffer_ids.contains(&buffer_id) {
@@ -1386,6 +1386,8 @@ impl WeeChatApp {
 
                             if is_selected {
                                 buffer.last_read_id = Some(line.id.clone());
+                            } else if crate::ui::fset::is_fset_buffer(&buffer.full_name) {
+                                // fset redraws itself, a line per option: nothing to read.
                             } else if displayed && !buffer.muted && !is_notify_none && !is_self_msg
                                 && (buffer.notify != NotifyLevel::Mentions || is_highlight || notify_level == 3)
                             {
