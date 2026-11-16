@@ -9,6 +9,27 @@ fn url_re() -> &'static Regex {
     URL_RE.get_or_init(|| Regex::new(r"https?://[^\s<>]+").unwrap())
 }
 
+/// The part of a matched URL that is the link: the punctuation that ends a sentence
+/// ("see https://a.com/x.") and a closing bracket whose opening one isn't in the
+/// URL ("(see https://a.com/x)") are not.
+fn link_len(url: &str) -> usize {
+    let mut end = url.len();
+    while let Some(last) = url[..end].chars().next_back() {
+        let drop = match last {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' => true,
+            ')' | ']' | '}' => {
+                let open = match last { ')' => '(', ']' => '[', _ => '{' };
+                let body = &url[..end];
+                body.matches(last).count() > body.matches(open).count()
+            }
+            _ => false,
+        };
+        if !drop { break; }
+        end -= last.len_utf8();
+    }
+    end
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnsiColor {
     Default,
@@ -166,12 +187,13 @@ impl ANSIParser {
                         url: None,
                     });
                 }
+                let link = &mat.as_str()[..link_len(mat.as_str())];
                 final_sections.push(ANSISection {
-                    text: mat.as_str().to_string(),
+                    text: link.to_string(),
                     style,
-                    url: Some(mat.as_str().to_string()),
+                    url: Some(link.to_string()),
                 });
-                last_match_end = mat.end();
+                last_match_end = mat.start() + link.len();
             }
             if last_match_end < text.len() {
                 final_sections.push(ANSISection {
@@ -247,6 +269,21 @@ fn apply_sgr(params: &str, state: &mut AnsiStyle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_leaves_out_the_punctuation_after_it() {
+        let links = |text: &str| -> Vec<(String, Option<String>)> {
+            ANSIParser::parse(text).into_iter().map(|s| (s.text, s.url)).collect()
+        };
+        let one = |url: &str| Some(url.to_string());
+        assert_eq!(links("see https://a.com/x."), [("see ".into(), None), ("https://a.com/x".into(), one("https://a.com/x")), (".".into(), None)]);
+        assert_eq!(links("(see https://a.com/x)")[1].1, one("https://a.com/x"));
+        assert_eq!(links("https://a.com/x, and")[0].1, one("https://a.com/x"));
+        assert_eq!(links("\"https://a.com/x\"?")[1].1, one("https://a.com/x"));
+        // A bracket that belongs to the URL stays.
+        assert_eq!(links("https://en.wikipedia.org/wiki/Rust_(language).")[0].1, one("https://en.wikipedia.org/wiki/Rust_(language)"));
+        assert_eq!(links("https://a.com/x?q=1&r=2")[0].1, one("https://a.com/x?q=1&r=2"));
+    }
 
     #[test]
     fn art_is_told_from_prose() {

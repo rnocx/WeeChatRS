@@ -975,6 +975,10 @@ impl WeeChatApp {
 
             // Remove old buffers for this connection, then add new ones
             let pfx = format!("{}/", conn_prefix);
+            // Where the open buffer is, in case the new list has dropped it.
+            let selected_pos = self.selected_buffer_id.as_ref()
+                .filter(|id| id.starts_with(&pfx))
+                .and_then(|id| self.buffers.iter().position(|b| &b.id == id));
             self.buffers.retain(|b| !b.id.starts_with(&pfx));
             self.buffers.extend(new_conn_buffers);
 
@@ -1000,6 +1004,18 @@ impl WeeChatApp {
                 });
             }
             self.rebuild_buffer_idx();
+
+            // The open buffer was closed in WeeChat: the nearest one left takes its place.
+            if let (Some(pos), Some(id)) = (selected_pos, self.selected_buffer_id.clone()) {
+                if !self.buffer_idx.contains_key(&id) {
+                    let nearest = nearest_left(&self.buffers, &pfx, pos);
+                    // Not through select_buffer's "leaving": the old buffer is gone.
+                    self.selected_buffer_id = None;
+                    if let Some(next) = nearest {
+                        self.select_buffer(next);
+                    }
+                }
+            }
 
             if let Some(target) = self.pending_buffer_switch.take() {
                 // The buffer of that name: its short name, or the last part of its full
@@ -1551,6 +1567,15 @@ pub(crate) fn apply_buffer_order(buffers: &mut [Buffer], order: &[String], key: 
     });
 }
 
+/// The buffer of a connection (ids starting with `pfx`) closest to where a closed
+/// one was in the list.
+fn nearest_left(buffers: &[Buffer], pfx: &str, pos: usize) -> Option<String> {
+    buffers.iter().enumerate()
+        .filter(|(_, b)| b.id.starts_with(pfx))
+        .min_by_key(|(i, _)| i.abs_diff(pos))
+        .map(|(_, b)| b.id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1613,6 +1638,16 @@ mod tests {
         apply_buffer_order(&mut buffers, &order, |b| b.id.clone());
         let ids: Vec<&str> = buffers.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(ids, ["core", "highmon", "nixsec", "#a", "supernets"]);
+    }
+
+    #[test]
+    fn a_closed_buffer_is_replaced_by_its_neighbour_on_the_same_connection() {
+        let list = [buf("a/1", "server", "x", 1), buf("a/2", "channel", "x", 2), buf("b/1", "server", "y", 3), buf("b/3", "channel", "y", 4)];
+        // Position 2 held a closed buffer of "b": its neighbour in the list is next.
+        assert_eq!(nearest_left(&list, "b/", 2).as_deref(), Some("b/1"));
+        assert_eq!(nearest_left(&list, "b/", 9).as_deref(), Some("b/3"));
+        assert_eq!(nearest_left(&list, "a/", 3).as_deref(), Some("a/2"));
+        assert_eq!(nearest_left(&list, "c/", 0), None);
     }
 
     fn buf(id: &str, kind: &str, server: &str, number: i32) -> Buffer {

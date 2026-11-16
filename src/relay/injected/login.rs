@@ -149,7 +149,7 @@ pub fn start(
                 let response=client.get("https://injected-irc.com/api/me").bearer_auth(&token).send().await.map_err(|_|"Could not reach Injected to verify the session. Try again when connected.".to_string())?;
                 if matches!(response.status().as_u16(),401|403) {continue;}
                 if !response.status().is_success() {return Err("Injected could not verify the session. Try again later.".into());}
-                let bytes=response.bytes().await.map_err(|_|"Could not read session verification.".to_string())?;
+                let bytes=super::read_capped(response,1024*1024).await.map_err(|_|"Could not read session verification.".to_string())?;
                 let user:serde_json::Value=serde_json::from_slice(&bytes).map_err(|_|"Unexpected session verification response.".to_string())?;
                 let username=user["username"].as_str().filter(|s|!s.is_empty()).ok_or_else(||"Injected did not return an account name.".to_string())?.to_owned();
                 return Ok(ImportedSession {token,username});
@@ -232,8 +232,7 @@ pub async fn verify_session(token: String) -> Result<ImportedSession, String> {
     if !response.status().is_success() {
         return Err("Injected could not verify sign-in. Please retry later.".into());
     }
-    let bytes = response
-        .bytes()
+    let bytes = super::read_capped(response, 1024 * 1024)
         .await
         .map_err(|_| "Could not read sign-in verification.".to_string())?;
     let user: serde_json::Value = serde_json::from_slice(&bytes)

@@ -12,6 +12,26 @@ mod paste;
 mod session;
 
 use crate::relay::backend::{BackendClient, BackendEvent};
+
+/// How a capped read of a response failed.
+pub(crate) enum BodyError {
+    Read,
+    TooLarge,
+}
+
+/// The body of a response, up to `max` bytes. The server is the user's own choice,
+/// but nothing says its answer has to be small.
+pub(crate) async fn read_capped(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>, BodyError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| BodyError::Read)? {
+        if bytes.len() + chunk.len() > max {
+            return Err(BodyError::TooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 use egui::Context;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -126,5 +146,31 @@ impl BackendClient for InjectedClient {
     }
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod body_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn answer_with(len: usize) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&vec![b'x'; len]).await;
+        });
+        reqwest::get(format!("http://127.0.0.1:{port}/")).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_body_is_read_up_to_its_cap() {
+        assert_eq!(read_capped(answer_with(1000).await, 1000).await.ok().map(|b| b.len()), Some(1000));
+        assert!(matches!(read_capped(answer_with(1001).await, 1000).await, Err(BodyError::TooLarge)));
     }
 }

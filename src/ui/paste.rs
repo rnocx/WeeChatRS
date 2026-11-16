@@ -91,6 +91,25 @@ pub fn take_multiline_paste(ctx: &egui::Context) -> Option<String> {
     })
 }
 
+/// Writes `text` to `path` in a new directory only the user can open: the temp
+/// directory is shared on Linux, and the paste is readable there while it uploads.
+fn write_private(dir: &std::path::Path, path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        std::fs::DirBuilder::new().mode(0o700).create(dir)?;
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        file.write_all(text.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(dir)?;
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        file.write_all(text.as_bytes())
+    }
+}
+
 impl WeeChatApp {
     pub(crate) fn ask_about_paste(&mut self, buffer_id: String, text: String) {
         let buffer_name = self.buffer_by_id(&buffer_id).map(|b| b.name.clone()).unwrap_or_default();
@@ -269,7 +288,7 @@ impl WeeChatApp {
         let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let dir = std::env::temp_dir().join(format!("weechatrs-paste-{stamp}"));
         let path = dir.join("paste.txt");
-        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text)) {
+        if let Err(e) = write_private(&dir, &path, text) {
             self.file_share_error = Some(format!("Couldn't save the paste: {e}"));
             return;
         }
@@ -345,6 +364,21 @@ impl WeeChatApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_paste_is_written_where_only_the_user_can_read_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("weechatrs-test-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()));
+        let path = dir.join("paste.txt");
+        write_private(&dir, &path, "secret").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret");
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        // An existing directory is not reused.
+        assert!(write_private(&dir, &path, "again").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn cancelling_native_upload_stops_its_completion_task() {

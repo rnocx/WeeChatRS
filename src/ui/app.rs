@@ -1582,13 +1582,20 @@ impl WeeChatApp {
             .cloned()
             .collect();
         for profile in auto_profiles {
+            let mut keychain_error = None;
             let password = if profile.save_password {
-                crate::ui::secure_storage::load_by_key(&profile.keyring_host_key())
-                    .unwrap_or_default()
+                match crate::ui::secure_storage::load_by_key_checked(&profile.keyring_host_key()) {
+                    Ok(secret) => secret.unwrap_or_default(),
+                    Err(e) => { keychain_error = Some(e); String::new() }
+                }
             } else {
                 String::new()
             };
             app.do_connect(&profile, password, &cc.egui_ctx);
+            // Otherwise the login just fails, and nothing says why.
+            if let Some(e) = keychain_error {
+                app.log_conn_for(&profile.prefix(), format!("The keychain couldn't be read, so the saved password was not used: {e}"));
+            }
         }
 
         app

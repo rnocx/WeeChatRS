@@ -77,6 +77,41 @@ fn totp_refusal(status: u16, body: Option<&[u8]>) -> Option<bool> {
     }
 }
 
+/// The WebSocket address of a relay from the host field and the port field. The
+/// host may carry a scheme (ignored: SSL decides), a port of its own (used instead of
+/// the port field) and a path, for a relay a reverse proxy serves under one:
+/// `example.com/weechat` gives `wss://example.com:9001/weechat/api`.
+fn relay_url(host: &str, port: u16, use_ssl: bool) -> Result<String, String> {
+    let host = host.trim();
+    let rest = host.find("://").map_or(host, |i| &host[i + 3..]);
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let path = path.split(['?', '#']).next().unwrap_or("").trim_end_matches('/');
+    // A bare IPv6 address needs brackets in a URL.
+    let authority = if authority.matches(':').count() > 1 && !authority.starts_with('[') {
+        format!("[{authority}]")
+    } else {
+        authority.to_string()
+    };
+    if authority.is_empty() {
+        return Err("The relay's host is empty.".to_string());
+    }
+    let has_port = authority.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    let scheme = if use_ssl { "wss" } else { "ws" };
+    let url = if has_port {
+        format!("{scheme}://{authority}{path}/api")
+    } else {
+        format!("{scheme}://{authority}:{port}{path}/api")
+    };
+    match Url::parse(&url) {
+        Ok(parsed) if parsed.host_str().is_some() => Ok(url),
+        Ok(_) => Err(format!("\"{host}\" has no host name in it.")),
+        Err(e) => Err(format!("\"{host}\" isn't a valid relay address: {e}")),
+    }
+}
+
 // ── Client ────────────────────────────────────────────────────────────────────
 
 pub struct WeeChatClient {
@@ -155,11 +190,13 @@ impl BackendClient for WeeChatClient {
             }};
         }
 
-        let host_clean = config.host.trim()
-            .replace("https://", "").replace("http://", "")
-            .replace("wss://", "").replace("ws://", "");
-        let scheme = if config.use_ssl { "wss" } else { "ws" };
-        let url_str = format!("{}://{}:{}/api", scheme, host_clean, config.port);
+        let url_str = match relay_url(&config.host, config.port, config.use_ssl) {
+            Ok(url) => url,
+            Err(e) => {
+                send!(BackendEvent::Error(e));
+                return;
+            }
+        };
 
         tokio::spawn(async move {
             let mut totp = config.totp.clone().filter(|c| !c.is_empty());
@@ -554,6 +591,21 @@ impl BackendClient for WeeChatClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_relay_url_keeps_a_path_and_an_own_port() {
+        assert_eq!(relay_url("example.com", 9001, true).unwrap(), "wss://example.com:9001/api");
+        assert_eq!(relay_url(" 192.168.1.5 ", 9000, false).unwrap(), "ws://192.168.1.5:9000/api");
+        assert_eq!(relay_url("https://example.com", 443, true).unwrap(), "wss://example.com:443/api");
+        assert_eq!(relay_url("example.com/weechat", 9001, true).unwrap(), "wss://example.com:9001/weechat/api");
+        assert_eq!(relay_url("wss://example.com/a/b/?x=1", 9001, false).unwrap(), "ws://example.com:9001/a/b/api");
+        assert_eq!(relay_url("example.com:8443/weechat", 9001, true).unwrap(), "wss://example.com:8443/weechat/api");
+        assert_eq!(relay_url("::1", 9001, false).unwrap(), "ws://[::1]:9001/api");
+        assert_eq!(relay_url("[::1]:9002", 9001, false).unwrap(), "ws://[::1]:9002/api");
+        assert!(relay_url("", 9001, true).is_err());
+        assert!(relay_url("https:///only/a/path", 9001, true).is_err());
+        assert!(relay_url("bad host", 9001, true).is_err());
+    }
 
     /// Disconnect while the relay can't be reached: it stops at once instead of
     /// waiting out the retry delay, and doesn't try again.

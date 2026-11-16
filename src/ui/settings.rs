@@ -1692,8 +1692,14 @@ impl WeeChatApp {
         if let Some(idx) = do_edit {
             if idx < self.profiles.len() {
                 let profile = &self.profiles[idx];
-                self.editing_password = crate::ui::secure_storage::load_by_key(&profile.keyring_host_key()).unwrap_or_default();
-                self.editing_ssh_password = crate::ui::secure_storage::load_by_key(&profile.ssh_keyring_key()).unwrap_or_default();
+                let mut keychain_error = None;
+                let mut load = |key: String| match crate::ui::secure_storage::load_by_key_checked(&key) {
+                    Ok(secret) => secret.unwrap_or_default(),
+                    Err(e) => { keychain_error = Some(e); String::new() }
+                };
+                self.editing_password = load(profile.keyring_host_key());
+                self.editing_ssh_password = load(profile.ssh_keyring_key());
+                self.profile_save_error = keychain_error.map(|e| format!("The keychain couldn't be read, so the saved password isn't shown: {e}"));
                 self.injected_import = Default::default();
                 self.editing_profile = profile.clone();
                 self.editing_profile_idx = Some(idx);

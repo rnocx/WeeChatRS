@@ -1052,13 +1052,19 @@ async fn api(
             "Injected API returned an unsuccessful response.",
         ));
     }
-    let bytes = response
-        .bytes()
+    // History for a buffer is the largest answer; this is far above any of them.
+    let bytes = super::read_capped(response, 16 * 1024 * 1024)
         .await
-        .map_err(|_| Failure::Other("Could not read Injected API response."))?;
+        .map_err(|e| Failure::Other(match e {
+            super::BodyError::Read => "Could not read Injected API response.",
+            super::BodyError::TooLarge => "Injected API response was too large.",
+        }))?;
     serde_json::from_slice(&bytes)
         .map_err(|_| Failure::Other("Injected API returned invalid JSON."))
 }
+/// Commands kept for after sign-in; more than this are dropped.
+const WAITING_MAX: usize = 200;
+
 async fn session(
     config: &InjectedConfig,
     tx: Tx,
@@ -1097,6 +1103,8 @@ async fn session(
     let mut last_packet = tokio::time::Instant::now();
     let mut timer = tokio::time::interval(Duration::from_secs(1));
     let mut authenticated = false;
+    // What the UI asked for before sign-in was done; run once it is.
+    let mut waiting: Vec<Command> = Vec::new();
     let mut engine_open = false;
     let started = tokio::time::Instant::now();
     // Lag to Injected's server: a WebSocket ping every 30 s, timed to its pong.
@@ -1113,7 +1121,9 @@ async fn session(
             command=rx.recv()=>match command {
                 None | Some(Command::Disconnect)=> { let _=tokio::time::timeout(Duration::from_secs(2),socket.close(None)).await; return Err(Failure::Stop); }
                 Some(command) if authenticated=>state.command(command),
-                _=>{},
+                // A typing state would be stale by then.
+                Some(Command::Typing(..))=>{},
+                Some(command)=>if waiting.len()<WAITING_MAX {waiting.push(command)},
             },
             _=timer.tick()=> {
                 if !authenticated && started.elapsed()>Duration::from_secs(20) {return Err(Failure::Other("Injected authentication timed out."));}
@@ -1134,7 +1144,7 @@ async fn session(
                         match protocol::decode(&text).map_err(|_|Failure::Other("Injected sent an invalid protocol packet."))? {
                             Packet::Open {heartbeat_ms} if !engine_open=> {engine_open=true;heartbeat=Duration::from_millis(heartbeat_ms);state.out.push_back(protocol::authenticate(config.token.trim()));}
                             Packet::Ping(data)=>state.out.push_back(format!("3{}",data)),
-                            Packet::Connected if engine_open && !authenticated=> {authenticated=true;connected.store(true,Ordering::Relaxed);state.ready();}
+                            Packet::Connected if engine_open && !authenticated=> {authenticated=true;connected.store(true,Ordering::Relaxed);state.ready();for command in waiting.drain(..) {state.command(command);}}
                             Packet::Event(name,value) if authenticated=>state.event(&name,value),
                             Packet::Ack(id,value) if authenticated=>state.ack(id,value),
                             Packet::Rejected=>return Err(Failure::Auth),
