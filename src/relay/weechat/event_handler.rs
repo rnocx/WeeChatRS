@@ -525,23 +525,17 @@ impl WeeChatApp {
             match event.as_str() {
                 "buffer_line_added" => self.handle_line_added(conn_prefix, resp),
                 "buffer_line_data_changed" => self.handle_line_changed(conn_prefix, resp),
-                // WeeChat's typing plugin: a nick's state, or everyone's cleared.
-                "typing_set_nick" => {
-                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
-                        let body = resp.body.as_ref();
-                        let nick = body.and_then(|b| b.get("nick")).and_then(|v| v.as_str());
-                        let state = body.and_then(|b| b.get("state")).and_then(|v| v.as_str());
-                        let state = state.and_then(crate::relay::backend::TypingState::parse);
-                        if let (Some(nick), Some(state)) = (nick, state) {
-                            self.typing_seen(format!("{}/{}", conn_prefix, raw_id), nick.to_string(), state);
-                        }
+                // Relay API 0.7.0 (WeeChat's development branch): a nick's typing state,
+                // or everyone's cleared in a buffer.
+                "typing_nick_changed" | "typing_buffer_reset" => match parse_typing_event(&resp) {
+                    Some(TypingChange::Nick { buffer_id, nick, state }) => {
+                        self.typing_seen(format!("{}/{}", conn_prefix, buffer_id), nick, state);
                     }
-                }
-                "typing_reset_buffer" => {
-                    if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
-                        self.typing.remove(&format!("{}/{}", conn_prefix, raw_id));
+                    Some(TypingChange::Reset { buffer_id }) => {
+                        self.typing.remove(&format!("{}/{}", conn_prefix, buffer_id));
                     }
-                }
+                    None => {}
+                },
                 "buffer_hidden" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
@@ -1576,9 +1570,75 @@ fn nearest_left(buffers: &[Buffer], pfx: &str, pos: usize) -> Option<String> {
         .map(|(_, b)| b.id.clone())
 }
 
+/// What a typing event from the relay says, once parsed.
+#[derive(Debug, PartialEq)]
+enum TypingChange {
+    Nick { buffer_id: String, nick: String, state: crate::relay::backend::TypingState },
+    Reset { buffer_id: String },
+}
+
+/// Reads `typing_nick_changed` (body with "nick" and "state") and
+/// `typing_buffer_reset` (no body). Anything else, or a malformed one, is None.
+fn parse_typing_event(resp: &WeeChatResponse) -> Option<TypingChange> {
+    let buffer_id = resp.buffer_id?.to_string();
+    match resp.event_name.as_deref()? {
+        "typing_nick_changed" => {
+            let body = resp.body.as_ref()?;
+            let nick = body.get("nick")?.as_str()?.to_string();
+            let state = crate::relay::backend::TypingState::parse(body.get("state")?.as_str()?)?;
+            Some(TypingChange::Nick { buffer_id, nick, state })
+        }
+        "typing_buffer_reset" => Some(TypingChange::Reset { buffer_id }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn typing_resp(event: &str, buffer_id: Option<i64>, body: Option<Value>) -> WeeChatResponse {
+        WeeChatResponse {
+            request_id: None,
+            event_name: Some(event.into()),
+            code: None,
+            message: None,
+            body_type: None,
+            buffer_id,
+            body,
+        }
+    }
+
+    #[test]
+    fn typing_nick_changed_names_the_nick_and_state() {
+        use crate::relay::backend::TypingState;
+        let body = serde_json::json!({ "nick": "alice", "state": "active" });
+        let resp = typing_resp("typing_nick_changed", Some(7), Some(body));
+        assert_eq!(
+            parse_typing_event(&resp),
+            Some(TypingChange::Nick { buffer_id: "7".into(), nick: "alice".into(), state: TypingState::Active })
+        );
+        let body = serde_json::json!({ "nick": "alice", "state": "paused" });
+        let resp = typing_resp("typing_nick_changed", Some(7), Some(body));
+        assert!(matches!(parse_typing_event(&resp), Some(TypingChange::Nick { state: TypingState::Paused, .. })));
+    }
+
+    #[test]
+    fn typing_buffer_reset_clears_the_buffer() {
+        let resp = typing_resp("typing_buffer_reset", Some(7), None);
+        assert_eq!(parse_typing_event(&resp), Some(TypingChange::Reset { buffer_id: "7".into() }));
+    }
+
+    #[test]
+    fn malformed_or_old_typing_events_are_ignored() {
+        let body = serde_json::json!({ "nick": "alice", "state": "active" });
+        assert_eq!(parse_typing_event(&typing_resp("typing_nick_changed", None, Some(body.clone()))), None);
+        assert_eq!(parse_typing_event(&typing_resp("typing_nick_changed", Some(7), None)), None);
+        let bad = serde_json::json!({ "nick": "alice", "state": "dancing" });
+        assert_eq!(parse_typing_event(&typing_resp("typing_nick_changed", Some(7), Some(bad))), None);
+        // WeeChat's internal signal names are not what the relay sends.
+        assert_eq!(parse_typing_event(&typing_resp("typing_set_nick", Some(7), Some(body))), None);
+    }
 
     fn meta(full_name: &str, plugin: &str, local_vars: Value) -> (String, String) {
         let obj = serde_json::json!({ "local_variables": local_vars });

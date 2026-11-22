@@ -96,6 +96,7 @@ The details of both, from soju's read markers and search to ZNC's playback modul
 ### Chat
 - **ANSI and IRC colours**: 16-color, 256-color and TrueColor, IRC formatting codes, and nick colours from the chat in the nick list.
 - **Read position**: the unread divider shows where you left off, and read markers sync with WeeChat and soju. On a WeeChat relay the sync runs both ways: what you read here leaves WeeChat's hotlist, and a buffer read in WeeChat is read here. *Follow in WeeChat* (Settings, General) makes WeeChat switch to the buffer you open.
+- **Typing indicators**: see who is typing and, if you turn it on, tell others when you are. Through a WeeChat relay this needs relay API 0.7.0, which for now is only in WeeChat's development branch. Older relays ignore it. [Details](docs/irc.md#typing-indicators).
 - **Inline images**: a `🖼 preview` button on image links (`.png` `.jpg` `.gif` `.webp`) loads them into the chat.
 - **Link previews**: a `🔗 preview` button on other links shows the page's title, description and image.
 - **Search**: `⌘/Ctrl + F` filters the buffer. On soju it searches the server's history too.

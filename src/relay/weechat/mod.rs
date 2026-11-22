@@ -524,14 +524,8 @@ impl BackendClient for WeeChatClient {
     }
 
     fn mark_read(&self, buffer_id: &str) {
-        // REST endpoint (WeeChat 4.3+): sets the persistent last_read_line_ufr marker.
-        self.send_api(
-            &format!("POST /api/buffers/{}/read", buffer_id),
-            None,
-            None,
-        );
-        // Belt-and-suspenders for older relay versions: the input command clears the
-        // in-memory hotlist entry immediately and also updates last_read_line_ufr.
+        // The relay has no read endpoint, so this goes through the input command. It
+        // clears the hotlist entry at once and also updates last_read_line_ufr.
         if let Ok(id) = buffer_id.parse::<i64>() {
             self.send_api(
                 "POST /api/input",
@@ -576,8 +570,9 @@ impl BackendClient for WeeChatClient {
         );
     }
 
-    /// `POST /api/typing` (relay API 0.8.0 and later). WeeChat only passes it on
-    /// to IRC when its own typing options are on, and older relays answer 404.
+    /// `POST /api/typing` (relay API 0.7.0, which for now is only in WeeChat's
+    /// development branch). WeeChat only passes it on to IRC when its own typing
+    /// options are on, and older relays answer 404.
     fn send_typing(&self, buffer_id: &str, state: crate::relay::backend::TypingState) {
         let Ok(id) = buffer_id.parse::<i64>() else { return };
         self.send_api(
