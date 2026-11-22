@@ -52,6 +52,11 @@
     <color type="primary" scheme_preference="dark">#0f3d24</color>
   </branding>
   <releases>
+    <release version="0.9.6" date="2026-11-22">
+      <description>
+        <p>A Mentions buffer, a channel list, typing indicators, read state synced with WeeChat, a smart filter for joins and parts, lag in the toolbar, IRC login with a client certificate, and safer pastes of several lines.</p>
+      </description>
+    </release>
     <release version="0.9.5" date="2026-11-01">
       <description>
         <p>An ignore list, highlight words, notify levels per buffer, spell check, editing a channel's topic in place, and light and dark themes that follow the system.</p>
