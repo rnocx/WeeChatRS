@@ -241,7 +241,7 @@ mod backend {
                 log::warn!("macOS notification permission error: {:?}", unsafe { &*error });
             }
         });
-        center.requestAuthorizationWithOptions_completionHandler(options, &*handler);
+        center.requestAuthorizationWithOptions_completionHandler(options, &handler);
     }
 
     pub fn deliver(notif: &Notification) -> Result<(), String> {
@@ -269,7 +269,7 @@ mod backend {
 
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &id,
-            &*content,
+            &content,
             None,
         );
 

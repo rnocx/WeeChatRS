@@ -208,7 +208,7 @@ impl WeeChatApp {
                     buf.muted = self.muted_buffer_names.contains(&key);
                     buf.notify = self.buffer_notify.get(&key).copied().unwrap_or_default();
                 }
-                if !self.buffer_idx_of(&full_id).is_some() {
+                if self.buffer_idx_of(&full_id).is_none() {
                     // Keep a network's buffers together: after the last buffer of its group,
                     // or for a new group after the connection's last buffer. A soju login's
                     // networks join channels in any order.
@@ -222,7 +222,7 @@ impl WeeChatApp {
                     });
                     let pos = in_group.map(|i| i + 1)
                         .or_else(|| if buf.kind == "server" { before_later_group() } else { None })
-                        .or_else(|| self.buffers.iter().rposition(|b| same_conn(b)).map(|i| i + 1))
+                        .or_else(|| self.buffers.iter().rposition(same_conn).map(|i| i + 1))
                         .unwrap_or(self.buffers.len());
                     self.buffers.insert(pos, buf);
                     self.apply_saved_order_for(conn_prefix);
@@ -506,16 +506,16 @@ impl WeeChatApp {
             } else if id == "_hotlist" || id == "_hotlist_poll" {
                 self.handle_hotlist(conn_prefix, resp);
                 return;
-            } else if id.starts_with("_buffer_lines:") {
-                let buffer_id = id[14..].to_string();
+            } else if let Some(rest) = id.strip_prefix("_buffer_lines:") {
+                let buffer_id = rest.to_string();
                 self.handle_buffer_lines(conn_prefix, &buffer_id, resp);
                 return;
-            } else if id.starts_with("_nicks:") {
-                let buffer_id = id[7..].to_string();
+            } else if let Some(rest) = id.strip_prefix("_nicks:") {
+                let buffer_id = rest.to_string();
                 self.handle_nick_list(conn_prefix, &buffer_id, resp);
                 return;
-            } else if id.starts_with("_buffer_info:") {
-                let buffer_id = id[13..].to_string();
+            } else if let Some(rest) = id.strip_prefix("_buffer_info:") {
+                let buffer_id = rest.to_string();
                 self.handle_buffer_info(conn_prefix, &buffer_id, resp);
                 return;
             }
@@ -581,11 +581,11 @@ impl WeeChatApp {
                 "nicklist_nick_added" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
-                        if let Some(nick) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
+                        if let Some(nick) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(Self::parse_nick_obj) {
                             if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                                 if !buf.nicks.iter().any(|n| n.name == nick.name) {
                                     Arc::make_mut(&mut buf.nicks).push(nick);
-                                    Arc::make_mut(&mut buf.nicks).sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    Arc::make_mut(&mut buf.nicks).sort_by_key(|a| a.name.to_lowercase());
                                 }
                             }
                         }
@@ -604,13 +604,13 @@ impl WeeChatApp {
                 "nicklist_nick_changed" => {
                     if let Some(raw_id) = resp.buffer_id.map(|i| i.to_string()) {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
-                        if let Some(updated) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(|o| Self::parse_nick_obj(o)) {
+                        if let Some(updated) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(Self::parse_nick_obj) {
                             if let Some(buf) = self.buffer_by_id_mut(&full_id) {
                                 if let Some(existing) = Arc::make_mut(&mut buf.nicks).iter_mut().find(|n| n.name == updated.name) {
                                     *existing = updated;
                                 } else {
                                     Arc::make_mut(&mut buf.nicks).push(updated);
-                                    Arc::make_mut(&mut buf.nicks).sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    Arc::make_mut(&mut buf.nicks).sort_by_key(|a| a.name.to_lowercase());
                                 }
                             }
                         }
@@ -800,7 +800,7 @@ impl WeeChatApp {
         }
     }
 
-    fn sort_buffers(buffers: &mut Vec<Buffer>) {
+    fn sort_buffers(buffers: &mut [Buffer]) {
         buffers.sort_by(|a, b| {
             if a.server != b.server {
                 return a.server.cmp(&b.server);
@@ -851,7 +851,7 @@ impl WeeChatApp {
 
         for val in body {
             if let Some(obj) = val.as_object() {
-                let raw_id = obj.get("id").and_then(|v| Self::parse_id(v));
+                let raw_id = obj.get("id").and_then(Self::parse_id);
 
                 let number = obj.get("number").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                 let name = obj.get("short_name").and_then(|v| v.as_str())
@@ -861,8 +861,8 @@ impl WeeChatApp {
                 let plugin = Self::buffer_plugin(obj).to_string();
                 let hidden = obj.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
                 let has_nicklist = obj.get("nicklist").and_then(|v| v.as_bool()).unwrap_or(true);
-                let relay_last_read_id = obj.get("last_read_line_id").and_then(|v| Self::parse_id(v))
-                    .or_else(|| obj.get("last_read_line").and_then(|v| v.as_object()).and_then(|o| o.get("id")).and_then(|v| Self::parse_id(v)));
+                let relay_last_read_id = obj.get("last_read_line_id").and_then(Self::parse_id)
+                    .or_else(|| obj.get("last_read_line").and_then(|v| v.as_object()).and_then(|o| o.get("id")).and_then(Self::parse_id));
 
                 if let Some(raw_id) = raw_id {
                     let full_id = format!("{}/{}", conn_prefix, raw_id);
@@ -1065,7 +1065,7 @@ impl WeeChatApp {
         }
         for val in body {
             if let Some(obj) = val.as_object() {
-                let raw_buffer_id = obj.get("buffer_id").and_then(|v| Self::parse_id(v));
+                let raw_buffer_id = obj.get("buffer_id").and_then(Self::parse_id);
                 let priority = obj.get("priority")
                     .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
                     .unwrap_or(0);
@@ -1109,7 +1109,7 @@ impl WeeChatApp {
         let lines: Vec<Line> = body.iter().filter_map(|val| {
             let obj = val.as_object()?;
             let displayed = obj.get("displayed").and_then(|v| v.as_bool()).unwrap_or(true);
-            let id = obj.get("id").and_then(|v| Self::parse_id(v))
+            let id = obj.get("id").and_then(Self::parse_id)
                 .unwrap_or_else(|| "unknown".to_string());
             let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
             let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -1369,7 +1369,7 @@ impl WeeChatApp {
             if let Some(obj) = val.as_object() {
                 let displayed = obj.get("displayed").and_then(|v| v.as_bool()).unwrap_or(true);
                 let raw_buffer_id = resp.buffer_id.map(|i| i.to_string())
-                    .or_else(|| obj.get("buffer_id").and_then(|v| Self::parse_id(v)));
+                    .or_else(|| obj.get("buffer_id").and_then(Self::parse_id));
 
                 let is_highlight = obj.get("highlight").and_then(|v| v.as_bool()).unwrap_or(false);
                 let notify_level = obj.get("notify_level")
@@ -1385,7 +1385,7 @@ impl WeeChatApp {
                     let buffer_id = format!("{}/{}", conn_prefix, raw_buffer_id);
                     let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
                     let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                    let id = obj.get("id").and_then(|v| Self::parse_id(v))
+                    let id = obj.get("id").and_then(Self::parse_id)
                         .unwrap_or_else(|| Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string());
                     let timestamp = Self::parse_date(obj.get("date"));
 
@@ -1481,8 +1481,8 @@ impl WeeChatApp {
         for val in body {
             if let Some(obj) = val.as_object() {
                 let raw_buffer_id = resp.buffer_id.map(|i| i.to_string())
-                    .or_else(|| obj.get("buffer_id").and_then(|v| Self::parse_id(v)));
-                let line_id = obj.get("id").and_then(|v| Self::parse_id(v));
+                    .or_else(|| obj.get("buffer_id").and_then(Self::parse_id));
+                let line_id = obj.get("id").and_then(Self::parse_id);
                 let displayed = obj.get("displayed").and_then(|v| v.as_bool()).unwrap_or(true);
 
                 if let (Some(raw_buffer_id), Some(line_id)) = (raw_buffer_id, line_id) {

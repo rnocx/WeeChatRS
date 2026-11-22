@@ -579,6 +579,9 @@ const MIRC_EXTENDED: [u32; 83] = [
     0x000000, 0x131313, 0x282828, 0x363636, 0x4d4d4d, 0x656565, 0x818181, 0x9f9f9f, 0xbcbcbc, 0xe2e2e2, 0xffffff,
 ];
 
+/// A colour code builder: takes the digits or hex after the control byte and a base SGR code.
+type ColourFn<'a> = &'a dyn Fn(&str, u8) -> String;
+
 /// IRC formatting codes (bold, italic, underline, colours, reset) as the ANSI escapes
 /// the chat view draws; codes it can't draw (reverse, strikethrough, monospace) are
 /// dropped. Extended colours 16–98 are drawn as their fixed RGB values; 99 is the default.
@@ -619,7 +622,7 @@ pub(crate) fn irc_to_ansi(text: &str) -> String {
             '\x1F' => { underline = !underline; out.push_str(if underline { "\x1B[4m" } else { "\x1B[24m" }); }
             '\x0F' => { (bold, italic, underline) = (false, false, false); out.push_str("\x1B[0m"); }
             '\x03' | '\x04' => {
-                let (digits, max, code): (fn(&char) -> bool, usize, &dyn Fn(&str, u8) -> String) = if c == '\x03' {
+                let (digits, max, code): (fn(&char) -> bool, usize, ColourFn) = if c == '\x03' {
                     (char::is_ascii_digit, 2, &colour)
                 } else {
                     (char::is_ascii_hexdigit, 6, &rgb)
@@ -831,7 +834,7 @@ pub(crate) fn expand_irc_command(buffer_id: &str, text: &str) -> Option<String> 
             };
             let targets: Vec<&str> = rest.split_ascii_whitespace().collect();
             let mode_str: String = std::iter::once(sign)
-                .chain(std::iter::repeat(mode_char).take(targets.len()))
+                .chain(std::iter::repeat_n(mode_char, targets.len()))
                 .collect();
             Some(format!("MODE {} {} {}", buffer_id, mode_str, targets.join(" ")))
         }
@@ -1068,7 +1071,7 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                         session.available_caps.insert(cap_name.to_string());
                         if Session::wants_caps().contains(&cap_name)
                             && !session.negotiated_caps.contains(cap_name)
-                            && !(cap_name == "sasl" && !has_sasl_creds)
+                            && (cap_name != "sasl" || has_sasl_creds)
                         {
                             new_wanted.push(cap_name.to_string());
                         }
@@ -1089,9 +1092,9 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             }
         }
 
-        "AUTHENTICATE" => {
+        "AUTHENTICATE"
             // Server is ready for our SASL payload
-            if msg.param(0).unwrap_or("") == "+" {
+            if msg.param(0).unwrap_or("") == "+" => {
                 if session.sasl_mech == "EXTERNAL" {
                     // The certificate is the login; an empty authzid lets the server
                     // use the account it belongs to, a SASL username asks for that one.
@@ -1110,7 +1113,6 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                     session.whois_lines.push(format!("AUTHENTICATE {}", encoded));
                 }
             }
-        }
 
         // 903 — SASL success
         "903" => {
@@ -1301,14 +1303,13 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
             }
         }
 
-        "CHATHISTORY" => {
-            if msg.param(0).unwrap_or("") == "TARGETS" {
+        "CHATHISTORY"
+            if msg.param(0).unwrap_or("") == "TARGETS" => {
                 let target = msg.param(1).unwrap_or("").to_string();
                 if !target.is_empty() && !is_channel(&target) {
                     session.pending_pm_targets.push(target.to_lowercase());
                 }
             }
-        }
 
         "JOIN" => {
             let channel = msg.param(0).unwrap_or("").to_string();
@@ -1617,8 +1618,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
 
         // soju.im/bouncer-networks: `BOUNCER NETWORK <netid> <attributes>`, in reply
         // to LISTNETWORKS or as a notification; attributes `*` means it was deleted.
-        "BOUNCER" => {
-            if msg.param(0).unwrap_or("").eq_ignore_ascii_case("NETWORK") && session.bouncer_control {
+        "BOUNCER"
+            if msg.param(0).unwrap_or("").eq_ignore_ascii_case("NETWORK") && session.bouncer_control => {
                 let netid = msg.param(1).unwrap_or("").to_string();
                 let attrs = msg.param(2).unwrap_or("");
                 if !netid.is_empty() {
@@ -1629,7 +1630,6 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                     });
                 }
             }
-        }
 
         "AWAY" => {
             // away-notify: a nick in a shared channel changed away status
@@ -1859,8 +1859,8 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                 events.push(BackendEvent::ModesChanged { buffer_id: channel, modes });
             }
         }
-        "MODE" => {
-            if msg.param(0).is_some_and(|t| t.eq_ignore_ascii_case(&session.our_nick)) {
+        "MODE"
+            if msg.param(0).is_some_and(|t| t.eq_ignore_ascii_case(&session.our_nick)) => {
                 let modes = msg.param(1).unwrap_or("").to_string();
                 apply_user_modes(session, &modes);
                 *line_counter += 1;
@@ -1869,7 +1869,6 @@ fn translate_message(msg: &IrcMessage, session: &mut Session, line_counter: &mut
                     line: make_line(&line_counter.to_string(), "--", &format!("User mode {} for {}", modes, session.our_nick), timestamp_from_msg(msg), false),
                 });
             }
-        }
 
         // Server info / ISUPPORT / MOTD / stats — route to status buffer
         "002" | "003" | "004" | "005" | "251" | "252" | "253" | "254" | "255" | "265" | "266"
@@ -2294,7 +2293,7 @@ pub fn spawn(
                                             }
                                         // /query <nick> — client-side command: open a DM buffer, nothing to send
                                         } else if let Some(rest) = text.strip_prefix("/query ").or_else(|| text.strip_prefix("/QUERY ")).filter(|_| !literal) {
-                                            let target_nick = rest.trim().split_whitespace().next().unwrap_or("").to_string();
+                                            let target_nick = rest.split_whitespace().next().unwrap_or("").to_string();
                                             if !target_nick.is_empty() {
                                                 let buf_id = target_nick.to_lowercase();
                                                 if !session.joined.contains(&buf_id) {

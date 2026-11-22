@@ -509,15 +509,15 @@ fn apply_drag_reorder(buffers: &mut Vec<Buffer>, drag_id: &str, drop_before_id: 
     }
 }
 
-/// The key under which the app keeps a buffer's state that the server doesn't (hidden,
-/// muted, ZNC read markers): connection, network group and buffer name, which tell a
-/// bouncer's networks apart and stay the same from one session to the next.
 /// A dictionary parsed or downloaded in the background, for the spell check.
 pub(crate) enum SpellEvent {
-    Loaded(String, Result<crate::ui::spellcheck::SpellChecker, String>),
+    Loaded(String, Result<Box<crate::ui::spellcheck::SpellChecker>, String>),
     Downloaded(String, Result<(), String>),
 }
 
+/// The key under which the app keeps a buffer's state that the server doesn't (hidden,
+/// muted, ZNC read markers): connection, network group and buffer name, which tell a
+/// bouncer's networks apart and stay the same from one session to the next.
 pub(crate) fn local_buffer_key(conn_prefix: &str, buffer: &Buffer) -> String {
     format!("{}|{}|{}", conn_prefix, buffer.server, buffer.name.to_lowercase())
 }
@@ -1924,7 +1924,7 @@ impl WeeChatApp {
     pub(crate) fn load_spell_language(&self, ctx: &egui::Context, lang: &str) {
         let (tx, ctx, lang) = (self.spell_tx.clone(), ctx.clone(), lang.to_string());
         tokio::task::spawn_blocking(move || {
-            let result = crate::ui::spellcheck::SpellChecker::load(&lang);
+            let result = crate::ui::spellcheck::SpellChecker::load(&lang).map(Box::new);
             let _ = tx.send(SpellEvent::Loaded(lang, result));
             ctx.request_repaint();
         });
@@ -2363,7 +2363,7 @@ impl eframe::App for WeeChatApp {
             match event {
                 SpellEvent::Loaded(lang, Ok(checker)) => {
                     if self.spell_languages.contains(&lang) {
-                        self.spell_checkers.insert(lang, std::sync::Arc::new(checker));
+                        self.spell_checkers.insert(lang, std::sync::Arc::new(*checker));
                     }
                 }
                 SpellEvent::Loaded(_, Err(e)) => self.spell_error = Some(e),
@@ -2424,7 +2424,7 @@ impl eframe::App for WeeChatApp {
         // Drag-and-drop file upload
         let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
         if !dropped_files.is_empty() && !self.file_share_uploading {
-            if let Some(path) = dropped_files.into_iter().find_map(|f| Some(f.path().to_path_buf())) {
+            if let Some(path) = dropped_files.into_iter().map(|f| f.path().to_path_buf()).next() {
                 if let Some(buf_id) = self.selected_buffer_id.clone() {
                     self.start_upload(buf_id, Some(path));
                 }
@@ -3231,10 +3231,10 @@ impl eframe::App for WeeChatApp {
         // Each nick's highest channel mode, to show before it in chat. WeeChat puts it in
         // the prefix itself.
         let chat_nick_modes: Option<HashMap<String, char>> = (self.show_nick_modes && current_buffer_kind == "channel")
-            .then(|| current_buffer_id.as_deref())
+            .then_some(current_buffer_id.as_deref())
             .flatten()
             .filter(|id| !self.saved_state_key(id).is_some_and(|(_, weechat)| weechat))
-            .and_then(|_| current_buffer_nicks.as_ref())
+            .and(current_buffer_nicks.as_ref())
             .map(|nicks| nicks.iter()
                 .filter_map(|n| Some((n.name.to_lowercase(), n.prefix.chars().find(|c| !c.is_whitespace())?)))
                 .collect());
@@ -4077,8 +4077,7 @@ impl eframe::App for WeeChatApp {
                                             egui::vec2(col_width, ui.text_style_height(&TextStyle::Body)),
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                let mut prefix_job = LayoutJob::default();
-                                                prefix_job.halign = egui::Align::RIGHT;
+                                                let mut prefix_job = LayoutJob { halign: egui::Align::RIGHT, ..Default::default() };
                                                 if let Some(mode) = nick_mode {
                                                     prefix_job.append(&mode.to_string(), 0.0, nick_mode_style(mode).to_format(font_id.clone(), &render_theme));
                                                 }
@@ -4337,7 +4336,7 @@ impl eframe::App for WeeChatApp {
                                     }
                                     if ui.input(|i| {
                                         i.pointer.button_clicked(egui::PointerButton::Secondary)
-                                        && i.pointer.interact_pos().map_or(false, |p| row_rect.contains(p))
+                                        && i.pointer.interact_pos().is_some_and(|p| row_rect.contains(p))
                                     }) {
                                         let click_pos = ui.input(|i| i.pointer.interact_pos().unwrap_or(row_rect.left_bottom()));
                                         self.ctx_menu_state = Some((click_pos, plain_message, plain_prefix, row_hovered_url.clone()));
@@ -4421,12 +4420,11 @@ impl eframe::App for WeeChatApp {
                                 ctx.copy_text(msg.clone());
                                 close_ctx_menu = true;
                             }
-                            if !prefix.is_empty() {
-                                if ui.button("Copy with sender").clicked() {
+                            if !prefix.is_empty()
+                                && ui.button("Copy with sender").clicked() {
                                     ctx.copy_text(format!("<{}> {}", prefix, msg));
                                     close_ctx_menu = true;
                                 }
-                            }
                         });
                 });
             // Don't close on the same frame we opened (avoids immediate dismiss

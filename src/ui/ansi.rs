@@ -31,16 +31,15 @@ fn link_len(url: &str) -> usize {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum AnsiColor {
+    #[default]
     Default,
     Indexed(u8),
     Index256(u8),
     Rgb(u8, u8, u8),
 }
 
-impl Default for AnsiColor {
-    fn default() -> Self { AnsiColor::Default }
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnsiStyle {
@@ -52,7 +51,7 @@ pub struct AnsiStyle {
 }
 
 impl AnsiStyle {
-    pub fn to_format(&self, font_id: FontId, theme: &AppTheme) -> TextFormat {
+    pub fn to_format(self, font_id: FontId, theme: &AppTheme) -> TextFormat {
         let fg = resolve_color(self.fg, theme).unwrap_or(Color32::PLACEHOLDER);
         TextFormat {
             font_id,

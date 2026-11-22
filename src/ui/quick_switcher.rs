@@ -81,7 +81,7 @@ impl WeeChatApp {
         }
         if !query.is_empty() {
             // Stable sort keeps buffer-list order among equal scores.
-            results.sort_by(|a, b| b.0.cmp(&a.0));
+            results.sort_by_key(|a| std::cmp::Reverse(a.0));
         }
         results.truncate(MAX_RESULTS);
 

@@ -40,7 +40,7 @@ fn collect(buffers: &[Buffer], query: &str, cleared_at: Option<DateTime<Utc>>) -
                 .map(move |(li, l)| (l.timestamp, bi, li))
         })
         .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|a| std::cmp::Reverse(a.0));
     found.truncate(MAX_SHOWN);
     found.into_iter().rev().map(|(_, bi, li)| (bi, li)).collect()
 }

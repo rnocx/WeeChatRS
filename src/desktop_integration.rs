@@ -19,9 +19,6 @@ const ICONS: &[(&str, &[u8])] = &[
     ("512x512", include_bytes!("../assets/icon.iconset/icon_512x512.png")),
 ];
 
-/// The app_id the desktop knows us by: the Flatpak app ID in a Flatpak, where the
-/// desktop entry is named after it, else `weechatrs`.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Whether to run through X11 although the session is Wayland. GNOME doesn't draw
 /// titlebars for Wayland windows, so winit falls back to a frame of its own that
 /// ignores the desktop's settings: all three buttons whatever `button-layout` says,
@@ -45,6 +42,9 @@ pub fn use_x11_on_gnome_wayland() {
     }
 }
 
+/// The app_id the desktop knows us by: the Flatpak app ID in a Flatpak, where the
+/// desktop entry is named after it, else `weechatrs`.
+#[cfg(target_os = "linux")]
 pub fn app_id() -> String {
     std::env::var("FLATPAK_ID").ok().filter(|id| !id.is_empty()).unwrap_or_else(|| APP_ID.to_string())
 }

@@ -129,7 +129,7 @@ fn kmeans_palette(pixels: &[(u8, u8, u8)], k: usize) -> Vec<(u8, u8, u8, usize)>
         .zip(counts.iter())
         .map(|(&(r, g, b), &n)| (r as u8, g as u8, b as u8, n))
         .collect();
-    result.sort_by(|a, b| b.3.cmp(&a.3));
+    result.sort_by_key(|a| std::cmp::Reverse(a.3));
     result
 }
 
@@ -417,7 +417,7 @@ fn palette_to_theme(palette: &[(u8, u8, u8, usize)]) -> AppTheme {
     // Sort palette by luminance to find extremes.
     let mut by_luma: Vec<(u8, u8, u8)> = palette.iter().map(|&(r, g, b, _)| (r, g, b)).collect();
     by_luma.sort_by(|&(r1, g1, b1), &(r2, g2, b2)| {
-        luminance(r1, g1, b1).partial_cmp(&luminance(r2, g2, b2)).unwrap()
+        luminance(r1, g1, b1).total_cmp(&luminance(r2, g2, b2))
     });
 
     // Background: extremal colour pushed to a readable darkness/lightness.
@@ -435,7 +435,7 @@ fn palette_to_theme(palette: &[(u8, u8, u8, usize)]) -> AppTheme {
     let &(ar, ag, ab, _) = palette
         .iter()
         .max_by(|&&(r1, g1, b1, _), &&(r2, g2, b2, _)| {
-            saturation_hsv(r1, g1, b1).partial_cmp(&saturation_hsv(r2, g2, b2)).unwrap()
+            saturation_hsv(r1, g1, b1).total_cmp(&saturation_hsv(r2, g2, b2))
         })
         .unwrap_or(&palette[0]);
     let (acc_h, _, _) = rgb_to_hsl(ar, ag, ab);
@@ -522,7 +522,7 @@ fn pref_file_changed(last_mtime: &mut Option<std::time::SystemTime>) -> bool {
         .max();
     match newest {
         Some(mtime) => {
-            if last_mtime.map_or(true, |t| t != mtime) {
+            if last_mtime.is_none_or(|t| t != mtime) {
                 *last_mtime = Some(mtime);
                 true
             } else {

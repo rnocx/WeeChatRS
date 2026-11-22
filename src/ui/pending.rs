@@ -81,6 +81,7 @@ impl PendingEchoes {
         self.by_buffer.retain(|id, _| !id.starts_with(&prefix));
     }
 
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.by_buffer.is_empty()
     }

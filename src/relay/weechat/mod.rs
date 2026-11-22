@@ -395,14 +395,14 @@ impl BackendClient for WeeChatClient {
                                     list_due = None;
                                     last_list = tokio::time::Instant::now();
                                     let request = r#"{"request":"GET /api/buffers","request_id":"_list_buffers"}"#;
-                                    if let Err(e) = ws_tx.send(Message::Text(request.to_string().into())).await {
+                                    if let Err(e) = ws_tx.send(Message::Text(request.to_string())).await {
                                         send!(BackendEvent::Error(format!("Send error: {}", e)));
                                         break;
                                     }
                                 }
                                 _ = lag_check.tick(), if lag_ping.is_none() => {
                                     let now = std::time::Instant::now();
-                                    if let Err(e) = ws_tx.send(Message::Ping(Vec::new().into())).await {
+                                    if let Err(e) = ws_tx.send(Message::Ping(Vec::new())).await {
                                         send!(BackendEvent::Error(format!("Send error: {}", e)));
                                         break;
                                     }
@@ -419,7 +419,7 @@ impl BackendClient for WeeChatClient {
                                     // A quiet relay sends nothing; its pong keeps a live
                                     // connection from looking dead above.
                                     if last_received.elapsed() >= Duration::from_secs(55) {
-                                        if let Err(e) = ws_tx.send(Message::Ping(Vec::new().into())).await {
+                                        if let Err(e) = ws_tx.send(Message::Ping(Vec::new())).await {
                                             send!(BackendEvent::Error(format!("Send error: {}", e)));
                                             break;
                                         }

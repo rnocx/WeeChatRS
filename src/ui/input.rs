@@ -369,10 +369,9 @@ impl WeeChatApp {
 
         // Determine pending_buffer_switch before the borrow via client_for_buffer
         if is_command {
-            if msg.starts_with("/query ") {
-                self.pending_buffer_switch = msg[7..].split_whitespace().next().map(|s| s.to_string());
-            } else if msg.starts_with("/join ") || msg.starts_with("/j ") {
-                let after = if msg.starts_with("/j ") { &msg[3..] } else { &msg[6..] };
+            if let Some(rest) = msg.strip_prefix("/query ") {
+                self.pending_buffer_switch = rest.split_whitespace().next().map(|s| s.to_string());
+            } else if let Some(after) = msg.strip_prefix("/join ").or_else(|| msg.strip_prefix("/j ")) {
                 self.pending_buffer_switch = after.split_whitespace().next().map(|s| s.to_string());
             } else if let Some((id, network)) = (msg.trim() == "/ignore" || msg.starts_with("/ignore ") || msg.starts_with("/unignore "))
                 .then(|| self.selected_buffer_id.clone()).flatten()

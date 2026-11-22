@@ -3,7 +3,7 @@
 use base64::Engine as _;
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{mpsc, OnceLock},
 };
 
 pub struct ImportedSession {
@@ -48,7 +48,10 @@ fn tokens(bytes: &[u8]) -> Vec<String> {
     // candidates adjacent to Injected's token key are considered; stale sessions
     // are checked against /api/me before anything is offered to the user.
     let data = String::from_utf8_lossy(bytes);
-    let regex = regex::Regex::new(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").unwrap();
+    static TOKEN_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let regex = TOKEN_RE.get_or_init(|| {
+        regex::Regex::new(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").unwrap()
+    });
     let mut out = Vec::new();
     for found in regex.find_iter(&data) {
         let from = data[..found.start()]
@@ -162,6 +165,39 @@ pub fn start(
     rx
 }
 
+/// Verify the session without exposing server response bodies or credentials.
+#[cfg(web_login)]
+pub async fn verify_session(token: String) -> Result<ImportedSession, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Could not initialize session verification.".to_string())?;
+    let response = client
+        .get("https://injected-irc.com/api/me")
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|_| "Could not reach Injected to verify sign-in. Please retry.".to_string())?;
+    if matches!(response.status().as_u16(), 401 | 403) {
+        return Err("Injected rejected the session. Please sign in again.".into());
+    }
+    if !response.status().is_success() {
+        return Err("Injected could not verify sign-in. Please retry later.".into());
+    }
+    let bytes = super::read_capped(response, 1024 * 1024)
+        .await
+        .map_err(|_| "Could not read sign-in verification.".to_string())?;
+    let user: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "Unexpected sign-in verification response.".to_string())?;
+    let username = user["username"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Injected did not return an account name.".to_string())?
+        .to_owned();
+    Ok(ImportedSession { token, username })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,37 +246,4 @@ mod tests {
             PathBuf::from("app/Local Storage/leveldb")
         );
     }
-}
-
-/// Verify the session without exposing server response bodies or credentials.
-#[cfg(web_login)]
-pub async fn verify_session(token: String) -> Result<ImportedSession, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Could not initialize session verification.".to_string())?;
-    let response = client
-        .get("https://injected-irc.com/api/me")
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|_| "Could not reach Injected to verify sign-in. Please retry.".to_string())?;
-    if matches!(response.status().as_u16(), 401 | 403) {
-        return Err("Injected rejected the session. Please sign in again.".into());
-    }
-    if !response.status().is_success() {
-        return Err("Injected could not verify sign-in. Please retry later.".into());
-    }
-    let bytes = super::read_capped(response, 1024 * 1024)
-        .await
-        .map_err(|_| "Could not read sign-in verification.".to_string())?;
-    let user: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "Unexpected sign-in verification response.".to_string())?;
-    let username = user["username"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "Injected did not return an account name.".to_string())?
-        .to_owned();
-    Ok(ImportedSession { token, username })
 }

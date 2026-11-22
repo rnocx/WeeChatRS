@@ -560,12 +560,11 @@ impl WeeChatApp {
                 ui.separator();
                 let query = self.font_search.to_lowercase();
                 for family in &self.available_fonts {
-                    if query.is_empty() || family.name.to_lowercase().contains(&query) {
-                        if ui.selectable_label(family.name == self.font_name, family.name.as_str()).clicked() {
+                    if (query.is_empty() || family.name.to_lowercase().contains(&query))
+                        && ui.selectable_label(family.name == self.font_name, family.name.as_str()).clicked() {
                             let face = family.regular();
                             new_font = Some((family.name.clone(), face.path.clone(), face.index));
                         }
-                    }
                 }
             });
         if combo_resp.inner.is_none() {

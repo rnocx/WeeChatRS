@@ -51,7 +51,7 @@ pub fn scan_system_fonts() -> Vec<FontFamilyEntry> {
         faces.dedup_by(|a, b| a.style == b.style);
         FontFamilyEntry { name, faces }
     }).collect();
-    fonts.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    fonts.sort_by_key(|a| a.name.to_lowercase());
     fonts
 }
 

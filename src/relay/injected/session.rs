@@ -387,7 +387,7 @@ impl State {
         // is known by its time, sender and text, live or from history; with the wire
         // ID, history brought back lines already shown live.
         let ident = json!([ts.timestamp_millis(), casefold(who), text]).to_string();
-        Line::new(ident, ts, prefix.into(), text, true, highlight)
+        Line::new(ident, ts, prefix, text, true, highlight)
     }
     /// The line for a live join, part, quit, kick or nick change in buffer `id`.
     fn presence(&mut self, id: &str, kind: &str, v: &Value) {
@@ -533,7 +533,7 @@ impl State {
         }
         // Every settings sync, our own read updates' echo included, lands here.
         for (id, state, ts) in changes {
-            self.read_state.insert(id.clone(), state.clone());
+            self.read_state.insert(id.clone(), state);
             self.emit(BackendEvent::ActivityChanged {
                 buffer_id: id,
                 activity: state.0,
@@ -688,7 +688,7 @@ impl State {
                 }
             }
             Command::Nicks(id) => {
-                if !self.members.get(&id).is_some_and(|m| !m.is_empty()) {
+                if self.members.get(&id).is_none_or(|m| m.is_empty()) {
                     self.names(&id);
                 }
             }
@@ -1131,7 +1131,7 @@ async fn session(
                 state.timeout_requests();
                 if authenticated && lag_ping.is_none() && tokio::time::Instant::now() >= next_lag_check {
                     next_lag_check = tokio::time::Instant::now() + Duration::from_secs(30);
-                    socket.send(Message::Ping(Vec::new().into())).await.map_err(|_|Failure::Other("Injected WebSocket heartbeat failed."))?;
+                    socket.send(Message::Ping(Vec::new())).await.map_err(|_|Failure::Other("Injected WebSocket heartbeat failed."))?;
                     let now = std::time::Instant::now();
                     lag_ping = Some(now);
                     state.emit(BackendEvent::Lag { buffer_id: None, lag: crate::relay::backend::Lag::Waiting(now) });
@@ -1615,6 +1615,7 @@ mod tests {
         stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await.unwrap();
     }
     #[tokio::test]
+    #[expect(clippy::result_large_err, reason = "tungstenite fixes the error type of the handshake callback")]
     async fn mock_service_authenticates_pongs_loads_history_sends_and_closes() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

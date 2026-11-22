@@ -115,7 +115,7 @@ impl WeeChatApp {
         if search.request == request {
             search.waiting = search.waiting.saturating_sub(1);
             search.hits.extend(lines);
-            search.hits.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+            search.hits.sort_by_key(|a| std::cmp::Reverse(a.1.timestamp));
             if let Some(e) = error.filter(|e| !search.errors.contains(e)) {
                 search.errors.push(e);
             }

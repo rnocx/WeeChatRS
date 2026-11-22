@@ -322,7 +322,7 @@ impl KeybindsMap {
     /// Check if any digit key 1–9 was pressed with the JumpBufferByNumber modifier.
     /// Returns Some(1..=9) if matched, consuming the event.
     pub fn consume_jump_number(&self, i: &mut egui::InputState) -> Option<usize> {
-        let Some((mods, _)) = self.0.get(&KeybindAction::JumpBufferByNumber) else { return None };
+        let (mods, _) = self.0.get(&KeybindAction::JumpBufferByNumber)?;
         if mods.is_empty() { return None; }
         let egui_mods = mods.to_egui();
         let digit_keys = [
