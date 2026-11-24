@@ -3,6 +3,10 @@
 //! Its stdout is a private pipe to the app.
 use super::bridge::{official_url, parse_reply, SessionReply, ORIGIN};
 
+#[cfg(all(windows, target_env = "gnu", not(target_arch = "x86")))]
+#[path = "webview2_loader.rs"]
+mod webview2_loader;
+
 const SCRIPT: &str = include_str!("web_login.js");
 
 fn navigation_allowed(url: &str) -> bool {
@@ -28,6 +32,8 @@ pub fn run() -> Result<(), String> {
         Session(SessionReply),
         Open(String),
     }
+    #[cfg(all(windows, target_env = "gnu", not(target_arch = "x86")))]
+    webview2_loader::init();
     let event_loop = EventLoopBuilder::<LoginEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("Sign in to Injected — injected-irc.com")
