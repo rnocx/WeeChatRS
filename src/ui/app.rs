@@ -3950,9 +3950,9 @@ impl eframe::App for WeeChatApp {
                                             Color32::from_rgb(200, 50, 50)
                                         };
                                         if fresh {
-                                            ctx.request_repaint_after(std::time::Duration::from_secs(2) - elapsed);
+                                            ctx.request_repaint_after(std::time::Duration::from_secs(2).saturating_sub(elapsed));
                                         } else if !timed_out {
-                                            ctx.request_repaint_after(std::time::Duration::from_secs(30) - elapsed);
+                                            ctx.request_repaint_after(std::time::Duration::from_secs(30).saturating_sub(elapsed));
                                         }
                                         ui.add_space(self.sp(8.0));
                                         let font = FontId::proportional(10.0);
