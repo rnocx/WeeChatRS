@@ -82,9 +82,9 @@ login page. Not yet checked on a real desktop, or on x86_64.
 ./build-msix.sh --sign    # signed with a test certificate, to install on a test PC
 ```
 
-It packs `weechat-rs.exe` and `WebView2Loader.dll` from `build-windows.sh`'s zip
-(building it first if needed) with `makemsix`, Microsoft's packing tool built from
-source in `docker/Dockerfile.msix`, so it runs on macOS and Linux. The manifest is
+It packs `weechat-rs.exe` from `build-windows.sh`'s zip (building it first if needed)
+with `makemsix`, Microsoft's packing tool built from source in
+`docker/Dockerfile.msix`, so it runs on macOS and Linux. The manifest is
 `packaging/msix/AppxManifest.xml`, and the tile icons are made from the app icon.
 
 In the package, the app is a full-trust desktop app. Notifications use the package's

@@ -14,9 +14,8 @@ set -euo pipefail
 #   MSIX_PUBLISHER_NAME  Package/Properties/PublisherDisplayName
 # Without them, test values are used, which the Store won't accept.
 #
-# Takes weechat-rs.exe and WebView2Loader.dll from build-windows.sh's zip (and runs it
-# if the zip isn't there), and packs with makemsix in a container from
-# docker/Dockerfile.msix (Docker or Podman).
+# Takes weechat-rs.exe from build-windows.sh's zip (and runs it if the zip isn't there),
+# and packs with makemsix in a container from docker/Dockerfile.msix (Docker or Podman).
 
 cd "$(dirname "$0")"
 
@@ -56,9 +55,7 @@ STAGE="${OUT_DIR}/stage"
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}/Assets"
 unzip -q -o "${ZIP}" -d "${STAGE}"
-for f in weechat-rs.exe WebView2Loader.dll; do
-    [ -f "${STAGE}/${f}" ] || { echo "ERROR: ${f} not in ${ZIP}"; exit 1; }
-done
+[ -f "${STAGE}/weechat-rs.exe" ] || { echo "ERROR: weechat-rs.exe not in ${ZIP}"; exit 1; }
 # The Store wants a four-part version whose last part is 0, without a pre-release
 # suffix: 0.9.4-rc1 packs as 0.9.4.0, like 0.9.4 itself.
 MSIX_VERSION="${VERSION%%-*}.0"
