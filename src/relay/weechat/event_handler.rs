@@ -236,8 +236,8 @@ impl WeeChatApp {
                 if let Some(target) = self.pending_buffer_switch.take() {
                     if let Some(found) = self.buffers.iter().find(|b|
                         b.name == target
-                        || b.id == target
-                        || b.full_name.ends_with(&target)
+                            || b.id == target
+                            || b.full_name.ends_with(&target)
                     ) {
                         let id = found.id.clone();
                         self.select_buffer(id);
@@ -315,30 +315,16 @@ impl WeeChatApp {
                     self.notify_highlight(&full_id, &buf_name, &notify_prefix, &notify_message);
                 }
             }
-            BackendEvent::NicklistLoaded { buffer_id, mut nicks } => {
+            BackendEvent::NicklistLoaded { buffer_id, nicks } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
-                nicks.sort_by(|a, b| {
-                    fn rank(p: &str) -> u8 {
-                        if p.contains('~') { 0 }
-                        else if p.contains('&') { 1 }
-                        else if p.contains('@') { 2 }
-                        else if p.contains('%') { 3 }
-                        else if p.contains('+') { 4 }
-                        else { 5 }
-                    }
-                    rank(&a.prefix).cmp(&rank(&b.prefix))
-                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                });
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                    buf.nicks = Arc::new(nicks);
+                    buf.set_nicks(nicks);
                 }
             }
             BackendEvent::NickAdded { buffer_id, nick } => {
                 let full_id = format!("{}/{}", conn_prefix, buffer_id);
                 if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                    if !buf.nicks.iter().any(|n| n.name == nick.name) {
-                        Arc::make_mut(&mut buf.nicks).push(nick);
-                    }
+                    buf.add_nick(nick);
                 }
             }
             BackendEvent::NickRemoved { buffer_id, nick_name } => {
@@ -577,10 +563,7 @@ impl WeeChatApp {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(nick) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(Self::parse_nick_obj) {
                             if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                                if !buf.nicks.iter().any(|n| n.name == nick.name) {
-                                    Arc::make_mut(&mut buf.nicks).push(nick);
-                                    Arc::make_mut(&mut buf.nicks).sort_by_key(|a| a.name.to_lowercase());
-                                }
+                                buf.add_nick(nick);
                             }
                         }
                     }
@@ -600,12 +583,7 @@ impl WeeChatApp {
                         let full_id = format!("{}/{}", conn_prefix, raw_id);
                         if let Some(updated) = resp.body.as_ref().and_then(|b| b.as_object()).and_then(Self::parse_nick_obj) {
                             if let Some(buf) = self.buffer_by_id_mut(&full_id) {
-                                if let Some(existing) = Arc::make_mut(&mut buf.nicks).iter_mut().find(|n| n.name == updated.name) {
-                                    *existing = updated;
-                                } else {
-                                    Arc::make_mut(&mut buf.nicks).push(updated);
-                                    Arc::make_mut(&mut buf.nicks).sort_by_key(|a| a.name.to_lowercase());
-                                }
+                                buf.upsert_nick(updated);
                             }
                         }
                     }
@@ -631,7 +609,7 @@ impl WeeChatApp {
                     self.log_conn_for(conn_prefix, "WeeChat upgrade complete — re-synced");
                 }
                 "buffer_localvar_added" | "buffer_localvar_changed" | "buffer_localvar_removed"
-                    if self.weechat_lag_only(conn_prefix, &resp) => {}
+                if self.weechat_lag_only(conn_prefix, &resp) => {}
                 "buffer_opened" | "buffer_closed" | "buffer_renamed"
                 | "buffer_localvar_added" | "buffer_localvar_changed"
                 | "buffer_localvar_removed" => {
@@ -1016,9 +994,9 @@ impl WeeChatApp {
                 // name (`irc.libera.#chan`). Not any name that merely ends the same way.
                 let named = |b: &Buffer| b.name.eq_ignore_ascii_case(&target)
                     || b.full_name.len() > target.len()
-                        && b.full_name.is_char_boundary(b.full_name.len() - target.len())
-                        && b.full_name[b.full_name.len() - target.len()..].eq_ignore_ascii_case(&target)
-                        && b.full_name[..b.full_name.len() - target.len()].ends_with(['.', '/']);
+                    && b.full_name.is_char_boundary(b.full_name.len() - target.len())
+                    && b.full_name[b.full_name.len() - target.len()..].eq_ignore_ascii_case(&target)
+                    && b.full_name[..b.full_name.len() - target.len()].ends_with(['.', '/']);
                 if let Some(found) = self.buffers.iter().find(|b| b.id.starts_with(&format!("{conn_prefix}/")) && named(b)) {
                     let id = found.id.clone();
                     self.select_buffer(id);
@@ -1176,7 +1154,7 @@ impl WeeChatApp {
             let mut nicks = Vec::new();
             self.extract_nicks(body, &mut nicks);
             if let Some(buffer) = self.buffer_by_id_mut(&full_buffer_id) {
-                buffer.nicks = Arc::new(nicks);
+                buffer.set_nicks(nicks);
             }
         }
     }
@@ -1337,7 +1315,7 @@ impl WeeChatApp {
         });
     }
 
-/// IRC, soju, ZNC and Injected buffers arrive one by one; each time, the
+    /// IRC, soju, ZNC and Injected buffers arrive one by one; each time, the
     /// connection's buffers take the order the user gave them, kept by `local_buffer_key`.
     fn apply_saved_order_for(&mut self, conn_prefix: &str) {
         if self.buffer_order.is_empty()
@@ -1353,7 +1331,7 @@ impl WeeChatApp {
         apply_buffer_order(&mut self.buffers[first..=last], &self.buffer_order, |b| crate::ui::app::local_buffer_key(conn_prefix, b));
     }
 
-        pub(crate) fn strip_ansi(text: &str) -> String {
+    pub(crate) fn strip_ansi(text: &str) -> String {
         ansi_re().replace_all(text, "").to_string()
     }
 
