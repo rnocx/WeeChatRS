@@ -329,6 +329,12 @@ impl BackendClient for WeeChatClient {
                         // When the buffer list is next asked for, and when it last was.
                         let mut list_due: Option<tokio::time::Instant> = None;
                         let mut last_list = tokio::time::Instant::now() - BUFFER_LIST_EVERY;
+                        // Watchdog for a connection that died without telling us (network
+                        // outage, wake from sleep). The wall clock keeps running while the
+                        // machine sleeps; tokio's and `Instant`'s monotonic clock does not.
+                        let mut watchdog = tokio::time::interval(Duration::from_secs(5));
+                        watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        let mut last_wall = std::time::SystemTime::now();
 
                         loop {
                             tokio::select! {
@@ -408,6 +414,28 @@ impl BackendClient for WeeChatClient {
                                     }
                                     lag_ping = Some(now);
                                     send!(BackendEvent::Lag { buffer_id: None, lag: Lag::Waiting(now) });
+                                }
+                                _ = watchdog.tick() => {
+                                    let now = std::time::SystemTime::now();
+                                    let slept = now.duration_since(last_wall)
+                                        .map_or(false, |d| d > Duration::from_secs(20));
+                                    last_wall = now;
+                                    // A ping nothing has answered, and nothing else has been
+                                    // received since: the peer is gone.
+                                    let ping_stuck = lag_ping.is_some_and(|sent| {
+                                        sent.elapsed() > Duration::from_secs(20) && last_received < sent
+                                    });
+                                    if slept || ping_stuck {
+                                        connected.store(false, Ordering::Relaxed);
+                                        // Error rather than Disconnected: the latter resets the
+                                        // selected buffer. Connected re-fetches the buffers.
+                                        send!(BackendEvent::Error(if slept {
+                                            "Connection lost (wake from sleep)".to_string()
+                                        } else {
+                                            "Connection lost (no reply to ping)".to_string()
+                                        }));
+                                        break;
+                                    }
                                 }
                                 _ = idle_check.tick() => {
                                     if last_received.elapsed() > Duration::from_secs(300) {
