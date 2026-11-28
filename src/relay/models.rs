@@ -89,6 +89,54 @@ pub struct Buffer {
     pub visit_start_marker_id: Option<String>,
 }
 
+/// Rank of a nick prefix: `~ & @ % +` first, plain users last. WeeChat puts the
+/// highest mode first in the prefix, so only the first non-blank char counts.
+fn nick_rank(prefix: &str) -> u8 {
+    match prefix.chars().find(|c| !c.is_whitespace()) {
+        Some('~') => 0,
+        Some('&') => 1,
+        Some('@') => 2,
+        Some('%') => 3,
+        Some('+') => 4,
+        _ => 5,
+    }
+}
+
+/// Nick list order: by rank, then case-insensitive name.
+fn nick_cmp(a: &Nick, b: &Nick) -> std::cmp::Ordering {
+    nick_rank(&a.prefix)
+        .cmp(&nick_rank(&b.prefix))
+        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+}
+
+impl Buffer {
+    /// Replace the whole nick list (sorted).
+    pub fn set_nicks(&mut self, mut nicks: Vec<Nick>) {
+        nicks.sort_by(nick_cmp);
+        self.nicks = Arc::new(nicks);
+    }
+
+    /// Insert or replace a nick, keeping the list sorted. Use this for every
+    /// incremental nick change so no caller has to sort.
+    pub fn upsert_nick(&mut self, nick: Nick) {
+        let nicks = Arc::make_mut(&mut self.nicks);
+        if let Some(i) = nicks.iter().position(|n| n.name == nick.name) {
+            nicks.remove(i);
+        }
+        let pos = nicks.partition_point(|n| nick_cmp(n, &nick).is_lt());
+        nicks.insert(pos, nick);
+    }
+
+    /// Insert a nick only if it isn't present yet. Returns whether it was added.
+    pub fn add_nick(&mut self, nick: Nick) -> bool {
+        if self.nicks.iter().any(|n| n.name == nick.name) {
+            return false;
+        }
+        self.upsert_nick(nick);
+        true
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Line {
